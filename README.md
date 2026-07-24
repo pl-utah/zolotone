@@ -26,7 +26,7 @@ computation directly while making the special-value behavior explicit:
 from zolotone import Cases, case, default, fp32
 
 
-def spec_FP32_IEEE_adder(x: "FP32", y: "FP32", ctx):
+def spec_fp32_add(x: "FP32", y: "FP32", ctx):
     nan_case = (
         x.is_nan
         | y.is_nan
@@ -51,7 +51,7 @@ one `default` as its final entry.
 
 This model says what the result means. It does not prescribe exponent
 alignment, significand formatting, rounding logic, or other implementation
-choices. Those belong in `FP32_IEEE_adder`, the implementation model, and are
+choices. Those belong in `fp32_add`, the implementation model, and are
 verified against this golden specification.
 
 ## Verification workflow

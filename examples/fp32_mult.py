@@ -2,7 +2,7 @@ from zolotone import *
 from .common import *
 from .encode_Float32 import *
 
-def spec_FP32_IEEE_mult(x: fp32, y: fp32, ctx):
+def spec_fp32_mult(x: fp32, y: fp32, ctx):
     invalid = (x.is_inf & y.is_zero) | (y.is_inf & x.is_zero)
     nan_case = x.is_nan | y.is_nan | invalid
     
@@ -26,8 +26,8 @@ def spec_FP32_IEEE_mult(x: fp32, y: fp32, ctx):
     )
 
 
-@Composite(name="FP32_IEEE_mult", spec=spec_FP32_IEEE_mult)
-def FP32_IEEE_mult(x: Node, y: Node) -> Node:
+@Composite(name="fp32_mult", spec=spec_fp32_mult)
+def fp32_mult(x: Node, y: Node) -> Node:
     x_s, x_e, x_m, x_norm, x_sub, x_zero, x_inf, x_nan = fp32_decode(x)
     y_s, y_e, y_m, y_norm, y_sub, y_zero, y_inf, y_nan = fp32_decode(y)
     
@@ -98,7 +98,7 @@ def FP32_IEEE_mult(x: Node, y: Node) -> Node:
 
 if __name__ == '__main__':
     from pprint import pprint
-    multiplier = FP32_IEEE_mult(
+    multiplier = fp32_mult(
         Var(name="a", sign=Float32T()),
         Var(name="b", sign=Float32T()),
     )

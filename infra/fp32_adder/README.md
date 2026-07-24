@@ -1,6 +1,6 @@
 # Synopsys FP32 Adder Export
 
-This directory is generated from `examples/FP32_IEEE_adder.py`.
+This directory is generated from `examples/fp32_add.py`.
 
 Files:
 - `fp32_adder_dut.hpp`: lowered C++ version of the current AST design

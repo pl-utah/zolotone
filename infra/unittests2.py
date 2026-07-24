@@ -28,8 +28,8 @@ from zolotone.rival import (
 )
 from zolotone.spec.spec_context import simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
-from examples.FP32_IEEE_adder import FP32_IEEE_adder
-from examples.FP32_IEEE_mult import FP32_IEEE_mult
+from examples.fp32_add import fp32_add
+from examples.fp32_mult import fp32_mult
 from examples.common import xor_spec
 from examples.conventional import Conventional
 from examples.optimized import Optimized
@@ -136,7 +136,7 @@ class TestConstantFolding(unittest.TestCase):
     def test_fp32_multiplier_special_cases(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_mult(x, y)
+        design = fp32_mult(x, y)
 
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
@@ -166,7 +166,7 @@ class TestConstantFolding(unittest.TestCase):
     def test_fp32_multiplier_zero_handling(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_mult(x, y)
+        design = fp32_mult(x, y)
 
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
@@ -1280,7 +1280,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(design.evaluate(), expected)
 
     def test_fp32_multiplier_spec_zero_handling(self):
-        from examples.FP32_IEEE_mult import spec_FP32_IEEE_mult
+        from examples.fp32_mult import spec_fp32_mult
 
         cases = (
             ("+0 * +0", 0x00000000, 0x00000000, "is_pzero"),
@@ -1300,7 +1300,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         for name, lhs_bits, rhs_bits, predicate in cases:
             with self.subTest(name=name):
                 ctx = SpecContext(f"fp32-mult-{name}")
-                result = spec_FP32_IEEE_mult(
+                result = spec_fp32_mult(
                     Float32(lhs_bits).to_spec(ctx),
                     Float32(rhs_bits).to_spec(ctx),
                     ctx,
@@ -1314,7 +1314,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_multiplier_spec_preserves_underflow_zero_sign(self):
-        from examples.FP32_IEEE_mult import spec_FP32_IEEE_mult
+        from examples.fp32_mult import spec_fp32_mult
 
         cases = (
             ("positive half-minimum tie", 0x00000001, 0x3f000000, "is_pzero"),
@@ -1326,7 +1326,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         for name, lhs_bits, rhs_bits, predicate in cases:
             with self.subTest(name=name):
                 ctx = SpecContext(f"fp32-mult-{name}")
-                result = spec_FP32_IEEE_mult(
+                result = spec_fp32_mult(
                     Float32(lhs_bits).to_spec(ctx),
                     Float32(rhs_bits).to_spec(ctx),
                     ctx,
@@ -1340,7 +1340,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_adder_spec_preserves_single_infinity(self):
-        from examples.FP32_IEEE_adder import spec_FP32_IEEE_adder
+        from examples.fp32_add import spec_fp32_add
 
         cases = (
             (fp32.inf(), fp32.zero(), fp32.inf()),
@@ -1352,7 +1352,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         for lhs, rhs, expected in cases:
             with self.subTest(lhs=lhs, rhs=rhs):
                 ctx = SpecContext("fp32-adder-single-infinity")
-                result = spec_FP32_IEEE_adder(lhs, rhs, ctx)
+                result = spec_fp32_add(lhs, rhs, ctx)
                 self.assertEqual(result.constant_fold(), expected)
 
     def test_constant_fold_partially_rebuilds_symbolic_real_expr(self):
@@ -1560,6 +1560,79 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             schedule=[{"tool": "simplify"}],
         )
         self.assertEqual(status, "unsat")
+
+
+class TestBFloat16Spec(unittest.TestCase):
+    def test_bf16_format_and_explicit_non_finite_constructors(self):
+        self.assertEqual(bf16.exponent_bits, 8)
+        self.assertEqual(bf16.mantissa_bits, 7)
+        self.assertEqual(bf16.exponent_bias, 127)
+
+        cases = (
+            (bf16.nan(), "is_nan"),
+            (bf16.inf(), "is_pinf"),
+            (bf16.ninf(), "is_ninf"),
+            (bf16.zero(), "is_pzero"),
+            (bf16.nzero(), "is_nzero"),
+        )
+        for value, predicate in cases:
+            with self.subTest(predicate=predicate):
+                self.assertEqual(
+                    getattr(value, predicate).constant_fold(),
+                    BoolLit(True),
+                )
+
+    def test_bf16_encode_classifies_representative_values(self):
+        greatest_normal = (2 - 2 ** -bf16.mantissa_bits) * 2 ** 127
+        cases = (
+            ("positive-zero", 0.0, "is_pzero"),
+            ("negative-underflow", -(2 ** -134), "is_nzero"),
+            ("smallest-subnormal", 2 ** -133, "is_sub"),
+            ("smallest-normal", 2 ** -126, "is_norm"),
+            ("greatest-normal", greatest_normal, "is_norm"),
+            ("positive-overflow", 4e38, "is_pinf"),
+            ("negative-overflow", -4e38, "is_ninf"),
+        )
+
+        for name, real_value, predicate in cases:
+            with self.subTest(value=name):
+                ctx = SpecContext(f"bf16-encode-{name}")
+                encoded = bf16.encode(RealLit(real_value), ctx)
+                ctx.check(getattr(encoded, predicate))
+
+                report = simplify_ctx(ctx)
+                if report["status"] == "unknown":
+                    report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+
+                self.assertEqual(report["status"], "unsat", report)
+
+    def test_bf16_known_classification_exposes_only_observable_fields(self):
+        value = bf16(
+            value=RealVar("value"),
+            sign=RealVar("sign"),
+            exponent=RealVar("exponent"),
+            mantissa=RealVar("mantissa"),
+            is_norm=BoolVar("is_norm"),
+            is_sub=BoolVar("is_sub"),
+            is_zero=BoolVar("is_zero"),
+            is_inf=BoolVar("is_inf"),
+            is_nan=BoolVar("is_nan"),
+        )
+
+        self.assertEqual(value.observables_for_classification("norm"), (value.value,))
+        self.assertEqual(value.observables_for_classification("sub"), (value.value,))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("inf"), (value.sign,))
+        self.assertEqual(
+            value.observables_for_classification("nan"),
+            (BoolLit(True),),
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown bf16 classification"):
+            value.observables_for_classification("finite")
+
+    def test_bf16_encode_requires_real_expression(self):
+        with self.assertRaisesRegex(TypeError, "bf16.encode value must be RealExpr"):
+            bf16.encode(1.0, SpecContext("bf16-invalid-encode"))
 
 
 class TestRivalTranslation(unittest.TestCase):
@@ -2300,7 +2373,7 @@ class TestSolverApis(unittest.TestCase):
         self.assertEqual(result["proof_traces"][-1][-1]["status"], "sat")
 
     def test_fp32_multiplier_check_spec_proves_zero_input_cases(self):
-        multiplier = FP32_IEEE_mult(
+        multiplier = fp32_mult(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
@@ -2360,7 +2433,7 @@ class TestSolverApis(unittest.TestCase):
         )
 
     def test_fp32_adder_norm_inf_inf_inf_is_trimmed_before_egglog(self):
-        adder = FP32_IEEE_adder(
+        adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
@@ -2369,7 +2442,7 @@ class TestSolverApis(unittest.TestCase):
         inputs = [ctx.spec_of(arg) for arg in adder.inner_args]
         spec_outer = adder.spec(*inputs, ctx=ctx)
         target_name = (
-            "FP32_IEEE_adder["
+            "fp32_add["
             "arg0=norm,arg1=inf,inner_spec=inf,outer_spec=inf]"
         )
         case = next(
@@ -2394,7 +2467,7 @@ class TestSolverApis(unittest.TestCase):
 
 
     def test_fp32_adder_inf_inf_norm_side_case_uses_only_real_and_bool_exprs(self):
-        adder = FP32_IEEE_adder(
+        adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
@@ -2425,7 +2498,7 @@ class TestSolverApis(unittest.TestCase):
         self.assertTrue(all(uses_only_supported_exprs(expr) for expr in simplified.assumes))
 
     def test_fp32_adder_inf_inf_cannot_have_normal_outer_spec(self):
-        adder = FP32_IEEE_adder(
+        adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
@@ -2552,11 +2625,11 @@ class TestSolverApis(unittest.TestCase):
         self.assertIn("Unknown schedule tool rival_feasibility_check", str(raised.exception))
 
     def test_fp32_adder_norm_norm_proves_with_egglog(self):
-        adder = FP32_IEEE_adder(
+        adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
-        target_name = "FP32_IEEE_adder[arg0=norm,arg1=norm,inner_spec=norm,outer_spec=norm]"
+        target_name = "fp32_add[arg0=norm,arg1=norm,inner_spec=norm,outer_spec=norm]"
         split_classification_cases = ast_nodes._split_classification_cases
 
         def select_norm_norm_case(*args, **kwargs):

@@ -12,7 +12,7 @@ from .encode_Float32 import *
 
 
 # Non-bit-precise concept specification of a single-precision IEEE adder.
-def spec_FP32_IEEE_adder(x: fp32, y: fp32, ctx):
+def spec_fp32_add(x: fp32, y: fp32, ctx):
     nan_case = (
         x.is_nan
         | y.is_nan
@@ -33,8 +33,8 @@ def spec_FP32_IEEE_adder(x: fp32, y: fp32, ctx):
 
 
 # Implementation of a single-precision IEEE adder.
-@Composite(name="FP32_IEEE_adder", spec=spec_FP32_IEEE_adder)
-def FP32_IEEE_adder(x: Node, y: Node) -> Node:
+@Composite(name="fp32_add", spec=spec_fp32_add)
+def fp32_add(x: Node, y: Node) -> Node:
     # 1. Decode both packed FP32 inputs into sign, exponent, mantissa, and flags.
     (
         x_sign,
@@ -158,7 +158,7 @@ def FP32_IEEE_adder(x: Node, y: Node) -> Node:
 
 
 if __name__ == '__main__':
-    adder = FP32_IEEE_adder(
+    adder = fp32_add(
         Var(name="a", sign=Float32T()),
         Var(name="b", sign=Float32T()),
     )
