@@ -1,3 +1,3 @@
 from .spec_ast import *
-from .spec_context import SpecContext, simplify_ctx
+from .spec_context import MalformedSpecification, SpecContext, simplify_ctx
 from .custom_specs import bf16, fp32, sign_multiplier

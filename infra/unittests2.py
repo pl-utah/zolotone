@@ -2,6 +2,8 @@ import unittest
 import contextlib
 import os
 import pickle
+import random
+import struct
 import sys
 import time
 from unittest.mock import Mock, patch
@@ -30,6 +32,7 @@ from zolotone.spec.spec_context import simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
+from examples.bf16_add import bf16_add
 from examples.common import xor_spec
 from examples.conventional import Conventional
 from examples.optimized import Optimized
@@ -1127,11 +1130,13 @@ class TestSpecAstConstantFolding(unittest.TestCase):
     def test_cases_lower_to_ordered_nested_ifs(self):
         first = BoolVar("first")
         second = BoolVar("second")
+        ctx = SpecContext("ordered-cases")
 
         expr = Cases(
             case(first, RealLit(1)),
             case(second, RealLit(2)),
-            default(RealLit(3)),
+            case(BoolLit(True), RealLit(3)),
+            ctx=ctx,
         )
 
         self.assertEqual(
@@ -1140,19 +1145,21 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         )
 
     def test_cases_select_the_first_matching_case(self):
+        ctx = SpecContext("first-matching-case")
         expr = Cases(
             case(BoolLit(True), RealLit(1)),
             case(BoolLit(True), RealLit(2)),
-            default(RealLit(3)),
+            ctx=ctx,
         )
 
         self.assertEqual(expr.constant_fold(), RealLit(1))
 
     def test_cases_support_fp_values(self):
+        ctx = SpecContext("fp-cases")
         expr = Cases(
             case(BoolLit(False), fp32.nan()),
             case(BoolLit(True), fp32.ninf()),
-            default(fp32.inf()),
+            ctx=ctx,
         )
 
         self.assertIsInstance(expr, fp32)
@@ -1162,10 +1169,12 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         condition = BoolVar("condition")
         on_true = BoolVar("on_true")
         on_false = BoolVar("on_false")
+        ctx = SpecContext("bool-cases")
 
         expr = Cases(
             case(condition, on_true),
-            default(on_false),
+            case(~condition, on_false),
+            ctx=ctx,
         )
 
         self.assertIsInstance(expr, BoolExpr)
@@ -1174,40 +1183,84 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             (condition & on_true) | ((~condition) & on_false),
         )
 
-    def test_cases_allow_only_a_default(self):
-        fallback = RealVar("fallback")
-
-        self.assertIs(Cases(default(fallback)), fallback)
-
-    def test_cases_require_exactly_one_final_default(self):
+    def test_cases_require_at_least_one_case_and_a_context(self):
         condition = BoolVar("condition")
         value = RealLit(1)
+        ctx = SpecContext("invalid-cases")
 
-        with self.assertRaisesRegex(ValueError, "requires a default"):
-            Cases()
-        with self.assertRaisesRegex(ValueError, "requires a default"):
+        with self.assertRaisesRegex(ValueError, "at least one case"):
+            Cases(ctx=ctx)
+        with self.assertRaisesRegex(TypeError, "missing.*ctx"):
             Cases(case(condition, value))
-        with self.assertRaisesRegex(ValueError, "exactly one default"):
-            Cases(default(value), default(value))
-        with self.assertRaisesRegex(ValueError, "final entry"):
-            Cases(default(value), case(condition, value))
 
     def test_cases_validate_entries_conditions_and_values(self):
-        with self.assertRaisesRegex(TypeError, "created by case.*or default"):
-            Cases([default(RealLit(1))])
-        with self.assertRaisesRegex(TypeError, "created by case.*or default"):
-            Cases(object())
+        ctx = SpecContext("invalid-case-entries")
+
+        with self.assertRaisesRegex(TypeError, "created by case"):
+            Cases([case(BoolLit(True), RealLit(1))], ctx=ctx)
+        with self.assertRaisesRegex(TypeError, "created by case"):
+            Cases(object(), ctx=ctx)
         with self.assertRaisesRegex(TypeError, "Expected BoolExpr"):
             case(RealLit(1), RealLit(2))
         with self.assertRaisesRegex(TypeError, "Cases values"):
-            default(object())
+            case(BoolLit(True), object())
 
     def test_cases_reject_mismatched_branch_types(self):
+        condition = BoolVar("condition")
+        ctx = SpecContext("mismatched-case-types")
+
         with self.assertRaisesRegex(TypeError, "If branches"):
             Cases(
-                case(BoolVar("condition"), fp32.nan()),
-                default(RealLit(0)),
+                case(condition, fp32.nan()),
+                case(~condition, RealLit(0)),
+                ctx=ctx,
             )
+
+    def test_cases_validate_exhaustive_coverage(self):
+        ctx = SpecContext("exhaustive-cases")
+        condition = ctx.bool("condition")
+
+        Cases(
+            case(condition, RealLit(1)),
+            case(~condition, RealLit(2)),
+            ctx=ctx,
+        )
+
+        ctx.validate_requirements(timeout_ms=1000)
+
+    def test_cases_reject_incomplete_coverage(self):
+        ctx = SpecContext("incomplete-cases")
+        condition = ctx.bool("condition")
+
+        Cases(
+            case(condition, RealLit(1)),
+            ctx=ctx,
+        )
+
+        with self.assertRaisesRegex(
+            MalformedSpecification,
+            "Could not prove specification requirements",
+        ):
+            ctx.validate_requirements(timeout_ms=1000)
+
+    def test_cases_reject_unknown_coverage(self):
+        ctx = SpecContext("unknown-case-coverage")
+        Cases(
+            case(BoolLit(True), RealLit(1)),
+            ctx=ctx,
+        )
+
+        with (
+            patch(
+                "zolotone.smt.z3_check_eq",
+                return_value={
+                    "status": "unknown",
+                    "supplementary_info": "timeout",
+                },
+            ),
+            self.assertRaisesRegex(MalformedSpecification, "solver returned unknown"),
+        ):
+            ctx.validate_requirements(timeout_ms=1000)
 
     def test_fp32_encoder_spec_canonicalizes_exact_zero(self):
         from examples.encode_Float32 import fp32_encode_spec
@@ -1353,7 +1406,31 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             with self.subTest(lhs=lhs, rhs=rhs):
                 ctx = SpecContext("fp32-adder-single-infinity")
                 result = spec_fp32_add(lhs, rhs, ctx)
+                ctx.validate_requirements(timeout_ms=1000)
                 self.assertEqual(result.constant_fold(), expected)
+
+    def test_fp32_adder_cases_reject_missing_nan_branch(self):
+        ctx = SpecContext("fp32-adder-missing-nan-case")
+        x = fp32.inf()
+        y = fp32.ninf()
+        nan_case = (
+            x.is_nan
+            | y.is_nan
+            | (x.is_pinf & y.is_ninf)
+            | (x.is_ninf & y.is_pinf)
+        )
+        neg_inf_case = (x.is_ninf | y.is_ninf) & (~nan_case)
+        pos_inf_case = (x.is_pinf | y.is_pinf) & (~nan_case)
+
+        Cases(
+            case(neg_inf_case, fp32.ninf()),
+            case(pos_inf_case, fp32.inf()),
+            case(x.is_finite & y.is_finite, fp32.zero()),
+            ctx=ctx,
+        )
+
+        with self.assertRaises(MalformedSpecification):
+            ctx.validate_requirements(timeout_ms=1000)
 
     def test_constant_fold_partially_rebuilds_symbolic_real_expr(self):
         x = RealVar("x")
@@ -1633,6 +1710,111 @@ class TestBFloat16Spec(unittest.TestCase):
     def test_bf16_encode_requires_real_expression(self):
         with self.assertRaisesRegex(TypeError, "bf16.encode value must be RealExpr"):
             bf16.encode(1.0, SpecContext("bf16-invalid-encode"))
+
+
+class TestBFloat16Add(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(lhs: BFloat16, rhs: BFloat16) -> int:
+        result = lhs.to_val() + rhs.to_val()
+        if math.isnan(result):
+            return BFloat16.NaN().val
+        if math.isinf(result):
+            return BFloat16.nInf().val if result < 0 else BFloat16.Inf().val
+
+        try:
+            fp32_bits = struct.unpack(">I", struct.pack(">f", result))[0]
+        except OverflowError:
+            return BFloat16.nInf().val if result < 0 else BFloat16.Inf().val
+
+        rounding_bias = 0x7FFF + ((fp32_bits >> 16) & 1)
+        return ((fp32_bits + rounding_bias) >> 16) & 0xFFFF
+
+    def _make_design(self):
+        lhs = Var(name="lhs", sign=BFloat16T())
+        rhs = Var(name="rhs", sign=BFloat16T())
+        return lhs, rhs, bf16_add(lhs, rhs)
+
+    def test_bf16_add_handles_rounding_subnormals_and_special_values(self):
+        one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)
+        negative_one = BFloat16.from_fields(sign=1, exponent=127, mantissa=0)
+        half_ulp_at_one = BFloat16.from_fields(sign=0, exponent=119, mantissa=0)
+        smallest_subnormal = BFloat16.from_fields(sign=0, exponent=0, mantissa=1)
+        max_finite = BFloat16.from_fields(sign=0, exponent=254, mantissa=127)
+
+        cases = (
+            ("one-plus-one", one, one, BFloat16.from_fields(0, 0, 128)),
+            ("cancellation", one, negative_one, BFloat16.Zero()),
+            ("ties-to-even", one, half_ulp_at_one, one),
+            (
+                "subnormal-add",
+                smallest_subnormal,
+                smallest_subnormal,
+                BFloat16.from_fields(0, 2, 0),
+            ),
+            ("overflow", max_finite, max_finite, BFloat16.Inf()),
+            ("positive-infinity", BFloat16.Inf(), one, BFloat16.Inf()),
+            ("negative-infinity", BFloat16.nInf(), one, BFloat16.nInf()),
+            (
+                "opposite-infinities",
+                BFloat16.Inf(),
+                BFloat16.nInf(),
+                BFloat16.NaN(),
+            ),
+            ("nan", BFloat16.NaN(), one, BFloat16.NaN()),
+            ("negative-zero", BFloat16.nZero(), BFloat16.nZero(), BFloat16.nZero()),
+        )
+
+        lhs, rhs, design = self._make_design()
+        for name, lhs_value, rhs_value, expected in cases:
+            with self.subTest(case=name):
+                lhs.load_val(lhs_value)
+                rhs.load_val(rhs_value)
+                actual = design.evaluate()
+                if math.isnan(expected.to_val()):
+                    self.assertTrue(math.isnan(actual.to_val()))
+                else:
+                    self.assertEqual(actual, expected)
+
+    def test_bf16_add_matches_rne_reference_for_random_finite_inputs(self):
+        lhs, rhs, design = self._make_design()
+        rng = random.Random(0)
+
+        for _ in range(500):
+            lhs_value = BFloat16.from_fields(
+                sign=rng.getrandbits(1),
+                exponent=rng.randrange(BFloat16.inf_code),
+                mantissa=rng.getrandbits(BFloat16.mantissa_bits),
+            )
+            rhs_value = BFloat16.from_fields(
+                sign=rng.getrandbits(1),
+                exponent=rng.randrange(BFloat16.inf_code),
+                mantissa=rng.getrandbits(BFloat16.mantissa_bits),
+            )
+            lhs.load_val(lhs_value)
+            rhs.load_val(rhs_value)
+
+            with self.subTest(lhs=lhs_value.val, rhs=rhs_value.val):
+                self.assertEqual(
+                    design.evaluate().val,
+                    self._reference_bits(lhs_value, rhs_value),
+                )
+
+    def test_bf16_add_jit_matches_python_evaluation(self):
+        lhs, rhs, design = self._make_design()
+        tempdir, compiled = jit_compile(design)
+        rng = random.Random(1)
+        try:
+            for _ in range(100):
+                lhs_bits = rng.getrandbits(16)
+                rhs_bits = rng.getrandbits(16)
+                lhs.load_val(BFloat16(lhs_bits))
+                rhs.load_val(BFloat16(rhs_bits))
+                self.assertEqual(
+                    compiled(lhs_bits, rhs_bits),
+                    design.evaluate().val,
+                )
+        finally:
+            tempdir.cleanup()
 
 
 class TestRivalTranslation(unittest.TestCase):
@@ -2109,6 +2291,21 @@ class TestRivalTranslation(unittest.TestCase):
         self.assertEqual(trimmed.checks, [check])
 
 class TestSpecificationDeterminism(unittest.TestCase):
+    def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):
+        def malformed_spec(x, ctx):
+            return Cases(
+                case(BoolLit(False), x),
+                ctx=ctx,
+            )
+
+        @Composite(name="non_exhaustive_cases", spec=malformed_spec)
+        def non_exhaustive_cases(x):
+            return x
+
+        node = non_exhaustive_cases(Var(name="x", sign=UQT(2, 0)))
+        with self.assertRaises(MalformedSpecification):
+            node.check_spec(schedule=[{"tool": "simplify"}])
+
     def test_deterministic_primitive_uses_same_inputs_for_both_spec_runs(self):
         seen_inputs = []
 

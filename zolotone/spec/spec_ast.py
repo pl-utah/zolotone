@@ -614,44 +614,34 @@ class _CaseEntry:
     value: _CaseValue
 
 
-@dataclass(frozen=True)
-class _DefaultEntry:
-    value: _CaseValue
-
-
 def case(condition: BoolExpr, value: _CaseValue) -> _CaseEntry:
     """Create an ordered conditional entry for :func:`Cases`."""
     BoolExpr._coerce_bool_expr(condition)
     return _CaseEntry(condition, _coerce_case_value(value))
 
 
-def default(value: _CaseValue) -> _DefaultEntry:
-    """Create the required fallback entry for :func:`Cases`."""
-    return _DefaultEntry(_coerce_case_value(value))
-
-
-def Cases(*entries: _CaseEntry | _DefaultEntry) -> _CaseValue:
-    """Lower ordered cases with a final default to nested ``If`` expressions."""
+def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
+    """Lower ordered, exhaustive cases to nested ``If`` expressions."""
     for entry in entries:
-        if not isinstance(entry, (_CaseEntry, _DefaultEntry)):
+        if not isinstance(entry, _CaseEntry):
             raise TypeError(
-                "Cases entries must be created by case() or default(), got "
+                "Cases entries must be created by case(), got "
                 f"{type(entry).__name__}"
             )
 
-    default_positions = [
-        idx for idx, entry in enumerate(entries) if isinstance(entry, _DefaultEntry)
-    ]
-    if not default_positions:
-        raise ValueError("Cases requires a default() entry")
-    if len(default_positions) != 1:
-        raise ValueError("Cases requires exactly one default() entry")
-    if default_positions[0] != len(entries) - 1:
-        raise ValueError("Cases requires default() to be the final entry")
+    if not entries:
+        raise ValueError("Cases requires at least one case() entry")
+    if not hasattr(ctx, "require"):
+        raise TypeError("Cases ctx must be a SpecContext")
+
+    coverage = entries[0].condition
+    for entry in entries[1:]:
+        coverage = coverage | entry.condition
 
     result = entries[-1].value
     for entry in reversed(entries[:-1]):
         result = If(entry.condition, entry.value, result)
+    ctx.require(coverage)
     return result
 
 

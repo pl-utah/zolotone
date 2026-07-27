@@ -254,6 +254,9 @@ def check_equivalence(
     combined_ctx = base_ctx.copy()
     first_output = first.collect(combined_ctx)
     second_output = second.collect(combined_ctx)
+    
+    combined_ctx.validate_requirements()
+    
     output_names = (first.name, second.name)
     cases = _split_classification_cases(
         combined_ctx,

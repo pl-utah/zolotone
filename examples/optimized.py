@@ -59,15 +59,13 @@ def Optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     
     E_lead, E_trail = [0] * N, [0] * N
     
-    S_a[0], M_a[0], E_a[0] = bf16_decode(a0)
-    S_a[1], M_a[1], E_a[1] = bf16_decode(a1)
-    S_a[2], M_a[2], E_a[2] = bf16_decode(a2)
-    S_a[3], M_a[3], E_a[3] = bf16_decode(a3)
-    
-    S_b[0], M_b[0], E_b[0] = bf16_decode(b0)
-    S_b[1], M_b[1], E_b[1] = bf16_decode(b1)
-    S_b[2], M_b[2], E_b[2] = bf16_decode(b2)
-    S_b[3], M_b[3], E_b[3] = bf16_decode(b3)
+    for idx, value in enumerate((a0, a1, a2, a3)):
+        decoded = bf16_decode(value)
+        S_a[idx], E_a[idx], M_a[idx] = decoded[0], decoded[1], decoded[2]
+
+    for idx, value in enumerate((b0, b1, b2, b3)):
+        decoded = bf16_decode(value)
+        S_b[idx], E_b[idx], M_b[idx] = decoded[0], decoded[1], decoded[2]
     
     ############ CONSTANTS #############
     

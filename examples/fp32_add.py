@@ -28,7 +28,11 @@ def spec_fp32_add(x: fp32, y: fp32, ctx):
         case(neg_inf_case, fp32.ninf()),
         case(pos_inf_case, fp32.inf()),
         case(neg_zero_case, fp32.nzero()),
-        default(fp32.encode(value=x.value + y.value, ctx=ctx)),
+        case(
+            x.is_finite & y.is_finite,
+            fp32.encode(value=x.value + y.value, ctx=ctx),
+        ),
+        ctx=ctx,
     )
 
 
@@ -162,7 +166,7 @@ if __name__ == '__main__':
         Var(name="a", sign=Float32T()),
         Var(name="b", sign=Float32T()),
     )
-
+    adder.check_determinism()
     adder.check_spec()
 
     with open("examples/adder_jit.hpp", "w") as file:
