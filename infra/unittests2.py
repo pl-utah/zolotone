@@ -1718,12 +1718,25 @@ class TestBFloat16Spec(unittest.TestCase):
 
     def test_bf16_encode_classifies_representative_values(self):
         greatest_normal = (2 - 2 ** -bf16.mantissa_bits) * 2 ** 127
+        overflow_midpoint = greatest_normal + 2 ** 119
         cases = (
             ("positive-zero", 0.0, "is_pzero"),
             ("negative-underflow", -(2 ** -134), "is_nzero"),
             ("smallest-subnormal", 2 ** -133, "is_sub"),
             ("smallest-normal", 2 ** -126, "is_norm"),
             ("greatest-normal", greatest_normal, "is_norm"),
+            (
+                "below-positive-overflow-midpoint",
+                greatest_normal + 2 ** 118,
+                "is_norm",
+            ),
+            (
+                "below-negative-overflow-midpoint",
+                -(greatest_normal + 2 ** 118),
+                "is_norm",
+            ),
+            ("positive-overflow-midpoint", overflow_midpoint, "is_pinf"),
+            ("negative-overflow-midpoint", -overflow_midpoint, "is_ninf"),
             ("positive-overflow", 4e38, "is_pinf"),
             ("negative-overflow", -4e38, "is_ninf"),
         )

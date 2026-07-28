@@ -129,9 +129,20 @@ class bf16(FPExpr):
         exponent_bias = ctx.real_val(cls.exponent_bias)
 
         smallest_normal = two ** (one - exponent_bias)
+        greatest_normal_exponent = (
+            two ** exponent_bits - two - exponent_bias
+        )
         greatest_normal = (
             (two - two ** (-mantissa_bits))
-            * two ** (two ** exponent_bits - two - exponent_bias)
+            * two ** greatest_normal_exponent
+        )
+        overflow_rounding_boundary = (
+            greatest_normal
+            + two ** (
+                greatest_normal_exponent
+                - mantissa_bits
+                - one
+            )
         )
         smallest_subnormal = two ** (one - exponent_bias - mantissa_bits)
         zero_rounding_boundary = smallest_subnormal * (two ** ctx.real_val(-1))
@@ -153,10 +164,12 @@ class bf16(FPExpr):
         ctx.assume(
             out.is_norm.eq(
                 (magnitude >= smallest_normal)
-                & (magnitude <= greatest_normal)
+                & (magnitude < overflow_rounding_boundary)
             )
         )
-        ctx.assume(out.is_inf.eq(magnitude > greatest_normal))
+        # The maximum finite significand is odd, so a value exactly halfway
+        # to the next exponent ties to the even infinity encoding under RNE.
+        ctx.assume(out.is_inf.eq(magnitude >= overflow_rounding_boundary))
         ctx.assume(out.is_nan.eq(ctx.false()))
 
         ctx.assume(_implies(out.is_norm | out.is_sub, out.value.eq(value)))

@@ -29,7 +29,6 @@ def spec_fp32_add(x: fp32, y: fp32, ctx):
         case(pos_inf_case, fp32.inf(ctx)),
         case(neg_zero_case, fp32.nzero(ctx)),
         case(x.is_finite & y.is_finite, fp32.encode(value=x.value + y.value, ctx=ctx)),
-        # case(nan_case, fp32.encode(value=x.value + y.value, ctx=ctx)),
         ctx=ctx,
     )
 

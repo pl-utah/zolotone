@@ -211,7 +211,6 @@ def _output_classifications_match(
 def _infeasible_case_is_proved(
     first: _Spec,
     second: _Spec,
-    *,
     base_ctx: SpecContext,
     inputs: list[tp.Any],
     labels: dict[str, str],
