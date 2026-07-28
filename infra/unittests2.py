@@ -1107,6 +1107,11 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
         self.assertEqual(expr.constant_fold(), BoolLit(False))
 
+    def test_constant_fold_cancels_identical_subtraction(self):
+        x = RealVar("x")
+
+        self.assertEqual((x - x).constant_fold(), RealLit(0))
+
     def test_constant_fold_keeps_symbolic_if_shape(self):
         expr = If(BoolLit(True), RealVar("x"), RealVar("y"))
 
@@ -2468,6 +2473,45 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(trimmed.assumes, [bit_domain])
         self.assertEqual(trimmed.checks, [check])
+
+    def test_rival_trim_context_rewrites_extrema_from_assumption_bounds(self):
+        ctx = SpecContext("rival-trim-bounded-extrema")
+        x = ctx.real("x")
+        one = ctx.real_val(1)
+        ctx.assume(x >= one)
+        ctx.check(x.max(one).eq(x))
+        ctx.check(one.max(x).eq(x))
+        ctx.check(x.min(one).eq(one))
+        ctx.check(one.min(x).eq(one))
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [x >= one])
+        self.assertEqual(trimmed.checks, [])
+
+    def test_rival_trim_context_requires_bound_in_every_disjunct(self):
+        ctx = SpecContext("rival-trim-disjunctive-bounds")
+        x = ctx.real("x")
+        one = ctx.real_val(1)
+        ctx.assume((x >= one) | (x <= -one))
+        unresolved = x.max(one).eq(x)
+        ctx.check(unresolved)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [unresolved])
+
+    def test_rival_trim_context_uses_bound_shared_by_every_disjunct(self):
+        ctx = SpecContext("rival-trim-shared-disjunctive-bound")
+        x = ctx.real("x")
+        one = ctx.real_val(1)
+        two = ctx.real_val(2)
+        ctx.assume((x >= one) | (x >= two))
+        ctx.check(x.max(one).eq(x))
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [])
 
 class TestSpecificationDeterminism(unittest.TestCase):
     def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):

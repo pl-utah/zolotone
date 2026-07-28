@@ -137,15 +137,101 @@ def rival_feasibility_check(ctx: "SpecContext", max_depth: int = 1, checks=False
     return "unknown" if may_be_feasible else "not feasible"
 
 
-# Drop expressions that are certainly true. Assumptions must hold without
-# relying on themselves; checks may use a conservative rectangular enclosure
-# of the assumption domain.
+def _rect_hull_bounds(
+    rects: Sequence[Sequence[tuple[float, float]]],
+    free_vars: Sequence[str],
+) -> dict[str, tuple[float, float]]:
+    if not rects:
+        return {}
+    return {
+        name: (
+            min(rect[index][0] for rect in rects),
+            max(rect[index][1] for rect in rects),
+        )
+        for index, name in enumerate(free_vars)
+    }
+
+
+def _rewrite_bounded_extrema(
+    node: SpecNode,
+    bounds: dict[str, tuple[float, float]],
+) -> SpecNode:
+    old_children = children(node)
+    new_children = tuple(
+        _rewrite_bounded_extrema(child, bounds)
+        for child in old_children
+    )
+    if all(old is new for old, new in zip(old_children, new_children)):
+        rewritten = node
+    else:
+        rewritten = type(node)(*new_children)
+
+    if not isinstance(rewritten, (Max, Min)):
+        return rewritten
+
+    variable: RealVar
+    literal: RealLit
+    if isinstance(rewritten.lhs, RealVar) and isinstance(rewritten.rhs, RealLit):
+        variable = rewritten.lhs
+        literal = rewritten.rhs
+    elif isinstance(rewritten.lhs, RealLit) and isinstance(rewritten.rhs, RealVar):
+        variable = rewritten.rhs
+        literal = rewritten.lhs
+    else:
+        return rewritten
+
+    variable_bounds = bounds.get(variable.name)
+    literal_bounds = _rival_literal_enclosure(literal)
+    if variable_bounds is None or literal_bounds is None:
+        return rewritten
+
+    variable_lower, variable_upper = variable_bounds
+    literal_lower, literal_upper = literal_bounds
+    variable_is_above = variable_lower >= literal_upper
+    variable_is_below = variable_upper <= literal_lower
+
+    if isinstance(rewritten, Max):
+        if variable_is_above:
+            return variable
+        if variable_is_below:
+            return literal
+    else:
+        if variable_is_above:
+            return literal
+        if variable_is_below:
+            return variable
+
+    return rewritten
+
+
+# First rewrite extrema only when every assumption rectangle selects the same
+# branch. Then drop expressions that are certainly true. Assumptions must hold
+# without relying on themselves; checks may use a conservative rectangular
+# enclosure of the assumption domain.
 def rival_trim_context(ctx: "SpecContext") -> "SpecContext":
-    exprs = ctx.assumes + ctx.checks
+    original_exprs = ctx.assumes + ctx.checks
+    original_free_vars = collect_free_vars(original_exprs)
+    assumption_rects = get_rival_rects(
+        ctx.assumes,
+        original_free_vars,
+    )
+    bounds = _rect_hull_bounds(assumption_rects, original_free_vars)
+    rewritten_ctx = ctx.copy(
+        assumes=[
+            _rewrite_bounded_extrema(assume, bounds).constant_fold()
+            for assume in ctx.assumes
+        ],
+        checks=[
+            _rewrite_bounded_extrema(check, bounds).constant_fold()
+            for check in ctx.checks
+        ],
+    )
+
+    exprs = rewritten_ctx.assumes + rewritten_ctx.checks
     free_vars = collect_free_vars(exprs)
     unbounded_rects = [_rival_unbounded_rect(len(free_vars))]
     check_rects = get_rival_rects(
-        ctx.assumes,
+        rewritten_ctx.assumes,
         free_vars,
     )
 
@@ -159,15 +245,15 @@ def rival_trim_context(ctx: "SpecContext") -> "SpecContext":
             for rect in rects
         )
 
-    return ctx.copy(
+    return rewritten_ctx.copy(
         assumes=[
             assume
-            for assume in ctx.assumes
+            for assume in rewritten_ctx.assumes
             if not is_always_true(assume, unbounded_rects)
         ],
         checks=[
             check
-            for check in ctx.checks
+            for check in rewritten_ctx.checks
             if not is_always_true(check, check_rects)
         ],
     )

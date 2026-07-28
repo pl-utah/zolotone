@@ -1187,6 +1187,9 @@ def _shortcut_fold(
 
     if isinstance(node, Sub):
         lhs, rhs = folded_args
+        # x - x -> 0
+        if identical_nodes(lhs, rhs):
+            return RealLit(0)
         # x - 0 -> x
         if isinstance(rhs, RealLit) and rhs.value == 0:
             return lhs
