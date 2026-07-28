@@ -8,7 +8,7 @@ from ..utils import make_fixed_arguments
 from ..solver.engine import check_equivalence as _solver_check_equivalence
 from .node import Node
 from .proofs import SpecRecorder, record_specs
-from ..spec import FPExpr, SpecContext
+from ..spec import FPExpr, SpecContext, special_encoding
 from ..spec.spec_context import simplify_ctx
 
 
@@ -311,8 +311,13 @@ def _check_determinism(
 ):
     base_ctx = SpecContext(f"{node.name}_determinism")
     inputs = [base_ctx.spec_of(arg) for arg in node.inner_args]
-    first_spec = _Spec("first_spec", lambda ctx: node.spec(*inputs, ctx=ctx))
-    second_spec = _Spec("second_spec", lambda ctx: node.spec(*inputs, ctx=ctx))
+
+    def collect_spec(ctx):
+        encoded_inputs = [special_encoding(value, ctx) for value in inputs]
+        return node.spec(*encoded_inputs, ctx=ctx)
+
+    first_spec = _Spec("first_spec", collect_spec)
+    second_spec = _Spec("second_spec", collect_spec)
 
     result = check_equivalence(
         first_spec,
@@ -396,9 +401,26 @@ class composite(Node):
     ):
         base_ctx = self.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in self.inner_args]
+
+        def collect_inner(ctx):
+            encoded_inputs = [
+                special_encoding(value, ctx)
+                for value in inputs
+            ]
+            for node, value in zip(self.inner_args, encoded_inputs):
+                ctx.spec_cache[node] = value
+            return ctx.spec_of(self.inner_tree)
+
+        def collect_outer(ctx):
+            encoded_inputs = [
+                special_encoding(value, ctx)
+                for value in inputs
+            ]
+            return self.spec(*encoded_inputs, ctx=ctx)
+
         result = check_equivalence(
-            _Spec("inner_spec", lambda ctx: ctx.spec_of(self.inner_tree)),
-            _Spec("outer_spec", lambda ctx: self.spec(*inputs, ctx=ctx)),
+            _Spec("inner_spec", collect_inner),
+            _Spec("outer_spec", collect_outer),
             base_ctx=base_ctx,
             inputs=inputs,
             schedule=schedule,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from fractions import Fraction
 import math
 import sys
@@ -197,6 +197,51 @@ class FPExpr(SpecNode, ABC):
             selected_fields[field.name] = selected_value
 
         return type(on_true)(**selected_fields)
+
+
+def special_encoding(value: Any, ctx) -> Any:
+    """Give each spec collection an independent nonfinite FP value.
+
+    An FPExpr's real ``value`` is shared for finite inputs, but is not
+    semantically defined for infinities or NaNs.  Materialize that undefined
+    projection as a fresh real in the current collection while preserving all
+    classification fields.  Tuple-shaped spec inputs are handled recursively.
+    """
+
+    if isinstance(value, tuple):
+        return tuple(special_encoding(item, ctx) for item in value)
+    if not isinstance(value, FPExpr):
+        return value
+    if not is_dataclass(value):
+        raise TypeError(
+            "special_encoding requires dataclass FPExpr values, got "
+            f"{type(value).__name__}"
+        )
+
+    raw_value = getattr(value, "value", None)
+    if not isinstance(raw_value, RealExpr):
+        raise TypeError(
+            f"{type(value).__name__} must define a RealExpr value field "
+            "for special_encoding"
+        )
+
+    updates: dict[str, object] = {
+        "value": If(
+            value.is_finite,
+            raw_value,
+            ctx.fresh_real(f"{type(value).__name__}_special"),
+        )
+    }
+
+    for field in fields(value):
+        if not field.init or field.name == "value":
+            continue
+        field_value = getattr(value, field.name)
+        encoded_value = special_encoding(field_value, ctx)
+        if encoded_value is not field_value:
+            updates[field.name] = encoded_value
+
+    return replace(value, **updates)
     
 
 class BoolExpr(SpecNode):

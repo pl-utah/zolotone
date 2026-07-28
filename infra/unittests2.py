@@ -1161,6 +1161,47 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         self.assertIsInstance(expr, fp32)
         self.assertEqual(expr.constant_fold(), fp32.ninf())
 
+    def test_special_encoding_preserves_finite_value(self):
+        ctx = SpecContext("finite-special-encoding")
+        finite = fp32(
+            value=RealLit(3),
+            sign=RealLit(0),
+            exponent=RealLit(128),
+            mantissa=RealLit(0),
+            is_norm=BoolLit(True),
+            is_sub=BoolLit(False),
+            is_zero=BoolLit(False),
+            is_inf=BoolLit(False),
+            is_nan=BoolLit(False),
+        )
+
+        encoded = special_encoding(finite, ctx)
+
+        self.assertEqual(encoded.constant_fold(), finite)
+
+    def test_special_encoding_freshens_nonfinite_value_per_collection(self):
+        ctx = SpecContext("nonfinite-special-encoding")
+        infinity = fp32(
+            value=RealVar("shared_input_special"),
+            sign=RealLit(0),
+            exponent=RealLit(255),
+            mantissa=RealLit(0),
+            is_norm=BoolLit(False),
+            is_sub=BoolLit(False),
+            is_zero=BoolLit(False),
+            is_inf=BoolLit(True),
+            is_nan=BoolLit(False),
+        )
+
+        first = special_encoding(infinity, ctx).constant_fold()
+        second = special_encoding(infinity, ctx).constant_fold()
+
+        self.assertIsInstance(first.value, RealVar)
+        self.assertIsInstance(second.value, RealVar)
+        self.assertNotEqual(first.value.name, second.value.name)
+        self.assertNotEqual(first.value.name, "shared_input_special")
+        self.assertNotEqual(second.value.name, "shared_input_special")
+
     def test_cases_support_bool_values(self):
         condition = BoolVar("condition")
         on_true = BoolVar("on_true")
@@ -2328,6 +2369,71 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertEqual(len(result["proof_traces"]), 1)
         self.assertEqual(len(seen_inputs), 2)
         self.assertIs(seen_inputs[0], seen_inputs[1])
+
+    def test_fp_inputs_get_independent_special_encoding_per_spec_run(self):
+        seen_inputs = []
+
+        def identity_spec(x, ctx):
+            del ctx
+            seen_inputs.append(x)
+            return x
+
+        @Primitive(name="fp_special_encoding", spec=identity_spec)
+        def fp_special_encoding(x):
+            return x.copy()
+
+        node = fp_special_encoding(Var(name="x", sign=Float32T()))
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            node.check_determinism(schedule=[{"tool": "simplify"}])
+
+        self.assertEqual(len(seen_inputs), 2)
+        first, second = seen_inputs
+        self.assertIsNot(first, second)
+        self.assertEqual(
+            first.classification_flags(),
+            second.classification_flags(),
+        )
+        self.assertIsInstance(first.value, If)
+        self.assertIsInstance(second.value, If)
+        self.assertNotEqual(first.value.on_false, second.value.on_false)
+
+    def test_check_spec_encodes_inner_and_outer_fp_inputs_independently(self):
+        inner_inputs = []
+        outer_inputs = []
+
+        def inner_spec(x, ctx):
+            del ctx
+            inner_inputs.append(x)
+            return x
+
+        @Primitive(name="inner_fp_identity", spec=inner_spec)
+        def inner_fp_identity(x):
+            return x.copy()
+
+        def outer_spec(x, ctx):
+            del ctx
+            outer_inputs.append(x)
+            return x
+
+        @Composite(name="outer_fp_identity", spec=outer_spec)
+        def outer_fp_identity(x):
+            return inner_fp_identity(x)
+
+        node = outer_fp_identity(Var(name="x", sign=Float32T()))
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            node.check_spec(schedule=[{"tool": "simplify"}])
+
+        self.assertEqual(len(inner_inputs), 1)
+        self.assertEqual(len(outer_inputs), 1)
+        inner = inner_inputs[0]
+        outer = outer_inputs[0]
+        self.assertEqual(
+            inner.classification_flags(),
+            outer.classification_flags(),
+        )
+        self.assertIsInstance(inner.value, If)
+        self.assertIsInstance(outer.value, If)
+        self.assertNotEqual(inner.value.on_false, outer.value.on_false)
 
     def test_underconstrained_primitive_is_not_deterministic(self):
         def nondeterministic_spec(_x, ctx):
