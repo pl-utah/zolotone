@@ -128,6 +128,54 @@ class RealExpr(SpecNode):
 
 
 class FPExpr(SpecNode, ABC):
+    value: "RealExpr"
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        declares_value = any(
+            base is not FPExpr
+            and "value" in base.__dict__.get("__annotations__", {})
+            for base in cls.__mro__
+        )
+        if not declares_value:
+            raise TypeError(
+                f"{cls.__name__} must declare a value: RealExpr field"
+            )
+
+    def __post_init__(self) -> None:
+        if not is_dataclass(self):
+            raise TypeError(
+                f"{type(self).__name__} must be a dataclass FPExpr"
+            )
+        if "value" not in {field.name for field in fields(self)}:
+            raise TypeError(
+                f"{type(self).__name__} must define a value dataclass field"
+            )
+        if not isinstance(self.value, RealExpr):
+            raise TypeError(
+                f"{type(self).__name__}.value must be RealExpr, got "
+                f"{type(self.value).__name__}"
+            )
+
+    @classmethod
+    @abstractmethod
+    def fresh(cls, name: str, ctx) -> "FPExpr":
+        """Create an unconstrained, well-formed value of this FP format."""
+
+    @classmethod
+    @abstractmethod
+    def encode(cls, value: "RealExpr", ctx) -> "FPExpr":
+        """Encode a mathematical real value into this FP format."""
+
+    @abstractmethod
+    def decode(self) -> tuple[SpecNode, ...]:
+        """Return this FP value's mathematical value and format fields."""
+
+    @property
+    @abstractmethod
+    def is_finite(self) -> "BoolExpr":
+        """Return whether this FP value has a finite classification."""
+
     @abstractmethod
     def classification_flags(self) -> dict[str, "BoolExpr"]:
         """Return the mutually exclusive classification predicates."""

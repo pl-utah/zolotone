@@ -1060,6 +1060,38 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         expected_checks = [] if expected == BoolLit(True) else [expected]
         self.assertEqual(ctx.simplify().checks, expected_checks)
 
+    def test_fp_expr_declares_required_abstract_format_operations(self):
+        self.assertEqual(
+            FPExpr.__abstractmethods__,
+            {
+                "classification_flags",
+                "decode",
+                "encode",
+                "fresh",
+                "is_finite",
+                "observables_for_classification",
+            },
+        )
+
+    def test_fp_expr_requires_a_declared_value_field(self):
+        with self.assertRaisesRegex(TypeError, "must declare a value"):
+            class MissingValueFP(FPExpr):
+                pass
+
+    def test_fp_expr_requires_value_to_be_real_expr(self):
+        with self.assertRaisesRegex(TypeError, "value must be RealExpr"):
+            fp32(
+                value=object(),
+                sign=RealLit(0),
+                exponent=RealLit(0),
+                mantissa=RealLit(0),
+                is_norm=BoolLit(False),
+                is_sub=BoolLit(False),
+                is_zero=BoolLit(True),
+                is_inf=BoolLit(False),
+                is_nan=BoolLit(False),
+            )
+
     def test_constant_fold_method_folds_literal_tree(self):
         expr = (RealLit(2) + RealLit(3)) * RealLit(4)
 
@@ -1688,6 +1720,23 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
 
 class TestBFloat16Spec(unittest.TestCase):
+    def test_bf16_static_inputs_use_structured_spec_values(self):
+        ctx = SpecContext("structured-bf16-input")
+
+        value = BFloat16T().to_spec("input", ctx)
+
+        self.assertIsInstance(value, bf16)
+
+    def test_bf16_decoder_delegates_to_structured_decode(self):
+        ctx = SpecContext("structured-bf16-decode")
+
+        decoded = ctx.spec_of(bf16_decode(Const(BFloat16.Zero())))
+
+        self.assertEqual(
+            tuple(field.constant_fold() for field in decoded),
+            tuple(RealLit(value) for value in (0, 0, 0, 0, 0, 1, 0, 0)),
+        )
+
     def test_bf16_format_and_explicit_non_finite_constructors(self):
         self.assertEqual(bf16.exponent_bits, 8)
         self.assertEqual(bf16.mantissa_bits, 7)
@@ -1803,6 +1852,18 @@ class TestBFloat16Add(unittest.TestCase):
         lhs = Var(name="lhs", sign=BFloat16T())
         rhs = Var(name="rhs", sign=BFloat16T())
         return lhs, rhs, bf16_add(lhs, rhs)
+
+    def test_bf16_add_specifications_can_be_chained(self):
+        lhs = Var(name="lhs", sign=BFloat16T())
+        rhs = Var(name="rhs", sign=BFloat16T())
+        inner = bf16_add(lhs, rhs)
+        outer = bf16_add(inner, lhs)
+        ctx = SpecContext("chained-bf16-add")
+
+        output = ctx.spec_of(outer)
+
+        self.assertIsInstance(output, bf16)
+        ctx.validate_requirements(timeout_ms=1000)
 
     def test_bf16_add_handles_rounding_subnormals_and_special_values(self):
         one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)

@@ -4,14 +4,28 @@ from .common import *
 from .encode_BFloat16 import *
 
 
-def spec_bf16_add(x, y, ctx):
-    """Finite-value BF16 addition specification.
+def spec_bf16_add(x: bf16, y: bf16, ctx):
+    nan_case = (
+        x.is_nan
+        | y.is_nan
+        | (x.is_pinf & y.is_ninf)
+        | (x.is_ninf & y.is_pinf)
+    )
+    neg_inf_case = (x.is_ninf | y.is_ninf) & (~nan_case)
+    pos_inf_case = (x.is_pinf | y.is_pinf) & (~nan_case)
+    neg_zero_case = x.is_nzero & y.is_nzero
 
-    BFloat16T inputs currently lower to scalar real specifications, so input
-    NaN and infinity cases are implemented and tested at the circuit level.
-    """
-
-    return bf16.encode(value=x + y, ctx=ctx)
+    return Cases(
+        case(nan_case, bf16.nan(ctx)),
+        case(neg_inf_case, bf16.ninf(ctx)),
+        case(pos_inf_case, bf16.inf(ctx)),
+        case(neg_zero_case, bf16.nzero(ctx)),
+        case(
+            x.is_finite & y.is_finite,
+            bf16.encode(value=x.value + y.value, ctx=ctx),
+        ),
+        ctx=ctx,
+    )
 
 
 @Composite(name="bf16_add", spec=spec_bf16_add)

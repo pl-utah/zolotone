@@ -228,7 +228,9 @@ class BFloat16T(StaticType):
         return BFloat16T()
     
     def to_spec(self, name, ctx):
-        return ctx.fresh_real(name)
+        from ..spec.custom_specs.bf16 import bf16
+
+        return bf16.fresh(name, ctx)
     
     def random_runtime_value(self, rng: random.Random):
         from .runtime import BFloat16

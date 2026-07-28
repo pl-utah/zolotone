@@ -85,48 +85,17 @@ def _bf16_alloc(
 
 ############## Public API ##############
 
-def bf16_decode_spec(x, ctx):
-    sign = ctx.fresh_real("sign")
-    exponent = ctx.fresh_real("exponent")
-    mantissa = ctx.fresh_real("mantissa")
-    
-    two = ctx.real_val(2)
-    one = ctx.real_val(1)
-    m_bits = ctx.real_val(BFloat16.mantissa_bits)
-    exponent_bias = ctx.real_val(BFloat16.exponent_bias)
-    max_exponent = ctx.real_val(BFloat16.inf_code)
-
-    ctx.assume(sign.eq(ctx.real_val(1)) | sign.eq(ctx.real_val(0)))
-    ctx.assume((exponent >= ctx.real_val(0)) & (exponent < ctx.real_val(1 << BFloat16.exponent_bits)))
-    ctx.assume((mantissa >= ctx.real_val(0)) & (mantissa < ctx.real_val(1 << BFloat16.mantissa_bits)))
-
-    exponent_is_zero = exponent.eq(ctx.real_val(0))
-    exponent_is_max = exponent.eq(max_exponent)
-    mantissa_is_zero = mantissa.eq(ctx.real_val(0))
-    is_zero = exponent_is_zero & mantissa_is_zero
-    is_sub = exponent_is_zero & (~mantissa_is_zero)
-    is_inf = exponent_is_max & mantissa_is_zero
-    is_nan = exponent_is_max & (~mantissa_is_zero)
-    is_norm = (~exponent_is_zero) & (~exponent_is_max)
-
-    signed = sign_multiplier(ctx, sign)
-    normal_value = (
-        signed
-        * (one + mantissa * two ** (-m_bits))
-        * two ** (exponent - exponent_bias)
-    )
-    subnormal_value = (
-        signed
-        * mantissa
-        * two ** (-m_bits)
-        * two ** (one - exponent_bias)
-    )
-    finite_value = If(is_norm, normal_value, If(is_sub, subnormal_value, ctx.real_val(0)))
-
-    # BFloat16T inputs currently use finite scalar specifications. Keep that
-    # contract while exposing the full decoded classification tuple.
-    ctx.assume((~is_inf) & (~is_nan))
-    ctx.assume(x.eq(finite_value))
+def bf16_decode_spec(x: bf16, ctx):
+    (
+        sign,
+        exponent,
+        mantissa,
+        is_normal,
+        is_subnormal,
+        is_zero,
+        is_inf,
+        is_nan,
+    ) = x.decode()[1:]
 
     def bool_to_real(flag):
         return If(flag, ctx.real_val(1), ctx.real_val(0))
@@ -135,8 +104,8 @@ def bf16_decode_spec(x, ctx):
         sign,
         exponent,
         mantissa,
-        bool_to_real(is_norm),
-        bool_to_real(is_sub),
+        bool_to_real(is_normal),
+        bool_to_real(is_subnormal),
         bool_to_real(is_zero),
         bool_to_real(is_inf),
         bool_to_real(is_nan),
