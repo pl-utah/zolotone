@@ -1,14 +1,7 @@
 from zolotone import *
+
 from .common import *
 from .encode_Float32 import *
-
-
-# Demo navigation map:
-# - FP32 decode helpers: zolotone/components/Float.py
-# - Bit helpers and significand formatting: examples/common.py
-# - Unsigned fixed-point operations: zolotone/components/UQ.py
-# - Signed fixed-point operations: zolotone/components/Q.py
-# - Final FP32 packing and rounding: examples/encode_Float32.py
 
 
 # Non-bit-precise concept specification of a single-precision IEEE adder.
@@ -163,8 +156,9 @@ if __name__ == '__main__':
         Var(name="a", sign=Float32T()),
         Var(name="b", sign=Float32T()),
     )
-    adder.check_determinism()
-    adder.check_spec()
+    from pprint import pprint
+    #adder.check_determinism()
+    pprint(adder.check_spec())
 
     with open("examples/adder_jit.hpp", "w") as file:
         file.write(adder.to_cpp(jittable=True))

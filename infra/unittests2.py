@@ -1353,6 +1353,21 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
                 self.assertEqual(report["status"], "unsat", report)
 
+    def test_fp32_encode_constructs_result_without_calling_fresh(self):
+        ctx = SpecContext("direct-fp32-encode")
+
+        with patch.object(
+            fp32,
+            "fresh",
+            side_effect=AssertionError("encode must construct fp32 directly"),
+        ):
+            encoded = fp32.encode(RealLit(1), ctx)
+
+        self.assertIsInstance(encoded, fp32)
+        self.assertNotIsInstance(encoded.is_norm, BoolVar)
+        self.assertIsInstance(encoded.exponent, RealVar)
+        self.assertIsInstance(encoded.mantissa, RealVar)
+
     def test_fp32_encode_design_canonicalizes_exact_zero(self):
         from examples.encode_Float32 import fp32_encode
 
@@ -1565,19 +1580,21 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "non-finite RealLit"):
                     RealLit(value)
 
-    def test_float32_value_is_a_finite_only_real_variable(self):
+    def test_float32_value_selects_finite_formula_or_fresh_special(self):
         ctx = SpecContext("float32-finite-value")
         value = fp32.fresh("x", ctx)
 
-        self.assertIsInstance(value.value, RealVar)
-        self.assertTrue(
-            any(
-                isinstance(assume, Or)
-                and value.is_zero in variables(assume)
-                and value.value in variables(assume)
-                for assume in ctx.assumes
-            )
-        )
+        self.assertIsInstance(value.value, If)
+        self.assertEqual(value.value.cond, value.is_norm)
+        subnormal_case = value.value.on_false
+        self.assertIsInstance(subnormal_case, If)
+        self.assertEqual(subnormal_case.cond, value.is_sub)
+        zero_case = subnormal_case.on_false
+        self.assertIsInstance(zero_case, If)
+        self.assertEqual(zero_case.cond, value.is_zero)
+        self.assertEqual(zero_case.on_true, RealLit(0))
+        self.assertIsInstance(zero_case.on_false, RealVar)
+        self.assertTrue(zero_case.on_false.name.startswith("special_"))
 
     def test_fp32_uses_explicit_non_finite_constructors(self):
         ctx = SpecContext("explicit-fp32-specials")
@@ -1720,6 +1737,22 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
 
 class TestBFloat16Spec(unittest.TestCase):
+    def test_bf16_value_selects_finite_formula_or_fresh_special(self):
+        ctx = SpecContext("bf16-finite-value")
+        value = bf16.fresh("x", ctx)
+
+        self.assertIsInstance(value.value, If)
+        self.assertEqual(value.value.cond, value.is_norm)
+        subnormal_case = value.value.on_false
+        self.assertIsInstance(subnormal_case, If)
+        self.assertEqual(subnormal_case.cond, value.is_sub)
+        zero_case = subnormal_case.on_false
+        self.assertIsInstance(zero_case, If)
+        self.assertEqual(zero_case.cond, value.is_zero)
+        self.assertEqual(zero_case.on_true, RealLit(0))
+        self.assertIsInstance(zero_case.on_false, RealVar)
+        self.assertTrue(zero_case.on_false.name.startswith("special_"))
+
     def test_bf16_static_inputs_use_structured_spec_values(self):
         ctx = SpecContext("structured-bf16-input")
 
@@ -1829,6 +1862,21 @@ class TestBFloat16Spec(unittest.TestCase):
     def test_bf16_encode_requires_real_expression(self):
         with self.assertRaisesRegex(TypeError, "bf16.encode value must be RealExpr"):
             bf16.encode(1.0, SpecContext("bf16-invalid-encode"))
+
+    def test_bf16_encode_constructs_result_without_calling_fresh(self):
+        ctx = SpecContext("direct-bf16-encode")
+
+        with patch.object(
+            bf16,
+            "fresh",
+            side_effect=AssertionError("encode must construct bf16 directly"),
+        ):
+            encoded = bf16.encode(RealLit(1), ctx)
+
+        self.assertIsInstance(encoded, bf16)
+        self.assertNotIsInstance(encoded.is_norm, BoolVar)
+        self.assertIsInstance(encoded.exponent, RealVar)
+        self.assertIsInstance(encoded.mantissa, RealVar)
 
 
 class TestBFloat16Add(unittest.TestCase):
@@ -2578,7 +2626,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
             )
 
         self.assertTrue(result["proved"])
-        self.assertEqual(collect_counts, {"zero": 2, "one": 2})
+        self.assertEqual(collect_counts, {"zero": 1, "one": 1})
 
     def test_combined_infeasibility_with_matching_infeasible_sides_is_proved(self):
         base_ctx = SpecContext("matching_infeasible_sides")
@@ -3015,6 +3063,40 @@ class TestSolverApis(unittest.TestCase):
             )
 
         self.assertIn("Unknown schedule tool rival_feasibility_check", str(raised.exception))
+
+    def test_fp32_adder_norm_sub_zero_zero_is_proved_infeasible(self):
+        adder = fp32_add(
+            Var(name="a", sign=Float32T()),
+            Var(name="b", sign=Float32T()),
+        )
+        target_name = (
+            "fp32_add["
+            "arg0=norm,arg1=sub,inner_spec=zero,outer_spec=zero]"
+        )
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            open(os.devnull, "w") as devnull,
+            contextlib.redirect_stdout(devnull),
+        ):
+            check_result = adder.check_spec(
+                schedule=[{"tool": "simplify"}],
+            )
+
+        self.assertTrue(check_result["proved"])
+        self.assertEqual(
+            check_result["proof_traces"][0][0]["feasibility_status"],
+            "not feasible",
+        )
 
     def test_fp32_adder_norm_norm_proves_with_egglog(self):
         adder = fp32_add(

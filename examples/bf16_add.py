@@ -20,16 +20,14 @@ def spec_bf16_add(x: bf16, y: bf16, ctx):
         case(neg_inf_case, bf16.ninf(ctx)),
         case(pos_inf_case, bf16.inf(ctx)),
         case(neg_zero_case, bf16.nzero(ctx)),
-        case(
-            x.is_finite & y.is_finite,
-            bf16.encode(value=x.value + y.value, ctx=ctx),
-        ),
+        case(x.is_finite & y.is_finite, bf16.encode(value=x.value + y.value, ctx=ctx)),
         ctx=ctx,
     )
 
 
 @Composite(name="bf16_add", spec=spec_bf16_add)
 def bf16_add(x: Node, y: Node) -> Node:
+    # Step 1. Decode BF16s
     (
         x_sign,
         x_exponent,
@@ -51,6 +49,7 @@ def bf16_add(x: Node, y: Node) -> Node:
         y_is_nan,
     ) = bf16_decode(y)
 
+    # 2. Resolve special-result flags before the finite-number datapath
     x_is_ninf = bit_and(x_is_inf, x_sign)
     y_is_ninf = bit_and(y_is_inf, y_sign)
     x_is_pinf = bit_and(x_is_inf, bit_neg(x_sign))
@@ -72,9 +71,11 @@ def bf16_add(x: Node, y: Node) -> Node:
         bit_and(x_sign, y_sign),
     )
 
+    # 3. Format and align significands.
     x_mantissa_fraction = integer_to_fraction(x_mantissa)
     y_mantissa_fraction = integer_to_fraction(y_mantissa)
 
+    # Implicit bit
     x_significand = if_then_else(
         x_is_normal,
         add_implicit_bit(x_mantissa_fraction),
@@ -86,13 +87,10 @@ def bf16_add(x: Node, y: Node) -> Node:
         uq_resize(y_mantissa_fraction, 1, BFloat16.mantissa_bits),
     )
 
+    # Resolving subnormal exponent
     effective_subnormal_exponent = Const(
-        UQ(
-            1,
-            x_exponent.node_type.int_bits,
-            x_exponent.node_type.frac_bits,
-        )
-    )
+        UQ(1, x_exponent.node_type.int_bits, x_exponent.node_type.frac_bits))
+
     x_effective_exponent = if_then_else(
         x_is_subnormal,
         effective_subnormal_exponent,
@@ -104,43 +102,24 @@ def bf16_add(x: Node, y: Node) -> Node:
         y_exponent,
     )
 
+    # Aligning exponents
     aligned_exponent = uq_max(x_effective_exponent, y_effective_exponent)
     x_shift_amount = uq_sub(aligned_exponent, x_effective_exponent)
     y_shift_amount = uq_sub(aligned_exponent, y_effective_exponent)
 
-    x_significand_wide = uq_resize(
-        x_significand,
-        1,
-        BFloat16.mantissa_bits + 3,
-    )
-    y_significand_wide = uq_resize(
-        y_significand,
-        1,
-        BFloat16.mantissa_bits + 3,
-    )
+    # Shifts with sticky bits
+    x_significand_wide = uq_resize(x_significand, 1, BFloat16.mantissa_bits + 3)
+    y_significand_wide = uq_resize(y_significand, 1, BFloat16.mantissa_bits + 3)
 
-    x_aligned_significand = uq_rshift_jam(
-        x_significand_wide,
-        x_shift_amount,
-    )
-    y_aligned_significand = uq_rshift_jam(
-        y_significand_wide,
-        y_shift_amount,
-    )
+    x_aligned_significand = uq_rshift_jam(x_significand_wide, x_shift_amount)
+    y_aligned_significand = uq_rshift_jam(y_significand_wide, y_shift_amount)
 
-    x_signed_significand = q_add_sign(
-        uq_to_q(x_aligned_significand),
-        x_sign,
-    )
-    y_signed_significand = q_add_sign(
-        uq_to_q(y_aligned_significand),
-        y_sign,
-    )
-    significand_sum = q_add(
-        x_signed_significand,
-        y_signed_significand,
-    )
+    # Adding shifted mantissas
+    x_signed_significand = q_add_sign(uq_to_q(x_aligned_significand), x_sign)
+    y_signed_significand = q_add_sign(uq_to_q(y_aligned_significand), y_sign)
+    significand_sum = q_add(x_signed_significand, y_signed_significand)
 
+    # Encoding finite result
     finite_sign = q_sign_bit(significand_sum)
     finite_mantissa = q_to_uq(q_abs(significand_sum))
     finite_exponent = uq_to_q(aligned_exponent)
@@ -150,6 +129,7 @@ def bf16_add(x: Node, y: Node) -> Node:
         finite_exponent,
         finite_mantissa,
     )
+    # Handling special cases
     return if_then_else(
         encode_nan,
         Const(BFloat16.NaN()),
@@ -175,6 +155,7 @@ if __name__ == "__main__":
         Var(name="b", sign=BFloat16T()),
     )
 
+    adder.check_determinism()
     adder.check_spec()
 
     with open("examples/bf16_adder_jit.hpp", "w") as file:

@@ -54,63 +54,73 @@ class bf16(FPExpr):
     is_nan: BoolExpr
 
     @classmethod
-    def _symbolic(cls, name: str, ctx) -> bf16:
-        name = ctx.fresh_name(name)
-        return cls(
-            value=ctx.fresh_real(f"{name}_value"),
-            sign=ctx.fresh_real(f"{name}_sign"),
-            exponent=ctx.fresh_real(f"{name}_exponent"),
-            mantissa=ctx.fresh_real(f"{name}_mantissa"),
-            is_norm=ctx.fresh_bool(f"{name}_is_norm"),
-            is_sub=ctx.fresh_bool(f"{name}_is_sub"),
-            is_zero=ctx.fresh_bool(f"{name}_is_zero"),
-            is_inf=ctx.fresh_bool(f"{name}_is_inf"),
-            is_nan=ctx.fresh_bool(f"{name}_is_nan"),
-        )
-
-    @classmethod
     def fresh(cls, name: str, ctx) -> bf16:
         """Create an unconstrained, well-formed bfloat16 value."""
-        out = cls._symbolic(name, ctx)
+        name = ctx.fresh_name(name)
+        sign = ctx.fresh_real(f"{name}_sign")
+        exponent = ctx.fresh_real(f"{name}_exponent")
+        mantissa = ctx.fresh_real(f"{name}_mantissa")
+        is_norm = ctx.fresh_bool(f"{name}_is_norm")
+        is_sub = ctx.fresh_bool(f"{name}_is_sub")
+        is_zero = ctx.fresh_bool(f"{name}_is_zero")
+        is_inf = ctx.fresh_bool(f"{name}_is_inf")
+        is_nan = ctx.fresh_bool(f"{name}_is_nan")
 
         zero = ctx.real_val(0)
         one = ctx.real_val(1)
         max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
         max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
 
-        ctx.assume(out.sign.eq(zero) | out.sign.eq(one))
-        ctx.assume((out.exponent >= zero) & (out.exponent <= max_exponent))
-        ctx.assume((out.mantissa >= zero) & (out.mantissa <= max_mantissa))
-
-        _assume_exclusive_classification(ctx, out)
-
-        ctx.assume(_implies(out.is_norm, out.exponent >= one))
-        ctx.assume(_implies(out.is_norm, out.exponent <= max_exponent - one))
-        ctx.assume(_implies(out.is_sub | out.is_zero, out.exponent.eq(zero)))
-        ctx.assume(_implies(out.is_zero | out.is_inf, out.mantissa.eq(zero)))
-        ctx.assume(_implies(out.is_inf | out.is_nan, out.exponent.eq(max_exponent)))
-        ctx.assume(_implies(out.is_sub | out.is_nan, out.mantissa >= one))
-
         two = ctx.real_val(2)
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
 
-        signed_value = sign_multiplier(ctx, out.sign)
+        signed_value = sign_multiplier(ctx, sign)
         normal_value = (
             signed_value
-            * (one + out.mantissa * (two ** (-mantissa_bits)))
-            * (two ** (out.exponent - exponent_bias))
+            * (one + mantissa * (two ** (-mantissa_bits)))
+            * (two ** (exponent - exponent_bias))
         )
         subnormal_value = (
             signed_value
-            * out.mantissa
+            * mantissa
             * (two ** (-mantissa_bits))
             * (two ** (one - exponent_bias))
         )
+        value = If(
+            is_norm,
+            normal_value,
+            If(
+                is_sub,
+                subnormal_value,
+                If(is_zero, zero, ctx.fresh_real("special")),
+            ),
+        )
 
-        ctx.assume(_implies(out.is_norm, out.value.eq(normal_value)))
-        ctx.assume(_implies(out.is_sub, out.value.eq(subnormal_value)))
-        ctx.assume(_implies(out.is_zero, out.value.eq(zero)))
+        out = cls(
+            value=value,
+            sign=sign,
+            exponent=exponent,
+            mantissa=mantissa,
+            is_norm=is_norm,
+            is_sub=is_sub,
+            is_zero=is_zero,
+            is_inf=is_inf,
+            is_nan=is_nan,
+        )
+
+        ctx.assume(sign.eq(zero) | sign.eq(one))
+        ctx.assume((exponent >= zero) & (exponent <= max_exponent))
+        ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
+
+        _assume_exclusive_classification(ctx, out)
+
+        ctx.assume(_implies(is_norm, exponent >= one))
+        ctx.assume(_implies(is_norm, exponent <= max_exponent - one))
+        ctx.assume(_implies(is_sub | is_zero, exponent.eq(zero)))
+        ctx.assume(_implies(is_zero | is_inf, mantissa.eq(zero)))
+        ctx.assume(_implies(is_inf | is_nan, exponent.eq(max_exponent)))
+        ctx.assume(_implies(is_sub | is_nan, mantissa >= one))
 
         return out
 
@@ -129,51 +139,75 @@ class bf16(FPExpr):
         exponent_bias = ctx.real_val(cls.exponent_bias)
 
         smallest_normal = two ** (one - exponent_bias)
-        greatest_normal_exponent = (
-            two ** exponent_bits - two - exponent_bias
-        )
         greatest_normal = (
             (two - two ** (-mantissa_bits))
-            * two ** greatest_normal_exponent
-        )
-        overflow_rounding_boundary = (
-            greatest_normal
-            + two ** (
-                greatest_normal_exponent
-                - mantissa_bits
-                - one
-            )
+            * two ** (two ** exponent_bits - two - exponent_bias)
         )
         smallest_subnormal = two ** (one - exponent_bias - mantissa_bits)
         zero_rounding_boundary = smallest_subnormal * (two ** ctx.real_val(-1))
 
-        out = cls.fresh("encoded_bf16", ctx)
-
         magnitude = abs(value)
-        ctx.assume(out.sign.eq(If(value < zero, one, zero)))
+        sign = If(value < zero, one, zero)
 
         # Under RNE, a value at the midpoint between zero and the smallest
         # subnormal ties to the even encoding (zero).
-        ctx.assume(out.is_zero.eq(magnitude <= zero_rounding_boundary))
-        ctx.assume(
-            out.is_sub.eq(
-                (magnitude < smallest_normal)
-                & (magnitude > zero_rounding_boundary)
-            )
+        is_zero = magnitude <= zero_rounding_boundary
+        is_sub = (
+            (magnitude < smallest_normal)
+            & (magnitude > zero_rounding_boundary)
         )
-        ctx.assume(
-            out.is_norm.eq(
-                (magnitude >= smallest_normal)
-                & (magnitude < overflow_rounding_boundary)
-            )
+        is_norm = (
+            (magnitude >= smallest_normal)
+            & (magnitude <= greatest_normal)
         )
-        # The maximum finite significand is odd, so a value exactly halfway
-        # to the next exponent ties to the even infinity encoding under RNE.
-        ctx.assume(out.is_inf.eq(magnitude >= overflow_rounding_boundary))
-        ctx.assume(out.is_nan.eq(ctx.false()))
+        is_inf = magnitude > greatest_normal
+        is_nan = ctx.false()
 
-        ctx.assume(_implies(out.is_norm | out.is_sub, out.value.eq(value)))
-        ctx.assume(_implies(out.is_zero, out.value.eq(zero)))
+        exponent = ctx.fresh_real("encoded_bf16_exponent")
+        mantissa = ctx.fresh_real("encoded_bf16_mantissa")
+        special = ctx.fresh_real("special")
+        encoded_value = If(
+            is_norm | is_sub,
+            value,
+            If(is_zero, zero, special),
+        )
+        out = cls(
+            value=encoded_value,
+            sign=sign,
+            exponent=exponent,
+            mantissa=mantissa,
+            is_norm=is_norm,
+            is_sub=is_sub,
+            is_zero=is_zero,
+            is_inf=is_inf,
+            is_nan=is_nan,
+        )
+
+        max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
+        max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
+        ctx.assume((exponent >= zero) & (exponent <= max_exponent))
+        ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
+        ctx.assume(_implies(is_norm, exponent >= one))
+        ctx.assume(_implies(is_norm, exponent <= max_exponent - one))
+        ctx.assume(_implies(is_sub | is_zero, exponent.eq(zero)))
+        ctx.assume(_implies(is_inf, exponent.eq(max_exponent)))
+        ctx.assume(_implies(is_zero | is_inf, mantissa.eq(zero)))
+        ctx.assume(_implies(is_sub, mantissa >= one))
+
+        signed_value = sign_multiplier(ctx, sign)
+        normal_value = (
+            signed_value
+            * (one + mantissa * (two ** (-mantissa_bits)))
+            * (two ** (exponent - exponent_bias))
+        )
+        subnormal_value = (
+            signed_value
+            * mantissa
+            * (two ** (-mantissa_bits))
+            * (two ** (one - exponent_bias))
+        )
+        ctx.assume(_implies(is_norm, value.eq(normal_value)))
+        ctx.assume(_implies(is_sub, value.eq(subnormal_value)))
         return out
 
     @classmethod

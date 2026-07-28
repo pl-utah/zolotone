@@ -9,7 +9,7 @@ from ..spec import *
 def _bf16_mantissa(x: Node) -> Op:
     def impl(x: BFloat16) -> UQ:
         return UQ(x.mantissa, 7, 0)
-    
+
     def sign(x: BFloat16T) -> UQT:
         return UQT(7, 0)
     
@@ -167,57 +167,20 @@ def bf16_decode(x: Node) -> Node:
     exponent = _bf16_exponent(x)
     mantissa = _bf16_mantissa(x)
 
-    mantissa_is_nonzero = basic_or_reduce(
-        mantissa,
-        out=Const(UQ(0, 1, 0)),
-    )
-    mantissa_is_zero = basic_invert(
-        mantissa_is_nonzero,
-        out=Const(UQ(0, 1, 0)),
-    )
+    mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(UQ(0, 1, 0)))
+    mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(UQ(0, 1, 0)))
 
-    exponent_is_all_ones = basic_and_reduce(
-        exponent,
-        out=Const(UQ(0, 1, 0)),
-    )
-    exponent_is_not_all_ones = basic_invert(
-        exponent_is_all_ones,
-        out=Const(UQ(0, 1, 0)),
-    )
-    exponent_is_nonzero = basic_or_reduce(
-        exponent,
-        out=Const(UQ(0, 1, 0)),
-    )
-    exponent_is_zero = basic_invert(
-        exponent_is_nonzero,
-        out=Const(UQ(0, 1, 0)),
-    )
+    exponent_is_all_ones = basic_and_reduce(exponent, out=Const(UQ(0, 1, 0)))
+    exponent_is_not_all_ones = basic_invert(exponent_is_all_ones, out=Const(UQ(0, 1, 0)))
+    exponent_is_nonzero = basic_or_reduce(exponent, out=Const(UQ(0, 1, 0)))
+    exponent_is_zero = basic_invert(exponent_is_nonzero, out=Const(UQ(0, 1, 0)))
 
-    is_normal = basic_and(
-        exponent_is_nonzero,
-        exponent_is_not_all_ones,
-        Const(UQ(0, 1, 0)),
-    )
-    is_subnormal = basic_and(
-        exponent_is_zero,
-        mantissa_is_nonzero,
-        Const(UQ(0, 1, 0)),
-    )
-    is_zero = basic_and(
-        exponent_is_zero,
-        mantissa_is_zero,
-        Const(UQ(0, 1, 0)),
-    )
-    is_inf = basic_and(
-        exponent_is_all_ones,
-        mantissa_is_zero,
-        Const(UQ(0, 1, 0)),
-    )
-    is_nan = basic_and(
-        exponent_is_all_ones,
-        mantissa_is_nonzero,
-        Const(UQ(0, 1, 0)),
-    )
+    is_normal = basic_and(exponent_is_nonzero, exponent_is_not_all_ones, Const(UQ(0, 1, 0)))
+    is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
+    is_zero = basic_and(exponent_is_zero, mantissa_is_zero, Const(UQ(0, 1, 0)))
+    is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, Const(UQ(0, 1, 0)))
+    is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
+
     return make_Tuple(
         sign,
         exponent,
