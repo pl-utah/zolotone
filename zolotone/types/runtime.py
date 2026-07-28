@@ -357,15 +357,15 @@ class Float32(RuntimeType):
         from ..spec.custom_specs.fp32 import fp32
 
         if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 0:
-            return fp32.inf()
+            return fp32.inf(ctx)
         elif self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 1:
-            return fp32.ninf()
+            return fp32.ninf(ctx)
         elif self.exponent == self.nan_code and self.mantissa != 0:
-            return fp32.nan()
+            return fp32.nan(ctx)
         elif self.exponent == 0 and self.mantissa == 0 and self.sign == 1:
-            return fp32.nzero()
+            return fp32.nzero(ctx)
         elif self.exponent == 0 and self.mantissa == 0 and self.sign == 0:
-            return fp32.zero()
+            return fp32.zero(ctx)
         elif self.exponent == 0 and self.mantissa != 0:
              return fp32(
                  value=ctx.real_val(self.to_val()),
@@ -507,15 +507,15 @@ class BFloat16(RuntimeType):
         from ..spec.custom_specs.bf16 import bf16
 
         if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 0:
-            return bf16.inf()
+            return bf16.inf(ctx)
         if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 1:
-            return bf16.ninf()
+            return bf16.ninf(ctx)
         if self.exponent == self.nan_code and self.mantissa != 0:
-            return bf16.nan()
+            return bf16.nan(ctx)
         if self.exponent == 0 and self.mantissa == 0 and self.sign == 1:
-            return bf16.nzero()
+            return bf16.nzero(ctx)
         if self.exponent == 0 and self.mantissa == 0 and self.sign == 0:
-            return bf16.zero()
+            return bf16.zero(ctx)
 
         return bf16(
             value=ctx.real_val(self.to_val()),

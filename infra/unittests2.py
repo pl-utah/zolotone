@@ -1113,15 +1113,17 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             If(BoolVar("condition"), BoolVar("on_true"), RealLit(0))
 
     def test_if_rejects_fp_branches_and_directs_users_to_cases(self):
+        ctx = SpecContext("if-rejects-fp")
         with self.assertRaisesRegex(
             TypeError,
             "If does not support FPExpr branches; use exhaustive Cases",
         ):
-            If(BoolVar("condition"), fp32.nan(), fp32.ninf())
+            If(BoolVar("condition"), fp32.nan(ctx), fp32.ninf(ctx))
 
     def test_if_rejects_mixed_real_and_fp_branches(self):
+        ctx = SpecContext("if-rejects-mixed-fp")
         with self.assertRaisesRegex(TypeError, "use exhaustive Cases"):
-            If(BoolVar("condition"), fp32.nan(), RealLit(0))
+            If(BoolVar("condition"), fp32.nan(ctx), RealLit(0))
 
     def test_cases_lower_to_ordered_nested_ifs(self):
         first = BoolVar("first")
@@ -1153,13 +1155,13 @@ class TestSpecAstConstantFolding(unittest.TestCase):
     def test_cases_support_fp_values(self):
         ctx = SpecContext("fp-cases")
         expr = Cases(
-            case(BoolLit(False), fp32.nan()),
-            case(BoolLit(True), fp32.ninf()),
+            case(BoolLit(False), fp32.nan(ctx)),
+            case(BoolLit(True), fp32.ninf(ctx)),
             ctx=ctx,
         )
 
         self.assertIsInstance(expr, fp32)
-        self.assertEqual(expr.constant_fold(), fp32.ninf())
+        self.assertEqual(expr.is_ninf.constant_fold(), BoolLit(True))
 
     def test_special_encoding_preserves_finite_value(self):
         ctx = SpecContext("finite-special-encoding")
@@ -1248,7 +1250,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "Cases branches"):
             Cases(
-                case(condition, fp32.nan()),
+                case(condition, fp32.nan(ctx)),
                 case(~condition, RealLit(0)),
                 ctx=ctx,
             )
@@ -1432,24 +1434,27 @@ class TestSpecAstConstantFolding(unittest.TestCase):
     def test_fp32_adder_spec_preserves_single_infinity(self):
         from examples.fp32_add import spec_fp32_add
 
+        ctx = SpecContext("fp32-adder-single-infinity")
         cases = (
-            (fp32.inf(), fp32.zero(), fp32.inf()),
-            (fp32.zero(), fp32.inf(), fp32.inf()),
-            (fp32.ninf(), fp32.zero(), fp32.ninf()),
-            (fp32.zero(), fp32.ninf(), fp32.ninf()),
+            (fp32.inf(ctx), fp32.zero(ctx), "is_pinf"),
+            (fp32.zero(ctx), fp32.inf(ctx), "is_pinf"),
+            (fp32.ninf(ctx), fp32.zero(ctx), "is_ninf"),
+            (fp32.zero(ctx), fp32.ninf(ctx), "is_ninf"),
         )
 
-        for lhs, rhs, expected in cases:
+        for lhs, rhs, expected_predicate in cases:
             with self.subTest(lhs=lhs, rhs=rhs):
-                ctx = SpecContext("fp32-adder-single-infinity")
                 result = spec_fp32_add(lhs, rhs, ctx)
                 ctx.validate_requirements(timeout_ms=1000)
-                self.assertEqual(result.constant_fold(), expected)
+                self.assertEqual(
+                    getattr(result, expected_predicate).constant_fold(),
+                    BoolLit(True),
+                )
 
     def test_fp32_adder_cases_reject_missing_nan_branch(self):
         ctx = SpecContext("fp32-adder-missing-nan-case")
-        x = fp32.inf()
-        y = fp32.ninf()
+        x = fp32.inf(ctx)
+        y = fp32.ninf(ctx)
         nan_case = (
             x.is_nan
             | y.is_nan
@@ -1460,9 +1465,9 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         pos_inf_case = (x.is_pinf | y.is_pinf) & (~nan_case)
 
         Cases(
-            case(neg_inf_case, fp32.ninf()),
-            case(pos_inf_case, fp32.inf()),
-            case(x.is_finite & y.is_finite, fp32.zero()),
+            case(neg_inf_case, fp32.ninf(ctx)),
+            case(pos_inf_case, fp32.inf(ctx)),
+            case(x.is_finite & y.is_finite, fp32.zero(ctx)),
             ctx=ctx,
         )
 
@@ -1543,18 +1548,24 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         )
 
     def test_fp32_uses_explicit_non_finite_constructors(self):
+        ctx = SpecContext("explicit-fp32-specials")
         cases = (
-            ("nan", fp32.nan(), "is_nan"),
-            ("inf", fp32.inf(), "is_pinf"),
-            ("ninf", fp32.ninf(), "is_ninf"),
+            ("nan", fp32.nan(ctx), "is_nan"),
+            ("inf", fp32.inf(ctx), "is_pinf"),
+            ("ninf", fp32.ninf(ctx), "is_ninf"),
         )
 
+        special_names = set()
         for name, encoded, expected_predicate in cases:
             with self.subTest(value=name):
+                self.assertIsInstance(encoded.value, RealVar)
+                self.assertTrue(encoded.value.name.startswith("special_"))
+                special_names.add(encoded.value.name)
                 self.assertEqual(
                     getattr(encoded, expected_predicate).constant_fold(),
                     BoolLit(True),
                 )
+        self.assertEqual(len(special_names), len(cases))
 
     def test_encode_fp32_infers_infinity_sign_from_value(self):
         cases = (
@@ -1636,9 +1647,9 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         )
 
     def test_nested_fp32_outputs_are_split_and_lowered_to_scalar_queries(self):
-        inner = fp32.zero()
-        outer = fp32.zero()
         ctx = SpecContext("nested-fp32")
+        inner = fp32.zero(ctx)
+        outer = fp32.zero(ctx)
 
         cases = ast_nodes._split_classification_cases(
             ctx,
@@ -1682,19 +1693,28 @@ class TestBFloat16Spec(unittest.TestCase):
         self.assertEqual(bf16.mantissa_bits, 7)
         self.assertEqual(bf16.exponent_bias, 127)
 
+        ctx = SpecContext("explicit-bf16-specials")
         cases = (
-            (bf16.nan(), "is_nan"),
-            (bf16.inf(), "is_pinf"),
-            (bf16.ninf(), "is_ninf"),
-            (bf16.zero(), "is_pzero"),
-            (bf16.nzero(), "is_nzero"),
+            (bf16.nan(ctx), "is_nan"),
+            (bf16.inf(ctx), "is_pinf"),
+            (bf16.ninf(ctx), "is_ninf"),
+            (bf16.zero(ctx), "is_pzero"),
+            (bf16.nzero(ctx), "is_nzero"),
         )
+        special_names = set()
         for value, predicate in cases:
             with self.subTest(predicate=predicate):
+                if predicate in {"is_nan", "is_pinf", "is_ninf"}:
+                    self.assertIsInstance(value.value, RealVar)
+                    self.assertTrue(value.value.name.startswith("special_"))
+                    special_names.add(value.value.name)
+                else:
+                    self.assertEqual(value.value, RealLit(0))
                 self.assertEqual(
                     getattr(value, predicate).constant_fold(),
                     BoolLit(True),
                 )
+        self.assertEqual(len(special_names), 3)
 
     def test_bf16_encode_classifies_representative_values(self):
         greatest_normal = (2 - 2 ** -bf16.mantissa_bits) * 2 ** 127
@@ -2638,8 +2658,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
 class TestSolverApis(unittest.TestCase):
     def test_check_spec_preserves_mismatched_classification_case_verdict(self):
         def infinity_spec(ctx):
-            del ctx
-            return fp32.inf()
+            return fp32.inf(ctx)
 
         @Composite(name="zero_vs_infinity", spec=infinity_spec)
         def zero_vs_infinity():

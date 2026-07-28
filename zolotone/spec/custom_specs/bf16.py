@@ -164,9 +164,9 @@ class bf16(FPExpr):
         return out
 
     @classmethod
-    def nan(cls) -> bf16:
+    def nan(cls, ctx) -> bf16:
         return cls(
-            value=RealLit(0),
+            value=ctx.fresh_real("special"),
             sign=RealLit(0),
             exponent=RealLit((1 << cls.exponent_bits) - 1),
             mantissa=RealLit(1),
@@ -178,9 +178,9 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def inf(cls) -> bf16:
+    def inf(cls, ctx) -> bf16:
         return cls(
-            value=RealLit(0),
+            value=ctx.fresh_real("special"),
             sign=RealLit(0),
             exponent=RealLit((1 << cls.exponent_bits) - 1),
             mantissa=RealLit(0),
@@ -192,9 +192,9 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def ninf(cls) -> bf16:
+    def ninf(cls, ctx) -> bf16:
         return cls(
-            value=RealLit(0),
+            value=ctx.fresh_real("special"),
             sign=RealLit(1),
             exponent=RealLit((1 << cls.exponent_bits) - 1),
             mantissa=RealLit(0),
@@ -206,9 +206,9 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def zero(cls) -> bf16:
+    def zero(cls, ctx) -> bf16:
         return cls(
-            value=RealLit(0),
+            value=ctx.real_val(0),
             sign=RealLit(0),
             exponent=RealLit(0),
             mantissa=RealLit(0),
@@ -220,9 +220,9 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def nzero(cls) -> bf16:
+    def nzero(cls, ctx) -> bf16:
         return cls(
-            value=RealLit(0),
+            value=ctx.real_val(0),
             sign=RealLit(1),
             exponent=RealLit(0),
             mantissa=RealLit(0),
