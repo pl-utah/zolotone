@@ -52,7 +52,8 @@ def spec_fp32_add(x: "FP32", y: "FP32", ctx):
 
 `Cases` selects the first matching `case` in source order. It requires the
 specification context and rejects the specification unless the case conditions
-cover every valid input.
+cover every valid input. Floating-point (`FPExpr`) results must be branched with
+`Cases`; `If` is limited to scalar `BoolExpr` and `RealExpr` branches.
 
 This model says what the result means. It does not prescribe exponent
 alignment, significand formatting, rounding logic, or other implementation

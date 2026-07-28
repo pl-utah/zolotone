@@ -1112,19 +1112,15 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "If branches"):
             If(BoolVar("condition"), BoolVar("on_true"), RealLit(0))
 
-    def test_if_selects_fp_fields_generically(self):
-        condition = BoolVar("condition")
-        selected = If(condition, fp32.nan(), fp32.ninf())
-
-        self.assertIsInstance(selected, fp32)
-        self.assertIsInstance(selected.value, If)
-        self.assertEqual(
-            If(BoolLit(True), fp32.nan(), fp32.ninf()).constant_fold(),
-            fp32.nan(),
-        )
+    def test_if_rejects_fp_branches_and_directs_users_to_cases(self):
+        with self.assertRaisesRegex(
+            TypeError,
+            "If does not support FPExpr branches; use exhaustive Cases",
+        ):
+            If(BoolVar("condition"), fp32.nan(), fp32.ninf())
 
     def test_if_rejects_mixed_real_and_fp_branches(self):
-        with self.assertRaisesRegex(TypeError, "If branches"):
+        with self.assertRaisesRegex(TypeError, "use exhaustive Cases"):
             If(BoolVar("condition"), fp32.nan(), RealLit(0))
 
     def test_cases_lower_to_ordered_nested_ifs(self):
@@ -1209,7 +1205,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         condition = BoolVar("condition")
         ctx = SpecContext("mismatched-case-types")
 
-        with self.assertRaisesRegex(TypeError, "If branches"):
+        with self.assertRaisesRegex(TypeError, "Cases branches"):
             Cases(
                 case(condition, fp32.nan()),
                 case(~condition, RealLit(0)),

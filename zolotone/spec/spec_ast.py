@@ -139,25 +139,25 @@ class FPExpr(SpecNode, ABC):
     ) -> tuple[SpecNode, ...]:
         """Return observables when the classification is already known."""
 
-    # Unites two branches into a combined FPExpr
+    # Internal implementation used by Cases to combine two FP branches.
     @classmethod
-    def select(
+    def _select(
         cls,
         condition: "BoolExpr",
         on_true: "FPExpr",
         on_false: "FPExpr",
     ) -> "FPExpr":
-        """Select two same-format FP expressions field by field."""
+        """Select two same-format FP expressions field by field for Cases."""
 
         BoolExpr._coerce_bool_expr(condition)
         if type(on_true) is not type(on_false):
             raise TypeError(
-                "FP If branches must have the same type, got "
+                "Cases FP branches must have the same type, got "
                 f"{type(on_true).__name__} and {type(on_false).__name__}"
             )
         if not isinstance(on_true, cls) or not is_dataclass(on_true):
             raise TypeError(
-                f"FP If branches must be dataclass {cls.__name__} values"
+                f"Cases FP branches must be dataclass {cls.__name__} values"
             )
 
         selected_fields: dict[str, object] = {}
@@ -182,7 +182,7 @@ class FPExpr(SpecNode, ABC):
             elif isinstance(true_value, FPExpr):
                 if type(true_value) is not type(false_value):
                     raise TypeError(f"Mismatched FP field types for {field.name}")
-                selected_value = type(true_value).select(
+                selected_value = type(true_value)._select(
                     condition,
                     true_value,
                     false_value,
@@ -540,27 +540,21 @@ class If(RealExpr):
 
     def __new__(cls, cond, on_true, on_false):
         BoolExpr._coerce_bool_expr(cond)
+        if isinstance(on_true, FPExpr) or isinstance(on_false, FPExpr):
+            raise TypeError(
+                "If does not support FPExpr branches; use exhaustive Cases instead"
+            )
+
         true_is_bool = isinstance(on_true, BoolExpr)
         false_is_bool = isinstance(on_false, BoolExpr)
         if true_is_bool or false_is_bool:
             if not (true_is_bool and false_is_bool):
                 raise TypeError(
-                    "If branches must both be BoolExpr, RealExpr, or matching "
-                    f"FPExpr values, got {type(on_true).__name__} and "
+                    "If branches must both be BoolExpr or RealExpr, got "
+                    f"{type(on_true).__name__} and "
                     f"{type(on_false).__name__}"
                 )
             return (cond & on_true) | ((~cond) & on_false)
-
-        true_is_fp = isinstance(on_true, FPExpr)
-        false_is_fp = isinstance(on_false, FPExpr)
-        if true_is_fp or false_is_fp:
-            if not (true_is_fp and false_is_fp):
-                raise TypeError(
-                    "If branches must both be BoolExpr, RealExpr, or matching "
-                    f"FPExpr values, got {type(on_true).__name__} and "
-                    f"{type(on_false).__name__}"
-                )
-            return type(on_true).select(cond, on_true, on_false)
         return super().__new__(cls)
 
     def __post_init__(self):
@@ -620,8 +614,32 @@ def case(condition: BoolExpr, value: _CaseValue) -> _CaseEntry:
     return _CaseEntry(condition, _coerce_case_value(value))
 
 
+def _select_case_value(
+    condition: BoolExpr,
+    on_true: _CaseValue,
+    on_false: _CaseValue,
+) -> _CaseValue:
+    true_is_fp = isinstance(on_true, FPExpr)
+    false_is_fp = isinstance(on_false, FPExpr)
+    if true_is_fp or false_is_fp:
+        if not (true_is_fp and false_is_fp):
+            raise TypeError(
+                "Cases branches must all be matching FPExpr values, or all "
+                "scalar expressions; got "
+                f"{type(on_true).__name__} and {type(on_false).__name__}"
+            )
+        if type(on_true) is not type(on_false):
+            raise TypeError(
+                "Cases FP branches must have the same type, got "
+                f"{type(on_true).__name__} and {type(on_false).__name__}"
+            )
+        return type(on_true)._select(condition, on_true, on_false)
+
+    return If(condition, on_true, on_false)
+
+
 def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
-    """Lower ordered, exhaustive cases to nested ``If`` expressions."""
+    """Build an ordered, exhaustive scalar or floating-point expression."""
     for entry in entries:
         if not isinstance(entry, _CaseEntry):
             raise TypeError(
@@ -640,7 +658,7 @@ def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
 
     result = entries[-1].value
     for entry in reversed(entries[:-1]):
-        result = If(entry.condition, entry.value, result)
+        result = _select_case_value(entry.condition, entry.value, result)
     ctx.require(coverage)
     return result
 
