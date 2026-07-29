@@ -34,7 +34,7 @@ from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
 from examples.common import xor_spec
-from examples.conventional import Conventional
+from examples.conventional import Conventional, conventional_spec
 from examples.optimized import Optimized
 
 from infra.compile_cpp import jit_compile, nonjit_compile
@@ -319,6 +319,94 @@ class TestConstantFolding(unittest.TestCase):
 
         self.assertEqual(conventional.val, 388040612)
         self.assertEqual(conventional, optimized)
+
+    def test_conventional_handles_subnormals_and_special_values(self):
+        a = [Var(name=f"a_{i}", sign=BFloat16T()) for i in range(4)]
+        b = [Var(name=f"b_{i}", sign=BFloat16T()) for i in range(4)]
+        conventional = Conventional(*a, *b)
+
+        zero = BFloat16.Zero()
+        one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)
+        largest_finite = BFloat16.from_fields(
+            sign=0,
+            exponent=254,
+            mantissa=127,
+        )
+        smallest_subnormal = BFloat16.from_fields(sign=0, exponent=0, mantissa=1)
+
+        cases = [
+            (
+                "subnormal",
+                [smallest_subnormal, zero, zero, zero],
+                [one, zero, zero, zero],
+                0x00010000,
+            ),
+            (
+                "zero product does not set the maximum exponent",
+                [smallest_subnormal, zero, zero, zero],
+                [one, largest_finite, zero, zero],
+                0x00010000,
+            ),
+            (
+                "positive infinity",
+                [BFloat16.Inf(), zero, zero, zero],
+                [one, zero, zero, zero],
+                Float32.Inf().val,
+            ),
+            (
+                "negative infinity",
+                [BFloat16.nInf(), zero, zero, zero],
+                [one, zero, zero, zero],
+                Float32.nInf().val,
+            ),
+            (
+                "opposing infinities",
+                [BFloat16.Inf(), BFloat16.nInf(), zero, zero],
+                [one, one, zero, zero],
+                Float32.NaN().val,
+            ),
+            (
+                "zero times infinity",
+                [zero, zero, zero, zero],
+                [BFloat16.Inf(), zero, zero, zero],
+                Float32.NaN().val,
+            ),
+            (
+                "NaN input",
+                [BFloat16.NaN(), zero, zero, zero],
+                [one, zero, zero, zero],
+                Float32.NaN().val,
+            ),
+        ]
+
+        for name, a_values, b_values, expected in cases:
+            with self.subTest(name=name):
+                for variable, value in zip(a, a_values):
+                    variable.load_val(value)
+                for variable, value in zip(b, b_values):
+                    variable.load_val(value)
+                self.assertEqual(conventional.evaluate().val, expected)
+
+                outer_ctx = SpecContext(f"conventional-{name}")
+                outer_result = conventional_spec(
+                    *(value.to_spec(outer_ctx) for value in (*a_values, *b_values)),
+                    ctx=outer_ctx,
+                ).constant_fold()
+                expected_result = Float32(expected).to_spec(outer_ctx)
+                if (
+                    expected_result.is_inf.constant_fold().value
+                    or expected_result.is_nan.constant_fold().value
+                ):
+                    self.assertEqual(
+                        outer_result.classification_flags(),
+                        expected_result.classification_flags(),
+                    )
+                if expected_result.is_inf.constant_fold().value:
+                    self.assertEqual(
+                        outer_result.sign.constant_fold(),
+                        expected_result.sign.constant_fold(),
+                    )
+                outer_ctx.validate_requirements()
 
 
 class TestFingerprint(unittest.TestCase):
@@ -1785,12 +1873,14 @@ class TestBFloat16Spec(unittest.TestCase):
     def test_bf16_decoder_delegates_to_structured_decode(self):
         ctx = SpecContext("structured-bf16-decode")
 
-        decoded = ctx.spec_of(bf16_decode(Const(BFloat16.Zero())))
+        decoded = bf16_decode(Const(BFloat16.Zero()))
 
         self.assertEqual(
-            tuple(field.constant_fold() for field in decoded),
+            tuple(ctx.spec_of(field).constant_fold() for field in decoded),
             tuple(RealLit(value) for value in (0, 0, 0, 0, 0, 1, 0, 0)),
         )
+        self.assertIs(decoded.sign, decoded[0])
+        self.assertIs(decoded.is_nan, decoded[7])
 
     def test_bf16_format_and_explicit_non_finite_constructors(self):
         self.assertEqual(bf16.exponent_bits, 8)

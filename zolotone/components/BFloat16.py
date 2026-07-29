@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 from ..types import *
 from .Tuple import make_Tuple
 from .basics import *
@@ -85,6 +87,18 @@ def _bf16_alloc(
 
 ############## Public API ##############
 
+
+class DecodedBF16(NamedTuple):
+    sign: Node
+    exponent: Node
+    mantissa: Node
+    is_normal: Node
+    is_subnormal: Node
+    is_zero: Node
+    is_inf: Node
+    is_nan: Node
+
+
 def bf16_decode_spec(x: bf16, ctx):
     (
         sign,
@@ -161,33 +175,46 @@ def bf16_pack(sign: Node, exponent: Node, mantissa: Node) -> Node:
     return _bf16_alloc(sign, exponent, mantissa)
 
 
-@Primitive(name="bf16_decode", spec=bf16_decode_spec)
-def bf16_decode(x: Node) -> Node:
-    sign = _bf16_sign(x)
-    exponent = _bf16_exponent(x)
-    mantissa = _bf16_mantissa(x)
+def bf16_decode(x: Node) -> DecodedBF16:
+    @Primitive(name="bf16_decode", spec=bf16_decode_spec)
+    def decode(x: Node) -> Node:
+        sign = _bf16_sign(x)
+        exponent = _bf16_exponent(x)
+        mantissa = _bf16_mantissa(x)
 
-    mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(UQ(0, 1, 0)))
-    mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(UQ(0, 1, 0)))
+        mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(UQ(0, 1, 0)))
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(UQ(0, 1, 0)))
 
-    exponent_is_all_ones = basic_and_reduce(exponent, out=Const(UQ(0, 1, 0)))
-    exponent_is_not_all_ones = basic_invert(exponent_is_all_ones, out=Const(UQ(0, 1, 0)))
-    exponent_is_nonzero = basic_or_reduce(exponent, out=Const(UQ(0, 1, 0)))
-    exponent_is_zero = basic_invert(exponent_is_nonzero, out=Const(UQ(0, 1, 0)))
+        exponent_is_all_ones = basic_and_reduce(exponent, out=Const(UQ(0, 1, 0)))
+        exponent_is_not_all_ones = basic_invert(exponent_is_all_ones, out=Const(UQ(0, 1, 0)))
+        exponent_is_nonzero = basic_or_reduce(exponent, out=Const(UQ(0, 1, 0)))
+        exponent_is_zero = basic_invert(exponent_is_nonzero, out=Const(UQ(0, 1, 0)))
 
-    is_normal = basic_and(exponent_is_nonzero, exponent_is_not_all_ones, Const(UQ(0, 1, 0)))
-    is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
-    is_zero = basic_and(exponent_is_zero, mantissa_is_zero, Const(UQ(0, 1, 0)))
-    is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, Const(UQ(0, 1, 0)))
-    is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
+        is_normal = basic_and(exponent_is_nonzero, exponent_is_not_all_ones, Const(UQ(0, 1, 0)))
+        is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, Const(UQ(0, 1, 0)))
+        is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, Const(UQ(0, 1, 0)))
+        is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
 
-    return make_Tuple(
-        sign,
-        exponent,
-        mantissa,
-        is_normal,
-        is_subnormal,
-        is_zero,
-        is_inf,
-        is_nan,
+        return make_Tuple(
+            sign,
+            exponent,
+            mantissa,
+            is_normal,
+            is_subnormal,
+            is_zero,
+            is_inf,
+            is_nan,
+        )
+
+    decoded = decode(x)
+    return DecodedBF16(
+        sign=decoded[0],
+        exponent=decoded[1],
+        mantissa=decoded[2],
+        is_normal=decoded[3],
+        is_subnormal=decoded[4],
+        is_zero=decoded[5],
+        is_inf=decoded[6],
+        is_nan=decoded[7],
     )
