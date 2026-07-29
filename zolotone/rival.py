@@ -156,6 +156,8 @@ def _rewrite_proven_expressions(
         predicate = predicate.constant_fold()
         if isinstance(predicate, BoolLit):
             return predicate.value
+        if any(isinstance(var, BoolVar) for var in variables(predicate)):
+            return None
         if not rects:
             return None
 
@@ -163,15 +165,34 @@ def _rewrite_proven_expressions(
         if cached is not None or predicate in cache:
             return cached
 
-        machine = build_machine([predicate], free_vars)
-        statuses = [
-            machine.apply_with_hints(rect, None).status
+        true_machine = build_machine([predicate], free_vars)
+        true_statuses = [
+            true_machine.apply_with_hints(rect, None).status
             for rect in rects
         ]
-        if all(status == (False, False) for status in statuses):
+        if all(status == (False, False) for status in true_statuses):
             result = True
-        elif all(status == (True, True) for status in statuses):
-            result = False
+        elif all(status == (True, True) for status in true_statuses):
+            # An asserted predicate that always errors may be either false or
+            # undefined. Prove falsity by successfully asserting its negation
+            # instead of interpreting an error status as Boolean false.
+            negated = (~predicate).constant_fold()
+            if isinstance(negated, BoolLit):
+                result = not negated.value
+            else:
+                false_machine = build_machine([negated], free_vars)
+                false_statuses = [
+                    false_machine.apply_with_hints(rect, None).status
+                    for rect in rects
+                ]
+                result = (
+                    False
+                    if all(
+                        status == (False, False)
+                        for status in false_statuses
+                    )
+                    else None
+                )
         else:
             result = None
         cache[predicate] = result

@@ -2435,6 +2435,53 @@ class TestRivalTranslation(unittest.TestCase):
         self.assertEqual(trimmed.assumes, [assume])
         self.assertEqual(trimmed.checks, [check])
 
+    def test_rival_trim_context_keeps_unconstrained_bool_check(self):
+        ctx = SpecContext("rival-trim-bool-check")
+        predicate = ctx.bool("predicate")
+        ctx.check(predicate)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [predicate])
+
+    def test_rival_trim_context_keeps_if_with_unconstrained_bool_condition(self):
+        ctx = SpecContext("rival-trim-bool-if")
+        predicate = ctx.bool("predicate")
+        one = ctx.real_val(1)
+        check = If(predicate, one, ctx.real_val(2)).eq(one)
+        ctx.check(check)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [check])
+
+    def test_rival_trim_context_does_not_treat_undefined_predicate_as_false(self):
+        ctx = SpecContext("rival-trim-undefined-predicate")
+        x = ctx.real("x")
+        zero = ctx.real_val(0)
+        one = ctx.real_val(1)
+        two = ctx.real_val(2)
+        undefined = (x ** ctx.real_val(-1)) > zero
+        checks = [
+            ~undefined,
+            If(undefined, one, two).eq(two),
+            abs(x ** ctx.real_val(-1)).eq(one),
+            (x ** ctx.real_val(-1)).max(one).eq(one),
+            (x ** ctx.real_val(-1)).min(one).eq(one),
+        ]
+        ctx.assume(x.eq(zero))
+        for check in checks:
+            ctx.check(check)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, checks)
+        self.assertEqual(
+            rival_feasibility_check(trimmed, max_depth=0, checks=True),
+            "not feasible",
+        )
+        self.assertEqual(simplify_ctx(ctx)["status"], "sat")
+
     def test_rival_trim_context_requires_every_assumption_rect(self):
         ctx = SpecContext("rival-trim-all-rects")
         sign = ctx.real("sign")
