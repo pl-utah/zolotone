@@ -62,7 +62,7 @@ impl RawRivalMachine {
         &mut self,
         rect: Vec<(f64, f64)>,
         hints: Option<PyRef<'_, RivalHints>>,
-    ) -> PyResult<((bool, bool), RivalHints, bool)> {
+    ) -> PyResult<((bool, bool), RivalHints)> {
         let precision = self.machine.argument_precision();
         let rival_rect = rect
             .into_iter()
@@ -75,10 +75,9 @@ impl RawRivalMachine {
             .collect::<Vec<_>>();
 
         let hint_slice = hints.as_ref().map(|h| h.hints.as_slice());
-        let (status, next_hints, converged) =
-            self.machine.analyze_with_hints(&rival_rect, hint_slice);
+        let (status, next_hints, _) = self.machine.analyze_with_hints(&rival_rect, hint_slice);
         let status_interval = (!status.lo().is_zero(), !status.hi().is_zero());
-        Ok((status_interval, RivalHints { hints: next_hints }, converged))
+        Ok((status_interval, RivalHints { hints: next_hints }))
     }
 }
 

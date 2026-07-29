@@ -2133,6 +2133,53 @@ class TestRivalTranslation(unittest.TestCase):
             [[(-math.inf, math.inf), (-math.inf, math.inf)]],
         )
 
+    def test_rival_rects_use_boolean_point_domains(self):
+        true_ctx = SpecContext("rival-rects-bool-true")
+        true_predicate = true_ctx.bool("predicate")
+        true_ctx.assume(true_predicate)
+
+        false_ctx = SpecContext("rival-rects-bool-false")
+        false_predicate = false_ctx.bool("predicate")
+        false_ctx.assume(~false_predicate)
+
+        self.assertEqual(
+            get_rival_rects([], ["predicate"], ["predicate"]),
+            [[(0.0, 1.0)]],
+        )
+        self.assertEqual(
+            get_rival_rects(true_ctx.assumes, ["predicate"]),
+            [[(1.0, 1.0)]],
+        )
+        self.assertEqual(
+            get_rival_rects(false_ctx.assumes, ["predicate"]),
+            [[(0.0, 0.0)]],
+        )
+
+    def test_rival_rects_enumerate_boolean_equalities(self):
+        ctx = SpecContext("rival-rects-bool-equality")
+        p = ctx.bool("p")
+        q = ctx.bool("q")
+        ctx.assume(p.eq(q))
+
+        self.assertEqual(
+            get_rival_rects(ctx.assumes, ["p", "q"]),
+            [
+                [(0.0, 0.0), (0.0, 0.0)],
+                [(1.0, 1.0), (1.0, 1.0)],
+            ],
+        )
+
+    def test_rival_rects_combine_boolean_and_real_bounds(self):
+        ctx = SpecContext("rival-rects-bool-real")
+        predicate = ctx.bool("predicate")
+        x = ctx.real("x")
+        ctx.assume(predicate & (x >= ctx.real_val(0)))
+
+        self.assertEqual(
+            get_rival_rects(ctx.assumes, ["predicate", "x"]),
+            [[(1.0, 1.0), (0.0, math.inf)]],
+        )
+
     def test_rival_rects_extract_closed_bounds(self):
         ctx = SpecContext("rival-rects-closed")
         x = ctx.real("x")
@@ -2308,22 +2355,19 @@ class TestRivalTranslation(unittest.TestCase):
                         return RivalAnalysis(
                             status=(False, True),
                             hints="root-hints",
-                            converged=False,
                         )
-                    return RivalAnalysis(status=(True, True), hints=None, converged=True)
+                    return RivalAnalysis(status=(True, True), hints=None)
 
                 machine.apply_with_hints.side_effect = apply
             elif exprs == [maybe]:
                 machine.apply_with_hints.return_value = RivalAnalysis(
                     status=(False, True),
                     hints=None,
-                    converged=False,
                 )
             else:
                 machine.apply_with_hints.return_value = RivalAnalysis(
                     status=(False, False),
                     hints=None,
-                    converged=True,
                 )
             return machine
 
@@ -2362,13 +2406,11 @@ class TestRivalTranslation(unittest.TestCase):
                         return RivalAnalysis(
                             status=(False, False),
                             hints=None,
-                            converged=True,
                         )
                     if rect == bad_rect:
                         return RivalAnalysis(
                             status=(True, True),
                             hints=None,
-                            converged=True,
                         )
                     raise AssertionError(f"unexpected rect {rect}")
 
@@ -2377,7 +2419,6 @@ class TestRivalTranslation(unittest.TestCase):
                 machine.apply_with_hints.return_value = RivalAnalysis(
                     status=(False, False),
                     hints=None,
-                    converged=True,
                 )
             return machine
 
@@ -2413,7 +2454,6 @@ class TestRivalTranslation(unittest.TestCase):
                     if rect == assumption_rect
                     else (False, True),
                     hints=None,
-                    converged=True,
                 )
 
             machine.apply_with_hints.side_effect = apply
@@ -2454,7 +2494,6 @@ class TestRivalTranslation(unittest.TestCase):
             machine.apply_with_hints.return_value = RivalAnalysis(
                 status=(False, True),
                 hints=None,
-                converged=True,
             )
             return machine
 
@@ -2472,6 +2511,26 @@ class TestRivalTranslation(unittest.TestCase):
         trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.checks, [predicate])
+
+    def test_rival_trim_context_uses_boolean_assumption_rect(self):
+        ctx = SpecContext("rival-trim-bool-assumption")
+        predicate = ctx.bool("predicate")
+        ctx.assume(predicate)
+        ctx.check(predicate)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [predicate])
+        self.assertEqual(trimmed.checks, [])
+
+    def test_rival_trim_context_proves_boolean_tautology(self):
+        ctx = SpecContext("rival-trim-bool-tautology")
+        predicate = ctx.bool("predicate")
+        ctx.check(predicate | ~predicate)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [])
 
     def test_rival_trim_context_keeps_if_with_unconstrained_bool_condition(self):
         ctx = SpecContext("rival-trim-bool-if")
@@ -2526,7 +2585,6 @@ class TestRivalTranslation(unittest.TestCase):
                 machine.apply_with_hints.return_value = RivalAnalysis(
                     status=(False, True),
                     hints=None,
-                    converged=True,
                 )
             else:
                 self.assertEqual(exprs, [check])
@@ -2538,7 +2596,6 @@ class TestRivalTranslation(unittest.TestCase):
                         if rect == [(0.0, 0.0)]
                         else (True, True),
                         hints=None,
-                        converged=True,
                     )
 
                 machine.apply_with_hints.side_effect = apply
