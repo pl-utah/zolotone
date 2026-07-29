@@ -383,12 +383,53 @@ class MalformedSpecification(ValueError):
     pass
 
 
+def _context_expression_state(
+    ctx: SpecContext,
+) -> tuple[tuple[BoolExpr, ...], tuple[BoolExpr, ...]]:
+    return tuple(ctx.assumes), tuple(ctx.checks)
+
+
+def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
+    """Alternate regular and Rival simplification to a structural fixpoint."""
+    current = ctx
+    seen_states: set[
+        tuple[tuple[BoolExpr, ...], tuple[BoolExpr, ...]]
+    ] = set()
+    max_passes = min(
+        32,
+        max(2, len(ctx.assumes) + len(ctx.checks) + 2),
+    )
+
+    for _ in range(max_passes):
+        current_state = _context_expression_state(current)
+        if current_state in seen_states:
+            warnings.warn(
+                f"Simplification cycle detected for {ctx.name!r}",
+                RuntimeWarning,
+            )
+            break
+        seen_states.add(current_state)
+
+        rewritten = rival_trim_context(current.simplify())
+        rewritten_state = _context_expression_state(rewritten)
+        current = rewritten
+        if rewritten_state == current_state:
+            break
+    else:
+        warnings.warn(
+            f"Simplification did not saturate after {max_passes} passes "
+            f"for {ctx.name!r}",
+            RuntimeWarning,
+        )
+
+    return current
+
+
 def simplify_ctx(ctx: SpecContext):
     run_started_at = perf_counter()
     
     try:
-        simplified_ctx = ctx.simplify()
-        simplified_ctx = rival_trim_context(simplified_ctx)
+        simplified_ctx = _simplify_with_rival(ctx)
     except PoorSpec as exc:
         return build_proof_report(
             ctx,

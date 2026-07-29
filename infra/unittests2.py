@@ -987,6 +987,23 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(report["feasibility_status"], "not feasible")
         self.assertEqual(report["status"], "sat")
 
+    def test_simplify_ctx_alternates_regular_and_rival_until_saturated(self):
+        ctx = SpecContext("alternating-simplification")
+        x = ctx.real("x")
+        zero = ctx.real_val(0)
+        one = ctx.real_val(1)
+        ctx.assume(x >= zero)
+        ctx.assume(abs(x).eq(one))
+        ctx.check(x.eq(one))
+
+        report = simplify_ctx(ctx)
+
+        self.assertEqual(report["new_ctx"].assumes, [])
+        self.assertEqual(report["new_ctx"].checks, [])
+        self.assertEqual(report["status"], "unsat")
+        self.assertEqual(ctx.assumes, [x >= zero, abs(x).eq(one)])
+        self.assertEqual(ctx.checks, [x.eq(one)])
+
 class TestEgglogFloatLiterals(unittest.TestCase):
     def test_xnor_extracts_as_boolean_equality(self):
         p = BoolVar("p")
@@ -2373,14 +2390,13 @@ class TestRivalTranslation(unittest.TestCase):
         self.assertEqual(status, "feasible")
         self.assertEqual(combined_calls, [(clean_rect, None)])
 
-    def test_rival_trim_context_uses_assumption_rects_only_for_checks(self):
+    def test_rival_trim_context_preserves_rect_assumptions_for_checks(self):
         ctx = SpecContext("rival-trim-assumption-rects")
         x = ctx.real("x")
         bounded = x >= ctx.real_val(0)
         ctx.assume(bounded)
         ctx.check(bounded)
 
-        unbounded = [(-math.inf, math.inf)]
         assumption_rect = [(0.0, math.inf)]
         seen_rects = []
 
@@ -2408,7 +2424,20 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(trimmed.assumes, [bounded])
         self.assertEqual(trimmed.checks, [])
-        self.assertEqual(seen_rects, [unbounded, assumption_rect])
+        self.assertEqual(seen_rects, [assumption_rect])
+
+    def test_rival_trim_context_only_rewrites_non_rect_assumptions(self):
+        ctx = SpecContext("rival-trim-preserve-rect-assumption")
+        x = ctx.real("x")
+        zero = ctx.real_val(0)
+        redundant = abs(x).eq(x)
+        contributing = (x >= zero) & redundant
+        ctx.assume(contributing)
+        ctx.assume(redundant)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [contributing])
 
     def test_rival_trim_context_keeps_maybe_exprs(self):
         ctx = SpecContext("rival-trim-maybe")

@@ -84,9 +84,18 @@ def get_rival_rects(
     assumes: Sequence[BoolExpr],
     free_vars: Sequence[str],
 ) -> list[list[tuple[float, float]]]:
+    rects, _ = _get_rival_rects_and_contributors(assumes, free_vars)
+    return rects
+
+
+def _get_rival_rects_and_contributors(
+    assumes: Sequence[BoolExpr],
+    free_vars: Sequence[str],
+) -> tuple[list[list[tuple[float, float]]], list[bool]]:
     var_indexes = {name: index for index, name in enumerate(free_vars)}
     rects = [_rival_unbounded_rect(len(free_vars))]
-    for assume in assumes:
+    contributors = [False] * len(assumes)
+    for index, assume in enumerate(assumes):
         alternatives = _rival_rect_alternatives(
             assume,
             var_indexes,
@@ -94,10 +103,11 @@ def get_rival_rects(
         )
         if alternatives is None:
             continue
+        contributors[index] = True
         rects = _intersect_rival_rect_sets(rects, alternatives)
         if not rects:
             break
-    return rects
+    return rects, contributors
 
 
 def rival_feasibility_check(ctx: "SpecContext", max_depth: int = 1, checks=False):
@@ -141,18 +151,11 @@ def _rewrite_proven_expressions(
     nodes: Sequence[SpecNode],
     *,
     free_vars: Sequence[str],
-    comparison_rects: Sequence[Sequence[tuple[float, float]]],
-    numeric_rects: Sequence[Sequence[tuple[float, float]]],
-    simplify_comparisons: bool,
+    rects: Sequence[Sequence[tuple[float, float]]],
 ) -> list[SpecNode]:
-    comparison_cache: dict[BoolExpr, bool | None] = {}
-    numeric_cache: dict[BoolExpr, bool | None] = {}
+    proof_cache: dict[BoolExpr, bool | None] = {}
 
-    def prove(
-        predicate: BoolExpr,
-        rects: Sequence[Sequence[tuple[float, float]]],
-        cache: dict[BoolExpr, bool | None],
-    ) -> bool | None:
+    def prove(predicate: BoolExpr) -> bool | None:
         predicate = predicate.constant_fold()
         if isinstance(predicate, BoolLit):
             return predicate.value
@@ -161,8 +164,8 @@ def _rewrite_proven_expressions(
         if not rects:
             return None
 
-        cached = cache.get(predicate)
-        if cached is not None or predicate in cache:
+        cached = proof_cache.get(predicate)
+        if cached is not None or predicate in proof_cache:
             return cached
 
         true_machine = build_machine([predicate], free_vars)
@@ -181,21 +184,11 @@ def _rewrite_proven_expressions(
                 result = not negated.value
             else:
                 false_machine = build_machine([negated], free_vars)
-                false_statuses = [
-                    false_machine.apply_with_hints(rect, None).status
-                    for rect in rects
-                ]
-                result = (
-                    False
-                    if all(
-                        status == (False, False)
-                        for status in false_statuses
-                    )
-                    else None
-                )
+                false_statuses = [false_machine.apply_with_hints(rect, None).status for rect in rects]
+                result = False if all(status == (False, False) for status in false_statuses) else None
         else:
             result = None
-        cache[predicate] = result
+        proof_cache[predicate] = result
         return result
 
     def rewrite(node: SpecNode, *, top_level: bool = False) -> SpecNode:
@@ -210,15 +203,12 @@ def _rewrite_proven_expressions(
         if isinstance(rewritten, BoolLit):
             return rewritten
 
-        if (
-            simplify_comparisons
-            and isinstance(rewritten, (Eq, NotEq, Lt, Le, Gt, Ge, BoolEq))
-        ):
-            truth = prove(rewritten, comparison_rects, comparison_cache)
+        if isinstance(rewritten, (Eq, NotEq, Lt, Le, Gt, Ge, BoolEq)):
+            truth = prove(rewritten)
             return BoolLit(truth) if truth is not None else rewritten
 
         if isinstance(rewritten, If):
-            truth = prove(rewritten.cond, numeric_rects, numeric_cache)
+            truth = prove(rewritten.cond)
             if truth is True:
                 return rewritten.on_true
             if truth is False:
@@ -227,21 +217,13 @@ def _rewrite_proven_expressions(
 
         if isinstance(rewritten, Abs):
             zero = RealLit(0)
-            nonnegative = prove(
-                rewritten.value >= zero,
-                numeric_rects,
-                numeric_cache,
-            )
+            nonnegative = prove(rewritten.value >= zero)
             if nonnegative is True:
                 return rewritten.value
             if nonnegative is False:
                 return (-rewritten.value).constant_fold()
 
-            nonpositive = prove(
-                rewritten.value <= zero,
-                numeric_rects,
-                numeric_cache,
-            )
+            nonpositive = prove(rewritten.value <= zero)
             if nonpositive is True:
                 return (-rewritten.value).constant_fold()
             if nonpositive is False:
@@ -249,21 +231,13 @@ def _rewrite_proven_expressions(
             return rewritten
 
         if isinstance(rewritten, (Max, Min)):
-            lhs_is_at_least_rhs = prove(
-                rewritten.lhs >= rewritten.rhs,
-                numeric_rects,
-                numeric_cache,
-            )
+            lhs_is_at_least_rhs = prove(rewritten.lhs >= rewritten.rhs)
             if lhs_is_at_least_rhs is not None:
                 if isinstance(rewritten, Max):
                     return rewritten.lhs if lhs_is_at_least_rhs else rewritten.rhs
                 return rewritten.rhs if lhs_is_at_least_rhs else rewritten.lhs
 
-            lhs_is_at_most_rhs = prove(
-                rewritten.lhs <= rewritten.rhs,
-                numeric_rects,
-                numeric_cache,
-            )
+            lhs_is_at_most_rhs = prove(rewritten.lhs <= rewritten.rhs)
             if lhs_is_at_most_rhs is None:
                 return rewritten
             if isinstance(rewritten, Max):
@@ -271,7 +245,7 @@ def _rewrite_proven_expressions(
             return rewritten.lhs if lhs_is_at_most_rhs else rewritten.rhs
 
         if top_level and isinstance(rewritten, BoolExpr):
-            truth = prove(rewritten, comparison_rects, comparison_cache)
+            truth = prove(rewritten)
             return BoolLit(truth) if truth is not None else rewritten
 
         return rewritten
@@ -279,32 +253,37 @@ def _rewrite_proven_expressions(
     return [rewrite(node, top_level=True) for node in nodes]
 
 
-# First rewrite comparisons and numeric branches only when every applicable
-# rectangle agrees. Then drop expressions that are certainly true. Assumptions
-# must hold without relying on themselves; checks may use a conservative
-# rectangular enclosure of the assumption domain.
+# Preserve assumptions used to construct the rectangular domain. Rewrite all
+# other assumptions and checks only when every applicable rectangle agrees,
+# then drop expressions that are certainly true.
 def rival_trim_context(ctx: "SpecContext") -> "SpecContext":
-    original_exprs = ctx.assumes + ctx.checks
-    original_free_vars = collect_free_vars(original_exprs)
-    assumption_rects = get_rival_rects(
-        ctx.assumes,
-        original_free_vars,
-    )
-    unbounded_rects = [_rival_unbounded_rect(len(original_free_vars))]
-    rewritten_ctx = ctx.copy(
-        assumes=_rewrite_proven_expressions(
+    exprs = ctx.assumes + ctx.checks
+    free_vars = collect_free_vars(exprs)
+    assumption_rects, assumption_contributes_to_rect = _get_rival_rects_and_contributors(ctx.assumes, free_vars)
+    rewritable_assumes = [
+        assume
+        for assume, contributes in zip(
             ctx.assumes,
-            free_vars=original_free_vars,
-            comparison_rects=unbounded_rects,
-            numeric_rects=assumption_rects,
-            simplify_comparisons=False,
-        ),
+            assumption_contributes_to_rect,
+        )
+        if not contributes
+    ]
+    rewritten_assumes = iter(
+        _rewrite_proven_expressions(
+            rewritable_assumes,
+            free_vars=free_vars,
+            rects=assumption_rects,
+        )
+    )
+    rewritten_ctx = ctx.copy(
+        assumes=[
+            assume if contributes else next(rewritten_assumes)
+            for assume, contributes in zip(ctx.assumes, assumption_contributes_to_rect)
+        ],
         checks=_rewrite_proven_expressions(
             ctx.checks,
-            free_vars=original_free_vars,
-            comparison_rects=assumption_rects,
-            numeric_rects=assumption_rects,
-            simplify_comparisons=True,
+            free_vars=free_vars,
+            rects=assumption_rects,
         ),
     )
 
