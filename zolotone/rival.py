@@ -137,77 +137,131 @@ def rival_feasibility_check(ctx: "SpecContext", max_depth: int = 1, checks=False
     return "unknown" if may_be_feasible else "not feasible"
 
 
-def _rect_hull_bounds(
-    rects: Sequence[Sequence[tuple[float, float]]],
+def _rewrite_proven_expressions(
+    nodes: Sequence[SpecNode],
+    *,
     free_vars: Sequence[str],
-) -> dict[str, tuple[float, float]]:
-    if not rects:
-        return {}
-    return {
-        name: (
-            min(rect[index][0] for rect in rects),
-            max(rect[index][1] for rect in rects),
-        )
-        for index, name in enumerate(free_vars)
-    }
+    comparison_rects: Sequence[Sequence[tuple[float, float]]],
+    numeric_rects: Sequence[Sequence[tuple[float, float]]],
+    simplify_comparisons: bool,
+) -> list[SpecNode]:
+    comparison_cache: dict[BoolExpr, bool | None] = {}
+    numeric_cache: dict[BoolExpr, bool | None] = {}
 
+    def prove(
+        predicate: BoolExpr,
+        rects: Sequence[Sequence[tuple[float, float]]],
+        cache: dict[BoolExpr, bool | None],
+    ) -> bool | None:
+        predicate = predicate.constant_fold()
+        if isinstance(predicate, BoolLit):
+            return predicate.value
+        if not rects:
+            return None
 
-def _rewrite_bounded_extrema(
-    node: SpecNode,
-    bounds: dict[str, tuple[float, float]],
-) -> SpecNode:
-    old_children = children(node)
-    new_children = tuple(
-        _rewrite_bounded_extrema(child, bounds)
-        for child in old_children
-    )
-    if all(old is new for old, new in zip(old_children, new_children)):
-        rewritten = node
-    else:
-        rewritten = type(node)(*new_children)
+        cached = cache.get(predicate)
+        if cached is not None or predicate in cache:
+            return cached
 
-    if not isinstance(rewritten, (Max, Min)):
+        machine = build_machine([predicate], free_vars)
+        statuses = [
+            machine.apply_with_hints(rect, None).status
+            for rect in rects
+        ]
+        if all(status == (False, False) for status in statuses):
+            result = True
+        elif all(status == (True, True) for status in statuses):
+            result = False
+        else:
+            result = None
+        cache[predicate] = result
+        return result
+
+    def rewrite(node: SpecNode, *, top_level: bool = False) -> SpecNode:
+        old_children = children(node)
+        new_children = tuple(rewrite(child) for child in old_children)
+        rewritten = (
+            node
+            if all(old is new for old, new in zip(old_children, new_children))
+            else type(node)(*new_children)
+        ).constant_fold()
+
+        if isinstance(rewritten, BoolLit):
+            return rewritten
+
+        if (
+            simplify_comparisons
+            and isinstance(rewritten, (Eq, NotEq, Lt, Le, Gt, Ge, BoolEq))
+        ):
+            truth = prove(rewritten, comparison_rects, comparison_cache)
+            return BoolLit(truth) if truth is not None else rewritten
+
+        if isinstance(rewritten, If):
+            truth = prove(rewritten.cond, numeric_rects, numeric_cache)
+            if truth is True:
+                return rewritten.on_true
+            if truth is False:
+                return rewritten.on_false
+            return rewritten
+
+        if isinstance(rewritten, Abs):
+            zero = RealLit(0)
+            nonnegative = prove(
+                rewritten.value >= zero,
+                numeric_rects,
+                numeric_cache,
+            )
+            if nonnegative is True:
+                return rewritten.value
+            if nonnegative is False:
+                return (-rewritten.value).constant_fold()
+
+            nonpositive = prove(
+                rewritten.value <= zero,
+                numeric_rects,
+                numeric_cache,
+            )
+            if nonpositive is True:
+                return (-rewritten.value).constant_fold()
+            if nonpositive is False:
+                return rewritten.value
+            return rewritten
+
+        if isinstance(rewritten, (Max, Min)):
+            lhs_is_at_least_rhs = prove(
+                rewritten.lhs >= rewritten.rhs,
+                numeric_rects,
+                numeric_cache,
+            )
+            if lhs_is_at_least_rhs is not None:
+                if isinstance(rewritten, Max):
+                    return rewritten.lhs if lhs_is_at_least_rhs else rewritten.rhs
+                return rewritten.rhs if lhs_is_at_least_rhs else rewritten.lhs
+
+            lhs_is_at_most_rhs = prove(
+                rewritten.lhs <= rewritten.rhs,
+                numeric_rects,
+                numeric_cache,
+            )
+            if lhs_is_at_most_rhs is None:
+                return rewritten
+            if isinstance(rewritten, Max):
+                return rewritten.rhs if lhs_is_at_most_rhs else rewritten.lhs
+            return rewritten.lhs if lhs_is_at_most_rhs else rewritten.rhs
+
+        if top_level and isinstance(rewritten, BoolExpr):
+            truth = prove(rewritten, comparison_rects, comparison_cache)
+            return BoolLit(truth) if truth is not None else rewritten
+
         return rewritten
 
-    variable: RealVar
-    literal: RealLit
-    if isinstance(rewritten.lhs, RealVar) and isinstance(rewritten.rhs, RealLit):
-        variable = rewritten.lhs
-        literal = rewritten.rhs
-    elif isinstance(rewritten.lhs, RealLit) and isinstance(rewritten.rhs, RealVar):
-        variable = rewritten.rhs
-        literal = rewritten.lhs
-    else:
-        return rewritten
-
-    variable_bounds = bounds.get(variable.name)
-    literal_bounds = _rival_literal_enclosure(literal)
-    if variable_bounds is None or literal_bounds is None:
-        return rewritten
-
-    variable_lower, variable_upper = variable_bounds
-    literal_lower, literal_upper = literal_bounds
-    variable_is_above = variable_lower >= literal_upper
-    variable_is_below = variable_upper <= literal_lower
-
-    if isinstance(rewritten, Max):
-        if variable_is_above:
-            return variable
-        if variable_is_below:
-            return literal
-    else:
-        if variable_is_above:
-            return literal
-        if variable_is_below:
-            return variable
-
-    return rewritten
+    return [rewrite(node, top_level=True) for node in nodes]
 
 
-# First rewrite extrema only when every assumption rectangle selects the same
-# branch. Then drop expressions that are certainly true. Assumptions must hold
-# without relying on themselves; checks may use a conservative rectangular
-# enclosure of the assumption domain.
+# First rewrite comparisons and numeric branches only when every applicable
+# rectangle agrees. Then drop expressions that are certainly true. Assumptions
+# must hold without relying on themselves; checks may use a conservative
+# rectangular enclosure of the assumption domain.
 def rival_trim_context(ctx: "SpecContext") -> "SpecContext":
     original_exprs = ctx.assumes + ctx.checks
     original_free_vars = collect_free_vars(original_exprs)
@@ -215,46 +269,34 @@ def rival_trim_context(ctx: "SpecContext") -> "SpecContext":
         ctx.assumes,
         original_free_vars,
     )
-    bounds = _rect_hull_bounds(assumption_rects, original_free_vars)
+    unbounded_rects = [_rival_unbounded_rect(len(original_free_vars))]
     rewritten_ctx = ctx.copy(
-        assumes=[
-            _rewrite_bounded_extrema(assume, bounds).constant_fold()
-            for assume in ctx.assumes
-        ],
-        checks=[
-            _rewrite_bounded_extrema(check, bounds).constant_fold()
-            for check in ctx.checks
-        ],
+        assumes=_rewrite_proven_expressions(
+            ctx.assumes,
+            free_vars=original_free_vars,
+            comparison_rects=unbounded_rects,
+            numeric_rects=assumption_rects,
+            simplify_comparisons=False,
+        ),
+        checks=_rewrite_proven_expressions(
+            ctx.checks,
+            free_vars=original_free_vars,
+            comparison_rects=assumption_rects,
+            numeric_rects=assumption_rects,
+            simplify_comparisons=True,
+        ),
     )
-
-    exprs = rewritten_ctx.assumes + rewritten_ctx.checks
-    free_vars = collect_free_vars(exprs)
-    unbounded_rects = [_rival_unbounded_rect(len(free_vars))]
-    check_rects = get_rival_rects(
-        rewritten_ctx.assumes,
-        free_vars,
-    )
-
-    def is_always_true(
-        expr: BoolExpr,
-        rects: Sequence[Sequence[tuple[float, float]]],
-    ) -> bool:
-        machine = build_machine([expr], free_vars)
-        return all(
-            machine.apply_with_hints(rect, None).status == (False, False)
-            for rect in rects
-        )
 
     return rewritten_ctx.copy(
         assumes=[
             assume
             for assume in rewritten_ctx.assumes
-            if not is_always_true(assume, unbounded_rects)
+            if not identical_nodes(assume, BoolLit(True))
         ],
         checks=[
             check
             for check in rewritten_ctx.checks
-            if not is_always_true(check, check_rects)
+            if not identical_nodes(check, BoolLit(True))
         ],
     )
 

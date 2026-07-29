@@ -157,8 +157,8 @@ if __name__ == '__main__':
         Var(name="b", sign=Float32T()),
     )
     from pprint import pprint
-    #adder.check_determinism()
-    pprint(adder.check_spec())
+    adder.check_determinism()
+    adder.check_spec()
 
     with open("examples/adder_jit.hpp", "w") as file:
         file.write(adder.to_cpp(jittable=True))

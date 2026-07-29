@@ -2513,6 +2513,83 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(trimmed.checks, [])
 
+    def test_rival_trim_context_folds_comparisons_from_assumption_bounds(self):
+        ctx = SpecContext("rival-trim-bounded-comparisons")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        zero = ctx.real_val(0)
+        one = ctx.real_val(1)
+        five = ctx.real_val(5)
+        eight = ctx.real_val(8)
+        ctx.assume((x >= one) & (x <= five))
+        ctx.assume(y >= one)
+        ctx.check(x >= zero)
+        ctx.check(x <= five)
+        ctx.check(x > zero)
+        ctx.check(x.eq(eight))
+        ctx.check(x.ne(eight))
+        ctx.check((x + y) >= (one + one))
+        ctx.check(x < zero)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [BoolLit(False), BoolLit(False)])
+
+    def test_rival_trim_context_does_not_discharge_bound_assumption_itself(self):
+        ctx = SpecContext("rival-trim-retained-bound")
+        x = ctx.real("x")
+        one = ctx.real_val(1)
+        bound = x >= one
+        ctx.assume(bound)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [bound])
+
+    def test_rival_trim_context_simplifies_abs_from_known_sign(self):
+        nonnegative_ctx = SpecContext("rival-trim-nonnegative-abs")
+        x = nonnegative_ctx.real("x")
+        zero = nonnegative_ctx.real_val(0)
+        nonnegative_ctx.assume(x >= zero)
+        nonnegative_ctx.check(abs(x).eq(x))
+
+        nonpositive_ctx = SpecContext("rival-trim-nonpositive-abs")
+        y = nonpositive_ctx.real("y")
+        nonpositive_ctx.assume(y <= zero)
+        nonpositive_ctx.check(abs(y).eq(-y))
+
+        self.assertEqual(rival_trim_context(nonnegative_ctx).checks, [])
+        self.assertEqual(rival_trim_context(nonpositive_ctx).checks, [])
+
+    def test_rival_trim_context_selects_if_branch_from_assumptions(self):
+        ctx = SpecContext("rival-trim-bounded-if")
+        x = ctx.real("x")
+        zero = ctx.real_val(0)
+        one = ctx.real_val(1)
+        two = ctx.real_val(2)
+        ctx.assume(x >= zero)
+        ctx.check(If(x >= zero, one, two).eq(one))
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [])
+
+    def test_rival_trim_context_keeps_abs_and_if_across_mixed_disjuncts(self):
+        ctx = SpecContext("rival-trim-mixed-sign")
+        x = ctx.real("x")
+        one = ctx.real_val(1)
+        two = ctx.real_val(2)
+        sign_domain = (x >= one) | (x <= -one)
+        abs_check = abs(x).eq(x)
+        if_check = If(x >= one, one, two).eq(one)
+        ctx.assume(sign_domain)
+        ctx.check(abs_check)
+        ctx.check(if_check)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [abs_check, if_check])
+
 class TestSpecificationDeterminism(unittest.TestCase):
     def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):
         def malformed_spec(x, ctx):
