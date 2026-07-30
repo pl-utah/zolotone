@@ -9,22 +9,8 @@ N = 4
 Wf = 30
 
 
-def _or_all(values):
-    result = values[0]
-    for value in values[1:]:
-        result = result | value
-    return result
-
-
-def _and_all(values):
-    result = values[0]
-    for value in values[1:]:
-        result = result & value
-    return result
-
-
-def conventional_spec(a0, a1, a2, a3,
-                      b0, b1, b2, b3, ctx):
+def dot_product_spec(a0, a1, a2, a3,
+                     b0, b1, b2, b3, ctx):
     A = (a0, a1, a2, a3)
     B = (b0, b1, b2, b3)
 
@@ -55,7 +41,7 @@ def conventional_spec(a0, a1, a2, a3,
         ctx=ctx,
     )
 
-@Composite(name="Conventional", spec=conventional_spec)
+@Composite(name="Conventional", spec=dot_product_spec)
 def Conventional(a0: Node, a1: Node, a2: Node, a3: Node,
                  b0: Node, b1: Node, b2: Node, b3: Node) -> Node:
     A = tuple(bf16_decode(value) for value in (a0, a1, a2, a3))
@@ -126,9 +112,6 @@ def Conventional(a0: Node, a1: Node, a2: Node, a3: Node,
 
     # Step 1. Exponents add. Each E_p is shifted by bias twice!
     E_p = [uq_add(E_a[i], E_b[i]) for i in range(N)]
-    zero_exponent = Const(UQ(0, E_p[0].node_type.int_bits, E_p[0].node_type.frac_bits))
-    for i in range(N):
-        E_p[i] = if_then_else(bit_or(A[i].is_zero, B[i].is_zero), zero_exponent, E_p[i])
     
     # Step 2. Calculate maximum exponent
     E_m = uq_max(uq_max(E_p[0], E_p[1]), uq_max(E_p[2], E_p[3]))

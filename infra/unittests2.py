@@ -15,7 +15,7 @@ from egglog import EGraph
 
 from zolotone import *
 from zolotone.ast import nodes as ast_nodes
-from zolotone.egglog.rules import load_rules
+from zolotone.egglog.rules import constant_rules, load_rules
 from zolotone.smt import dreal_check_eq, z3_check_eq
 from zolotone.solver import engine as solver_engine
 from zolotone.solver.report import build_proof_report
@@ -33,7 +33,7 @@ from zolotone.spec.spec_utils import from_egglog
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
-from examples.common import xor_spec
+from examples.common import and_spec, or_spec, xor_spec
 from examples.conventional import Conventional, conventional_spec
 from examples.optimized import Optimized
 
@@ -3572,22 +3572,73 @@ class TestSolverApis(unittest.TestCase):
 
 
 class TestSignSpecs(unittest.TestCase):
-    def test_xor_sign_multiplier_fact_follows_from_existing_xor_constraints(self):
-        ctx = SpecContext("xor-sign-multiplier")
+    def test_bit_operator_specs_use_one_canonical_conditional_form(self):
+        ctx = SpecContext("bit-operator-canonical")
         x = ctx.real("x")
         y = ctx.real("y")
+        zero = ctx.real_val(0)
+        one = ctx.real_val(1)
 
-        result = xor_spec(x, y, ctx)
-        derived_fact = sign_multiplier(ctx, result).eq(
+        expected = {
+            and_spec: If(x.eq(one) & y.eq(one), one, zero),
+            or_spec: If(x.eq(one) | y.eq(one), one, zero),
+            xor_spec: If(x.ne(y), one, zero),
+        }
+
+        for spec, expected_result in expected.items():
+            with self.subTest(spec=spec.__name__):
+                self.assertEqual(spec(x, y, ctx), expected_result)
+        self.assertEqual(ctx.assumes, [])
+
+    def test_egglog_unions_guarded_bit_operator_forms(self):
+        ctx = SpecContext("bit-operator-egglog")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        zero = ctx.real_val(0)
+        one = ctx.real_val(1)
+        two = ctx.real_val(2)
+        and_conditional = If(x.eq(one) & y.eq(one), one, zero)
+        or_conditional = If(x.eq(one) | y.eq(one), one, zero)
+        xor_conditional = If(x.ne(y), one, zero)
+
+        ctx.assume(x.eq(zero) | x.eq(one))
+        ctx.assume(y.eq(zero) | y.eq(one))
+        ctx.check(and_conditional.eq(x * y))
+        ctx.check(and_conditional.eq(x.min(y)))
+        ctx.check(or_conditional.eq(x + y - x * y))
+        ctx.check(or_conditional.eq(x.max(y)))
+        ctx.check(xor_conditional.eq(x.max(y) - x * y))
+        ctx.check(xor_conditional.eq(x + y - two * x * y))
+        ctx.check(sign_multiplier(ctx, xor_conditional).eq(
             sign_multiplier(ctx, x) * sign_multiplier(ctx, y)
-        )
-        self.assertEqual(ctx.assumes[-1], derived_fact)
-        ctx.assumes.pop()
-        ctx.check(derived_fact)
+        ))
 
-        report = z3_check_eq(ctx, timeout_ms=10000)
+        egraph = EGraph()
+        egraph.register(*constant_rules())
+        checks = ctx.to_egglog(egraph)
+        egraph.run(1)
 
-        self.assertEqual(report["status"], "unsat", report)
+        self.assertTrue(egraph.check_bool(*checks))
+
+    def test_egglog_does_not_apply_bit_operator_forms_without_guards(self):
+        ctx = SpecContext("bit-operator-egglog-unguarded")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        zero = ctx.real_val(0)
+        one = ctx.real_val(1)
+        ctx.check(If(x.eq(one) & y.eq(one), one, zero).eq(x * y))
+        ctx.check(If(x.eq(one) | y.eq(one), one, zero).eq(x.max(y)))
+        ctx.check(If(x.ne(y), one, zero).eq(x.max(y) - x * y))
+
+        egraph = EGraph()
+        egraph.register(*constant_rules())
+        checks = ctx.to_egglog(egraph)
+        egraph.run(1)
+
+        self.assertTrue(all(
+            not egraph.check_bool(check)
+            for check in checks
+        ))
 
     def test_q_signs_xor_spec_matches_constant_sign_combinations(self):
         cases = [

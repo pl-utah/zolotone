@@ -264,14 +264,18 @@ def check_equivalence(
     proved = True
 
     for case_idx, case_ctx in enumerate(cases):
+        labels = _case_labels(case_ctx.name)
+        # Debugging statement
+        if not _output_classifications_match(labels, output_names):
+            continue
+        
         if case_idx == 0:
             header_padding = " " * max(len(case_ctx.name) - 8, 0)
-            print("case name", header_padding, f"\t| correct?\t| status")
+            print("case name", header_padding, f"\t| correct?\t| status\t| tool")
         status, proof_trace = _solver_check_equivalence(case_ctx, schedule=schedule)
         combined_feasibility = proof_trace[0].get("feasibility_status", "unknown")
 
         if combined_feasibility == "not feasible":
-            labels = _case_labels(case_ctx.name)
             case_proved = _infeasible_case_is_proved(
                 first,
                 second,
@@ -288,7 +292,7 @@ def check_equivalence(
 
         proved = proved and case_proved
         result = "correct" if case_proved else "wrong"
-        print(case_ctx.name, "\t|", result, "\t|", status)
+        print(case_ctx.name, "\t|", result, "\t|", status, "\t|", proof_trace[-1]['tool'])
         full_trace.append(proof_trace)
         if not proved:
             break

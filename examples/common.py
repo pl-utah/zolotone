@@ -45,12 +45,11 @@ def integer_to_fraction(x: Node) -> Primitive:
     return impl(x)
 
 def and_spec(x, y, ctx):
-    res = ctx.fresh_real('and_res')
-    ctx.assume(res.eq(x * y))
-    ctx.assume(res.eq(x.min(y)))
-    ctx.assume(res.eq(If(x.eq(ctx.real_val(1)) & y.eq(ctx.real_val(1)), ctx.real_val(1), ctx.real_val(0))))
-    ctx.assume(res.eq(ctx.real_val(0)) | res.eq(ctx.real_val(1)))
-    return res
+    return If(
+        x.eq(ctx.real_val(1)) & y.eq(ctx.real_val(1)),
+        ctx.real_val(1),
+        ctx.real_val(0),
+    )
 
 @Primitive(name="bit_and", spec=and_spec, c_inline=True)
 def bit_and(x: Node, y: Node) -> Node:
@@ -59,20 +58,7 @@ def bit_and(x: Node, y: Node) -> Node:
     return basic_and(x, y, Const(UQ(0, 1, 0)))
 
 def xor_spec(x, y, ctx):
-    res = ctx.fresh_real('xor_res')
-    ctx.assume(res.eq(If(x.ne(y), ctx.real_val(1), ctx.real_val(0))))
-    ctx.assume(res.eq(x.max(y) - x * y))
-    ctx.assume(res.eq(x + y - ctx.real_val(2) * x * y))
-    ctx.assume(res.eq(ctx.real_val(0)) | res.eq(ctx.real_val(1)))
-    # For bit-valued signs, applying XOR is equivalent to multiplying their
-    # {-1, +1} sign encodings. Record this local consequence instead of using
-    # an unconditional rewrite, which would be unsound for arbitrary reals.
-    ctx.assume(
-        sign_multiplier(ctx, res).eq(
-            sign_multiplier(ctx, x) * sign_multiplier(ctx, y)
-        )
-    )
-    return res
+    return If(x.ne(y), ctx.real_val(1), ctx.real_val(0))
 
 @Primitive(name="bit_xor", spec=xor_spec, c_inline=True)
 def bit_xor(x: Node, y: Node) -> Node:
@@ -81,12 +67,11 @@ def bit_xor(x: Node, y: Node) -> Node:
     return basic_xor(x, y, Const(UQ(0, 1, 0)))
 
 def or_spec(x, y, ctx):
-    res = ctx.fresh_real('or_res')
-    ctx.assume(res.eq(x + y - x * y))
-    ctx.assume(res.eq(x.max(y)))
-    ctx.assume(res.eq(If(x.eq(ctx.real_val(1)) | y.eq(ctx.real_val(1)), ctx.real_val(1), ctx.real_val(0))))
-    ctx.assume(res.eq(ctx.real_val(0)) | res.eq(ctx.real_val(1)))
-    return res
+    return If(
+        x.eq(ctx.real_val(1)) | y.eq(ctx.real_val(1)),
+        ctx.real_val(1),
+        ctx.real_val(0),
+    )
 
 @Primitive(name="bit_or", spec=or_spec, c_inline=True)
 def bit_or(x: Node, y: Node) -> Node:
