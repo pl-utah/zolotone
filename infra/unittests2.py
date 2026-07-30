@@ -1838,12 +1838,31 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         self.assertTrue(
             ast_nodes._output_classifications_match(ast_nodes._case_labels(case.name))
         )
-
         status, _ = solver_engine.check_equivalence(
             case,
             schedule=[{"tool": "simplify"}],
         )
         self.assertEqual(status, "unsat")
+
+    def test_classification_cases_are_constructed_lazily(self):
+        ctx = SpecContext("lazy-classification-cases")
+        inner = fp32.zero(ctx)
+        outer = fp32.zero(ctx)
+
+        with patch.object(ctx, "copy", wraps=ctx.copy) as copy_ctx:
+            cases = ast_nodes._split_classification_cases(
+                ctx,
+                [],
+                inner,
+                outer,
+            )
+            self.assertEqual(copy_ctx.call_count, 0)
+
+            next(cases)
+            self.assertEqual(copy_ctx.call_count, 1)
+
+            next(cases)
+            self.assertEqual(copy_ctx.call_count, 2)
 
 
 class TestBFloat16Spec(unittest.TestCase):

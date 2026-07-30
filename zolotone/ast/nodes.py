@@ -129,7 +129,7 @@ def _split_classification_cases(
     spec_inner: tp.Any,
     spec_outer: tp.Any,
     output_names: tuple[str, str] = ("inner_spec", "outer_spec"),
-) -> list[SpecContext]:
+) -> tp.Iterator[SpecContext]:
     classified_values = [(f"arg{idx}", value) for idx, value in enumerate(inputs)] \
         + list(zip(output_names, (spec_inner, spec_outer), strict=True))
     
@@ -140,7 +140,6 @@ def _split_classification_cases(
     ]
     flag_lists = [value.classification_flags() for _, value in fp_items]
     
-    cases = []
     for selected_flags in product(*flag_lists):
         case_ctx = ctx.copy()
         labels = {}
@@ -156,9 +155,7 @@ def _split_classification_cases(
             labels,
             output_names=output_names,
         )
-        cases.append(case_ctx)
-    
-    return cases
+        yield case_ctx
 
 
 def _collect_classified_spec(
@@ -253,9 +250,7 @@ def check_equivalence(
     combined_ctx = base_ctx.copy()
     first_output = first.collect(combined_ctx)
     second_output = second.collect(combined_ctx)
-    
     combined_ctx.validate_requirements()
-    
     output_names = (first.name, second.name)
     cases = _split_classification_cases(
         combined_ctx,
@@ -268,10 +263,10 @@ def check_equivalence(
     full_trace = []
     proved = True
 
-    header_padding = " " * max(len(cases[0].name) - 8, 0)
-    print("case name", header_padding, f"\t| correct?\t| status")
-
-    for case_ctx in cases:
+    for case_idx, case_ctx in enumerate(cases):
+        if case_idx == 0:
+            header_padding = " " * max(len(case_ctx.name) - 8, 0)
+            print("case name", header_padding, f"\t| correct?\t| status")
         status, proof_trace = _solver_check_equivalence(case_ctx, schedule=schedule)
         combined_feasibility = proof_trace[0].get("feasibility_status", "unknown")
 

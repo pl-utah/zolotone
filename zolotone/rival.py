@@ -64,7 +64,7 @@ class RivalMachine:
         rect: Sequence[tuple[float, float]],
         hints: Any | None = None,
     ) -> RivalAnalysis:
-        status, next_hints = self._raw_machine.apply_with_hints(rect, hints)
+        status, next_hints, _ = self._raw_machine.apply_with_hints(rect, hints)
         return RivalAnalysis(
             status=(bool(status[0]), bool(status[1])),
             hints=next_hints,
