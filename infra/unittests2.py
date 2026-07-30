@@ -33,6 +33,7 @@ from zolotone.spec.spec_utils import from_egglog
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
+from examples.bf16_mult import bf16_mult
 from examples.common import and_spec, or_spec, xor_spec
 from examples.conventional import (
     bf16x8_dot_conventional,
@@ -2140,6 +2141,108 @@ class TestBFloat16Add(unittest.TestCase):
                 )
         finally:
             tempdir.cleanup()
+
+
+class TestBFloat16Mult(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(lhs: BFloat16, rhs: BFloat16) -> int:
+        result = lhs.to_val() * rhs.to_val()
+        if math.isnan(result):
+            return BFloat16.NaN().val
+        if math.isinf(result):
+            return BFloat16.nInf().val if result < 0 else BFloat16.Inf().val
+
+        try:
+            fp32_bits = struct.unpack(">I", struct.pack(">f", result))[0]
+        except OverflowError:
+            return BFloat16.nInf().val if result < 0 else BFloat16.Inf().val
+
+        rounding_bias = 0x7FFF + ((fp32_bits >> 16) & 1)
+        return ((fp32_bits + rounding_bias) >> 16) & 0xFFFF
+
+    def _make_design(self):
+        lhs = Var(name="lhs", sign=BFloat16T())
+        rhs = Var(name="rhs", sign=BFloat16T())
+        return lhs, rhs, bf16_mult(lhs, rhs)
+
+    def test_bf16_mult_specifications_can_be_chained(self):
+        lhs = Var(name="lhs", sign=BFloat16T())
+        rhs = Var(name="rhs", sign=BFloat16T())
+        inner = bf16_mult(lhs, rhs)
+        outer = bf16_mult(inner, lhs)
+        ctx = SpecContext("chained-bf16-mult")
+
+        output = ctx.spec_of(outer)
+
+        self.assertIsInstance(output, bf16)
+        ctx.validate_requirements(timeout_ms=1000)
+
+    def test_bf16_mult_handles_rounding_subnormals_and_special_values(self):
+        cases = (
+            ("one", 0x3F80, 0x3F80, 0x3F80),
+            ("negative", 0xBF80, 0x4000, 0xC000),
+            ("rounded-product", 0x3FC0, 0x3FC0, 0x4010),
+            ("min-subnormal-identity", 0x0001, 0x3F80, 0x0001),
+            ("positive-half-minimum-tie", 0x0001, 0x3F00, 0x0000),
+            ("negative-half-minimum-tie", 0x8001, 0x3F00, 0x8000),
+            ("subnormal-tie-to-even", 0x0001, 0x3FC0, 0x0002),
+            ("min-normal-halved", 0x0080, 0x3F00, 0x0040),
+            ("largest-subnormal-doubled", 0x007F, 0x4000, 0x00FE),
+            ("overflow", 0x7F7F, 0x4000, 0x7F80),
+            ("negative-zero", 0x8000, 0x3F80, 0x8000),
+            ("zero-times-infinity", 0x0000, 0x7F80, 0x7FC0),
+            ("negative-infinity", 0xFF80, 0x4000, 0xFF80),
+            ("nan", 0x7FC0, 0x3F80, 0x7FC0),
+        )
+
+        lhs, rhs, design = self._make_design()
+        for name, lhs_bits, rhs_bits, expected_bits in cases:
+            with self.subTest(case=name):
+                lhs.load_val(BFloat16(lhs_bits))
+                rhs.load_val(BFloat16(rhs_bits))
+                self.assertEqual(design.evaluate().val, expected_bits)
+
+    def test_bf16_mult_matches_rne_reference_for_random_finite_inputs(self):
+        lhs, rhs, design = self._make_design()
+        rng = random.Random(0)
+
+        for _ in range(500):
+            lhs_value = BFloat16.from_fields(
+                sign=rng.getrandbits(1),
+                exponent=rng.randrange(BFloat16.inf_code),
+                mantissa=rng.getrandbits(BFloat16.mantissa_bits),
+            )
+            rhs_value = BFloat16.from_fields(
+                sign=rng.getrandbits(1),
+                exponent=rng.randrange(BFloat16.inf_code),
+                mantissa=rng.getrandbits(BFloat16.mantissa_bits),
+            )
+            lhs.load_val(lhs_value)
+            rhs.load_val(rhs_value)
+
+            with self.subTest(lhs=lhs_value.val, rhs=rhs_value.val):
+                self.assertEqual(
+                    design.evaluate().val,
+                    self._reference_bits(lhs_value, rhs_value),
+                )
+
+    def test_bf16_mult_cpp_lowering_matches_python_evaluation(self):
+        lhs, rhs, design = self._make_design()
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        rng = random.Random(1)
+        try:
+            for _ in range(100):
+                lhs_bits = rng.getrandbits(16)
+                rhs_bits = rng.getrandbits(16)
+                lhs.load_val(BFloat16(lhs_bits))
+                rhs.load_val(BFloat16(rhs_bits))
+                expected = design.evaluate().val
+                self.assertEqual(compiled_jit(lhs_bits, rhs_bits), expected)
+                self.assertEqual(compiled_no_jit(lhs_bits, rhs_bits), expected)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
 
 
 class TestRivalTranslation(unittest.TestCase):

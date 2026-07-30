@@ -1,12 +1,13 @@
 from zolotone import *
 
 from .common import *
-from .encode_Float32 import *
+from .encode_BFloat16 import *
 
-def spec_fp32_mult(x: fp32, y: fp32, ctx):
+
+def spec_bf16_mult(x: bf16, y: bf16, ctx):
     invalid = (x.is_inf & y.is_zero) | (y.is_inf & x.is_zero)
     nan_case = x.is_nan | y.is_nan | invalid
-    
+
     negative_sign = x.sign.ne(y.sign)
     inf_case = (x.is_inf | y.is_inf) & (~nan_case)
     neg_inf_case = inf_case & negative_sign
@@ -17,24 +18,24 @@ def spec_fp32_mult(x: fp32, y: fp32, ctx):
         & (~inf_case)
     )
     neg_zero_case = zero_case & negative_sign
-    
+
     return Cases(
-        case(nan_case, fp32.nan(ctx)),
-        case(neg_inf_case, fp32.ninf(ctx)),
-        case(pos_inf_case, fp32.inf(ctx)),
-        case(neg_zero_case, fp32.nzero(ctx)),
-        case(x.is_finite & y.is_finite, fp32.encode(x.value * y.value, ctx)),
+        case(nan_case, bf16.nan(ctx)),
+        case(neg_inf_case, bf16.ninf(ctx)),
+        case(pos_inf_case, bf16.inf(ctx)),
+        case(neg_zero_case, bf16.nzero(ctx)),
+        case(x.is_finite & y.is_finite, bf16.encode(x.value * y.value, ctx)),
         ctx=ctx,
     )
 
 
-@Composite(name="fp32_mult", spec=spec_fp32_mult)
-def fp32_mult(x: Node, y: Node) -> Node:
-    X = fp32_decode(x)
-    Y = fp32_decode(y)
-    
+@Composite(name="bf16_mult", spec=spec_bf16_mult)
+def bf16_mult(x: Node, y: Node) -> Node:
+    X = bf16_decode(x)
+    Y = bf16_decode(y)
+
     sign_bit = bit_xor(X.sign, Y.sign)
-    
+
     # IEEE-754 invalid cases for multiplication are NaN operands and 0 * inf.
     inf_times_zero = bit_or(
         bit_and(X.is_inf, Y.is_zero),
@@ -52,55 +53,55 @@ def fp32_mult(x: Node, y: Node) -> Node:
         ),
         bit_and(bit_or(X.is_zero, Y.is_zero), sign_bit),
     )
-    
-    # UQ<23, 0> -> UQ<0, 23>
+
+    # UQ<7, 0> -> UQ<0, 7>.
     x_m_fraction = integer_to_fraction(X.mantissa)
     y_m_fraction = integer_to_fraction(Y.mantissa)
-    
-    # UQ<1, 23>
+
+    # Normal values have an implicit leading bit; subnormals and zeros do not.
     x_m_formatted = if_then_else(
         X.is_norm,
         add_implicit_bit(x_m_fraction),
-        uq_resize(x_m_fraction, 1, Float32.mantissa_bits),
+        uq_resize(x_m_fraction, 1, BFloat16.mantissa_bits),
     )
     y_m_formatted = if_then_else(
         Y.is_norm,
         add_implicit_bit(y_m_fraction),
-        uq_resize(y_m_fraction, 1, Float32.mantissa_bits),
+        uq_resize(y_m_fraction, 1, BFloat16.mantissa_bits),
     )
-    
+
     # Subnormals have exponent field 0 but effective exponent 1-bias.
     subnormal_exponent = Const(
         UQ(1, X.exponent.node_type.int_bits, X.exponent.node_type.frac_bits)
     )
     x_effective_e = if_then_else(X.is_sub, subnormal_exponent, X.exponent)
     y_effective_e = if_then_else(Y.is_sub, subnormal_exponent, Y.exponent)
-    
-    # Keep the full 24x24-bit significand product exact and let fp32_encode
+
+    # Keep the full 8x8-bit significand product exact and let bf16_encode
     # handle normalization, subnormal shifting, and final IEEE rounding.
     m_prod = uq_mul(x_m_formatted, y_m_formatted)
     e_prod = q_sub(
         q_add(uq_to_q(x_effective_e), uq_to_q(y_effective_e)),
-        Const(Q.from_int(Float32.exponent_bias)),
+        Const(Q.from_int(BFloat16.exponent_bias)),
     )
-    
-    finite_result = fp32_encode(
-        sign_bit,               # sign: UQ
-        e_prod,                 # exponent: Q, biased
-        m_prod,                 # mantissa: exact UQ product
+
+    finite_result = bf16_encode(
+        sign_bit,
+        e_prod,
+        m_prod,
     )
     return if_then_else(
         encode_nan,
-        Const(Float32.NaN()),
+        Const(BFloat16.NaN()),
         if_then_else(
             encode_ninf,
-            Const(Float32.nInf()),
+            Const(BFloat16.nInf()),
             if_then_else(
                 encode_pinf,
-                Const(Float32.Inf()),
+                Const(BFloat16.Inf()),
                 if_then_else(
                     encode_nzero,
-                    Const(Float32.nZero()),
+                    Const(BFloat16.nZero()),
                     finite_result,
                 ),
             ),
@@ -108,16 +109,17 @@ def fp32_mult(x: Node, y: Node) -> Node:
     )
 
 
-if __name__ == '__main__':
-    from pprint import pprint
-    multiplier = fp32_mult(
-        Var(name="a", sign=Float32T()),
-        Var(name="b", sign=Float32T()),
+if __name__ == "__main__":
+    multiplier = bf16_mult(
+        Var(name="a", sign=BFloat16T()),
+        Var(name="b", sign=BFloat16T()),
     )
+
+    multiplier.check_determinism()
     multiplier.check_spec()
-    # pprint(multiplier.check_spec())
-    with open("examples/multiplier_jit.hpp", "w") as file:
+
+    with open("examples/bf16_multiplier_jit.hpp", "w") as file:
         file.write(multiplier.to_cpp(jittable=True))
-    
-    with open("examples/multiplier_no_jit.hpp", "w") as file:
+
+    with open("examples/bf16_multiplier_no_jit.hpp", "w") as file:
         file.write(multiplier.to_cpp(jittable=False))
