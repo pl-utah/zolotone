@@ -30,79 +30,61 @@ def spec_fp32_add(x: fp32, y: fp32, ctx):
 @Composite(name="fp32_add", spec=spec_fp32_add)
 def fp32_add(x: Node, y: Node) -> Node:
     # 1. Decode both packed FP32 inputs into sign, exponent, mantissa, and flags.
-    (
-        x_sign,
-        x_exponent,
-        x_mantissa,
-        x_is_normal,
-        x_is_subnormal,
-        x_is_zero,
-        x_is_inf,
-        x_is_nan,
-    ) = fp32_decode(x)
-    (
-        y_sign,
-        y_exponent,
-        y_mantissa,
-        y_is_normal,
-        y_is_subnormal,
-        y_is_zero,
-        y_is_inf,
-        y_is_nan,
-    ) = fp32_decode(y)
+    X = fp32_decode(x)
+    Y = fp32_decode(y)
 
     # 2. Resolve IEEE special-result flags before the finite-number datapath.
-    x_is_ninf = bit_and(x_is_inf, x_sign)
-    y_is_ninf = bit_and(y_is_inf, y_sign)
-    x_is_pinf = bit_and(x_is_inf, bit_neg(x_sign))
-    y_is_pinf = bit_and(y_is_inf, bit_neg(y_sign))
+    x_is_ninf = bit_and(X.is_inf, X.sign)
+    y_is_ninf = bit_and(Y.is_inf, Y.sign)
+    x_is_pinf = bit_and(X.is_inf, bit_neg(X.sign))
+    y_is_pinf = bit_and(Y.is_inf, bit_neg(Y.sign))
     
     infinities_with_opposite_signs = bit_or(
         bit_and(x_is_ninf, y_is_pinf),
         bit_and(x_is_pinf, y_is_ninf),
     )
     
-    any_input_is_nan = bit_or(x_is_nan, y_is_nan)
+    any_input_is_nan = bit_or(X.is_nan, Y.is_nan)
     encode_nan = bit_or(infinities_with_opposite_signs, any_input_is_nan)
     not_encode_nan = bit_neg(encode_nan)
     
     encode_ninf = bit_and(not_encode_nan, bit_or(x_is_ninf, y_is_ninf))
     encode_pinf = bit_and(not_encode_nan, bit_or(x_is_pinf, y_is_pinf))
     encode_nzero = bit_and(
-        bit_and(x_is_zero, y_is_zero),
-        bit_and(x_sign, y_sign),
+        bit_and(X.is_zero, Y.is_zero),
+        bit_and(X.sign, Y.sign),
     )
 
     # 3. Format and align significands.
     # Decode gives the mantissa as UQ<23, 0>; the adder datapath wants UQ<0, 23>.
-    x_mantissa_fraction = integer_to_fraction(x_mantissa)
-    y_mantissa_fraction = integer_to_fraction(y_mantissa)
+    x_mantissa_fraction = integer_to_fraction(X.mantissa)
+    y_mantissa_fraction = integer_to_fraction(Y.mantissa)
 
     # Normal numbers have an implicit leading 1. Subnormals do not.
     x_significand = if_then_else(
-        x_is_normal,
+        X.is_norm,
         add_implicit_bit(x_mantissa_fraction),
         uq_resize(x_mantissa_fraction, 1, Float32.mantissa_bits),
     )
     y_significand = if_then_else(
-        y_is_normal,
+        Y.is_norm,
         add_implicit_bit(y_mantissa_fraction),
         uq_resize(y_mantissa_fraction, 1, Float32.mantissa_bits),
     )
 
     # Subnormals store exponent 0 but behave as exponent 1-bias.
-    effective_subnormal_exponent = Const(
-        UQ(1, x_exponent.node_type.int_bits, x_exponent.node_type.frac_bits)
+    subnormal_exponent = Const(
+        UQ(1, X.exponent.node_type.int_bits, X.exponent.node_type.frac_bits)
     )
     x_effective_exponent = if_then_else(
-        x_is_subnormal,
-        effective_subnormal_exponent,
-        x_exponent,
+        X.is_sub,
+        subnormal_exponent,
+        X.exponent,
     )
     y_effective_exponent = if_then_else(
-        y_is_subnormal,
-        effective_subnormal_exponent,
-        y_exponent,
+        Y.is_sub,
+        subnormal_exponent,
+        Y.exponent,
     )
 
     aligned_exponent = uq_max(x_effective_exponent, y_effective_exponent)
@@ -117,8 +99,8 @@ def fp32_add(x: Node, y: Node) -> Node:
     y_aligned_significand = uq_rshift_jam(y_significand_wide, y_shift_amount)
 
     # 4. Apply signs, then add the aligned signed significands.
-    x_signed_significand = q_add_sign(uq_to_q(x_aligned_significand), x_sign)
-    y_signed_significand = q_add_sign(uq_to_q(y_aligned_significand), y_sign)
+    x_signed_significand = q_add_sign(uq_to_q(x_aligned_significand), X.sign)
+    y_signed_significand = q_add_sign(uq_to_q(y_aligned_significand), Y.sign)
     significand_sum = q_add(x_signed_significand, y_signed_significand)
 
     # 5. Encode FP32.

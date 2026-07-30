@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 from ..types import *
 from ..ast import *
 from ..spec import If, fp32, sign_multiplier
@@ -71,6 +73,45 @@ def _fp32_alloc(sign_bit: Node,
 
 ############## Public API ##############
 
+
+class DecodedFP32(NamedTuple):
+    sign: Node
+    exponent: Node
+    mantissa: Node
+    is_norm: Node
+    is_sub: Node
+    is_zero: Node
+    is_inf: Node
+    is_nan: Node
+
+
+def fp32_decode_spec(x: fp32, ctx):
+    (
+        sign,
+        exponent,
+        mantissa,
+        is_normal,
+        is_subnormal,
+        is_zero,
+        is_inf,
+        is_nan,
+    ) = x.decode()[1:]
+
+    def bool_to_real(flag):
+        return If(flag, ctx.real_val(1), ctx.real_val(0))
+
+    return (
+        sign,
+        exponent,
+        mantissa,
+        bool_to_real(is_normal),
+        bool_to_real(is_subnormal),
+        bool_to_real(is_zero),
+        bool_to_real(is_inf),
+        bool_to_real(is_nan),
+    )
+
+
 def fp32_pack_spec(s, e, m, ctx):
     zero = ctx.real_val(0)
     one = ctx.real_val(1)
@@ -119,29 +160,46 @@ def fp32_pack(sign: Node, exponent: Node, mantissa: Node) -> Node:
     return _fp32_alloc(sign, exponent, mantissa)
 
 
-def decoder_spec(x, ctx):
-    sign, exponent, mantissa, is_normal, is_subnormal, is_zero, is_inf, is_nan = x.decode()[1:]
-    def bool_to_real(flag):
-        return If(flag, ctx.real_val(1), ctx.real_val(0))
-    return sign, exponent, mantissa, bool_to_real(is_normal), bool_to_real(is_subnormal), bool_to_real(is_zero), bool_to_real(is_inf), bool_to_real(is_nan)
+def fp32_decode(x: Node) -> DecodedFP32:
+    @Primitive(name="fp32_decode", spec=fp32_decode_spec)
+    def decode(x: Node) -> Node:
+        sign = _fp32_sign(x)
+        exponent = _fp32_exponent(x)
+        mantissa = _fp32_mantissa(x)
 
-@Primitive(name="fp32_decode", spec=decoder_spec)
-def fp32_decode(x: Node) -> Node:
-    sign = _fp32_sign(x)
-    exponent = _fp32_exponent(x)
-    mantissa = _fp32_mantissa(x)
-    
-    mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(UQ(0, 1, 0)))
-    mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(UQ(0, 1, 0)))
-    
-    exponent_is_all_ones = basic_and_reduce(exponent, out=Const(UQ(0, 1, 0)))
-    exponent_is_not_all_ones = basic_invert(exponent_is_all_ones, out=Const(UQ(0, 1, 0)))
-    exponent_is_nonzero = basic_or_reduce(exponent, out=Const(UQ(0, 1, 0)))
-    exponent_is_zero = basic_invert(exponent_is_nonzero, out=Const(UQ(0, 1, 0)))
-    
-    is_normal = basic_and(exponent_is_nonzero, exponent_is_not_all_ones, Const(UQ(0, 1, 0)),)
-    is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
-    is_zero = basic_and(exponent_is_zero, mantissa_is_zero, Const(UQ(0, 1, 0)))
-    is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, Const(UQ(0, 1, 0)))
-    is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
-    return make_Tuple(sign, exponent, mantissa, is_normal, is_subnormal, is_zero, is_inf, is_nan)
+        mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(UQ(0, 1, 0)))
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(UQ(0, 1, 0)))
+
+        exponent_is_all_ones = basic_and_reduce(exponent, out=Const(UQ(0, 1, 0)))
+        exponent_is_not_all_ones = basic_invert(exponent_is_all_ones, out=Const(UQ(0, 1, 0)))
+        exponent_is_nonzero = basic_or_reduce(exponent, out=Const(UQ(0, 1, 0)))
+        exponent_is_zero = basic_invert(exponent_is_nonzero, out=Const(UQ(0, 1, 0)))
+
+        is_normal = basic_and(exponent_is_nonzero, exponent_is_not_all_ones, Const(UQ(0, 1, 0)))
+        is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, Const(UQ(0, 1, 0)))
+        is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, Const(UQ(0, 1, 0)))
+        is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, Const(UQ(0, 1, 0)))
+
+        return make_Tuple(
+            sign,
+            exponent,
+            mantissa,
+            is_normal,
+            is_subnormal,
+            is_zero,
+            is_inf,
+            is_nan,
+        )
+
+    decoded = decode(x)
+    return DecodedFP32(
+        sign=decoded[0],
+        exponent=decoded[1],
+        mantissa=decoded[2],
+        is_norm=decoded[3],
+        is_sub=decoded[4],
+        is_zero=decoded[5],
+        is_inf=decoded[6],
+        is_nan=decoded[7],
+    )

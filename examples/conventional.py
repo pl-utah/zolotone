@@ -41,8 +41,8 @@ def dot_product_spec(a0, a1, a2, a3,
         ctx=ctx,
     )
 
-@Composite(name="Conventional", spec=dot_product_spec)
-def Conventional(a0: Node, a1: Node, a2: Node, a3: Node,
+@Composite(name="bf16x8_dot_conventional", spec=dot_product_spec)
+def bf16x8_dot_conventional(a0: Node, a1: Node, a2: Node, a3: Node,
                  b0: Node, b1: Node, b2: Node, b3: Node) -> Node:
     A = tuple(bf16_decode(value) for value in (a0, a1, a2, a3))
     B = tuple(bf16_decode(value) for value in (b0, b1, b2, b3))
@@ -107,8 +107,8 @@ def Conventional(a0: Node, a1: Node, a2: Node, a3: Node,
     # Subnormals store exponent zero but behave as exponent 1-bias.
     E_a, E_b = [0] * N, [0] * N
     for i in range(N):
-        E_a[i] = if_then_else(A[i].is_subnormal, subnormal_exponent, A[i].exponent)
-        E_b[i] = if_then_else(B[i].is_subnormal, subnormal_exponent, B[i].exponent)
+        E_a[i] = if_then_else(A[i].is_sub, subnormal_exponent, A[i].exponent)
+        E_b[i] = if_then_else(B[i].is_sub, subnormal_exponent, B[i].exponent)
 
     # Step 1. Exponents add. Each E_p is shifted by bias twice!
     E_p = [uq_add(E_a[i], E_b[i]) for i in range(N)]
@@ -126,7 +126,7 @@ def Conventional(a0: Node, a1: Node, a2: Node, a3: Node,
     M_a, M_b = [0] * N, [0] * N
     for i in range(N):
         M_a[i] = if_then_else(
-            A[i].is_normal,
+            A[i].is_norm,
             add_implicit_bit(integer_to_fraction(A[i].mantissa)),
             uq_resize(
                 integer_to_fraction(A[i].mantissa),
@@ -135,7 +135,7 @@ def Conventional(a0: Node, a1: Node, a2: Node, a3: Node,
             ),
         )
         M_b[i] = if_then_else(
-            B[i].is_normal,
+            B[i].is_norm,
             add_implicit_bit(integer_to_fraction(B[i].mantissa)),
             uq_resize(
                 integer_to_fraction(B[i].mantissa),
@@ -226,7 +226,7 @@ if __name__ == '__main__':
         Var(name="b_3", sign=BFloat16T()),
     ]
     
-    design = Conventional(*a, *b)
+    design = bf16x8_dot_conventional(*a, *b)
     print(design)
     design.print_tree(depth=1)
     report = design.check_spec()

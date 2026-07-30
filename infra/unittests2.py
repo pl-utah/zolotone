@@ -34,8 +34,11 @@ from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
 from examples.common import and_spec, or_spec, xor_spec
-from examples.conventional import Conventional, conventional_spec
-from examples.optimized import Optimized
+from examples.conventional import (
+    bf16x8_dot_conventional,
+    dot_product_spec as bf16x8_dot_spec,
+)
+from examples.optimized import bf16x8_dot_optimized
 
 from infra.compile_cpp import jit_compile, nonjit_compile
 
@@ -314,8 +317,8 @@ class TestConstantFolding(unittest.TestCase):
         for i, bits in enumerate(vals[4:]):
             b[i].load_val(BFloat16(bits))
 
-        conventional = Conventional(*a, *b).evaluate()
-        optimized = Optimized(*a, *b).evaluate()
+        conventional = bf16x8_dot_conventional(*a, *b).evaluate()
+        optimized = bf16x8_dot_optimized(*a, *b).evaluate()
 
         self.assertEqual(conventional.val, 388040612)
         self.assertEqual(conventional, optimized)
@@ -323,7 +326,7 @@ class TestConstantFolding(unittest.TestCase):
     def test_conventional_handles_subnormals_and_special_values(self):
         a = [Var(name=f"a_{i}", sign=BFloat16T()) for i in range(4)]
         b = [Var(name=f"b_{i}", sign=BFloat16T()) for i in range(4)]
-        conventional = Conventional(*a, *b)
+        conventional = bf16x8_dot_conventional(*a, *b)
 
         zero = BFloat16.Zero()
         one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)
@@ -388,7 +391,7 @@ class TestConstantFolding(unittest.TestCase):
                 self.assertEqual(conventional.evaluate().val, expected)
 
                 outer_ctx = SpecContext(f"conventional-{name}")
-                outer_result = conventional_spec(
+                outer_result = bf16x8_dot_spec(
                     *(value.to_spec(outer_ctx) for value in (*a_values, *b_values)),
                     ctx=outer_ctx,
                 ).constant_fold()
@@ -1442,6 +1445,18 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             self.assertRaisesRegex(MalformedSpecification, "solver returned unknown"),
         ):
             ctx.validate_requirements(timeout_ms=1000)
+
+    def test_fp32_decoder_returns_named_fields(self):
+        ctx = SpecContext("structured-fp32-decode")
+
+        decoded = fp32_decode(Const(Float32.Zero()))
+
+        self.assertEqual(
+            tuple(ctx.spec_of(field).constant_fold() for field in decoded),
+            tuple(RealLit(value) for value in (0, 0, 0, 0, 0, 1, 0, 0)),
+        )
+        self.assertIs(decoded.sign, decoded[0])
+        self.assertIs(decoded.is_nan, decoded[7])
 
     def test_fp32_encoder_spec_canonicalizes_exact_zero(self):
         from examples.encode_Float32 import fp32_encode_spec
@@ -3511,8 +3526,8 @@ class TestSolverApis(unittest.TestCase):
     def test_conventional_zero_zero_proves_with_xor_sign_fact(self):
         a = [Var(name=f"a_{idx}", sign=BFloat16T()) for idx in range(4)]
         b = [Var(name=f"b_{idx}", sign=BFloat16T()) for idx in range(4)]
-        conventional = Conventional(*a, *b)
-        target_name = "Conventional[inner_spec=zero,outer_spec=zero]"
+        conventional = bf16x8_dot_conventional(*a, *b)
+        target_name = "bf16x8_dot_conventional[inner_spec=zero,outer_spec=zero]"
         split_classification_cases = ast_nodes._split_classification_cases
 
         def select_zero_zero_case(*args, **kwargs):

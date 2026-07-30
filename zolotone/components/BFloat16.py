@@ -92,8 +92,8 @@ class DecodedBF16(NamedTuple):
     sign: Node
     exponent: Node
     mantissa: Node
-    is_normal: Node
-    is_subnormal: Node
+    is_norm: Node
+    is_sub: Node
     is_zero: Node
     is_inf: Node
     is_nan: Node
@@ -212,8 +212,8 @@ def bf16_decode(x: Node) -> DecodedBF16:
         sign=decoded[0],
         exponent=decoded[1],
         mantissa=decoded[2],
-        is_normal=decoded[3],
-        is_subnormal=decoded[4],
+        is_norm=decoded[3],
+        is_sub=decoded[4],
         is_zero=decoded[5],
         is_inf=decoded[6],
         is_nan=decoded[7],
