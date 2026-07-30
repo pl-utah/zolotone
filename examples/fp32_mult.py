@@ -116,8 +116,8 @@ if __name__ == '__main__':
     )
     multiplier.check_spec()
     # pprint(multiplier.check_spec())
-    with open("examples/multiplier_jit.hpp", "w") as file:
+    with open("examples/c_models/fp32_mult_jit.hpp", "w") as file:
         file.write(multiplier.to_cpp(jittable=True))
     
-    with open("examples/multiplier_no_jit.hpp", "w") as file:
+    with open("examples/c_models/fp32_mult_no_jit.hpp", "w") as file:
         file.write(multiplier.to_cpp(jittable=False))

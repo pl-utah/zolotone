@@ -34,12 +34,13 @@ from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
 from examples.bf16_mult import bf16_mult
+from examples.bf16_relu import bf16_relu
 from examples.common import and_spec, or_spec, xor_spec
-from examples.conventional import (
-    bf16x8_dot_conventional,
-    dot_product_spec as bf16x8_dot_spec,
+from examples.bf16x8_dot_fp32_conventional import (
+    bf16x8_dot_fp32_conventional,
+    dot_product_spec as bf16x8_dot_fp32_spec,
 )
-from examples.optimized import bf16x8_dot_optimized
+from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
 
 from infra.compile_cpp import jit_compile, nonjit_compile
 
@@ -318,8 +319,8 @@ class TestConstantFolding(unittest.TestCase):
         for i, bits in enumerate(vals[4:]):
             b[i].load_val(BFloat16(bits))
 
-        conventional = bf16x8_dot_conventional(*a, *b).evaluate()
-        optimized = bf16x8_dot_optimized(*a, *b).evaluate()
+        conventional = bf16x8_dot_fp32_conventional(*a, *b).evaluate()
+        optimized = bf16x8_dot_fp32_optimized(*a, *b).evaluate()
 
         self.assertEqual(conventional.val, 388040612)
         self.assertEqual(conventional, optimized)
@@ -327,7 +328,7 @@ class TestConstantFolding(unittest.TestCase):
     def test_conventional_handles_subnormals_and_special_values(self):
         a = [Var(name=f"a_{i}", sign=BFloat16T()) for i in range(4)]
         b = [Var(name=f"b_{i}", sign=BFloat16T()) for i in range(4)]
-        conventional = bf16x8_dot_conventional(*a, *b)
+        conventional = bf16x8_dot_fp32_conventional(*a, *b)
 
         zero = BFloat16.Zero()
         one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)
@@ -392,7 +393,7 @@ class TestConstantFolding(unittest.TestCase):
                 self.assertEqual(conventional.evaluate().val, expected)
 
                 outer_ctx = SpecContext(f"conventional-{name}")
-                outer_result = bf16x8_dot_spec(
+                outer_result = bf16x8_dot_fp32_spec(
                     *(value.to_spec(outer_ctx) for value in (*a_values, *b_values)),
                     ctx=outer_ctx,
                 ).constant_fold()
@@ -2245,6 +2246,64 @@ class TestBFloat16Mult(unittest.TestCase):
             tempdir_no_jit.cleanup()
 
 
+class TestBFloat16ReLU(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(value: BFloat16) -> int:
+        if value.exponent == BFloat16.nan_code and value.mantissa != 0:
+            return BFloat16.NaN().val
+        if value.sign:
+            return BFloat16.Zero().val
+        return value.val
+
+    def _make_design(self):
+        value = Var(name="value", sign=BFloat16T())
+        return value, bf16_relu(value)
+
+    def test_bf16_relu_specifications_can_be_chained(self):
+        value = Var(name="value", sign=BFloat16T())
+        inner = bf16_relu(value)
+        outer = bf16_relu(inner)
+        ctx = SpecContext("chained-bf16-relu")
+
+        output = ctx.spec_of(outer)
+
+        self.assertIsInstance(output, bf16)
+        ctx.validate_requirements(timeout_ms=1000)
+
+    def test_bf16_relu_handles_finite_and_special_values(self):
+        cases = (
+            ("positive-normal", 0x3FC0, 0x3FC0),
+            ("negative-normal", 0xBFC0, 0x0000),
+            ("positive-subnormal", 0x0001, 0x0001),
+            ("negative-subnormal", 0x8001, 0x0000),
+            ("positive-zero", 0x0000, 0x0000),
+            ("negative-zero", 0x8000, 0x0000),
+            ("positive-infinity", 0x7F80, 0x7F80),
+            ("negative-infinity", 0xFF80, 0x0000),
+            ("positive-nan", 0x7FC1, BFloat16.NaN().val),
+            ("negative-nan", 0xFFC1, BFloat16.NaN().val),
+        )
+
+        value, design = self._make_design()
+        for name, input_bits, expected_bits in cases:
+            with self.subTest(case=name):
+                value.load_val(BFloat16(input_bits))
+                self.assertEqual(design.evaluate().val, expected_bits)
+
+    def test_bf16_relu_cpp_lowering_matches_reference_for_all_inputs(self):
+        value, design = self._make_design()
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        try:
+            for input_bits in range(1 << 16):
+                expected = self._reference_bits(BFloat16(input_bits))
+                self.assertEqual(compiled_jit(input_bits), expected)
+                self.assertEqual(compiled_no_jit(input_bits), expected)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
+
+
 class TestRivalTranslation(unittest.TestCase):
     def test_real_expression_translates_to_rival_ir(self):
         x = RealVar("x")
@@ -3629,8 +3688,8 @@ class TestSolverApis(unittest.TestCase):
     def test_conventional_zero_zero_proves_with_xor_sign_fact(self):
         a = [Var(name=f"a_{idx}", sign=BFloat16T()) for idx in range(4)]
         b = [Var(name=f"b_{idx}", sign=BFloat16T()) for idx in range(4)]
-        conventional = bf16x8_dot_conventional(*a, *b)
-        target_name = "bf16x8_dot_conventional[inner_spec=zero,outer_spec=zero]"
+        conventional = bf16x8_dot_fp32_conventional(*a, *b)
+        target_name = "bf16x8_dot_fp32_conventional[inner_spec=zero,outer_spec=zero]"
         split_classification_cases = ast_nodes._split_classification_cases
 
         def select_zero_zero_case(*args, **kwargs):

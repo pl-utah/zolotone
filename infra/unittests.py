@@ -10,8 +10,8 @@ from pathlib import Path
 
 from zolotone import *
 from zolotone.egglog.rules import check_rules, rewrite_rules
-from examples.optimized import bf16x8_dot_optimized
-from examples.conventional import bf16x8_dot_conventional
+from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.bf16x8_dot_fp32_conventional import bf16x8_dot_fp32_conventional
 from examples.CSA import CSA_tree4
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
@@ -92,8 +92,8 @@ class TestFusedDotProduct(unittest.TestCase):
     def test_run_spec_verification_and_timing(self):
         print("\nRunning test_run_spec_verification_and_timing:")
         print(
-            "\tConstructing CSA_tree4, bf16x8_dot_conventional, "
-            "and bf16x8_dot_optimized composites."
+            "\tConstructing CSA_tree4, bf16x8_dot_fp32_conventional, "
+            "and bf16x8_dot_fp32_optimized composites."
         )
         print("\tRunning run_spec() for each design and reporting verification runtime.\n")
 
@@ -115,8 +115,8 @@ class TestFusedDotProduct(unittest.TestCase):
             Var(name="b_3", sign=BFloat16T()),
         ]
         
-        conventional = bf16x8_dot_conventional(*a, *b)
-        optimized = bf16x8_dot_optimized(*a, *b)
+        conventional = bf16x8_dot_fp32_conventional(*a, *b)
+        optimized = bf16x8_dot_fp32_optimized(*a, *b)
         
         report1 = run_spec_with_metrics(csa_tree4)
         report2 = run_spec_with_metrics(conventional)
@@ -150,8 +150,8 @@ class TestFusedDotProduct(unittest.TestCase):
             Var(name="b_3", sign=BFloat16T()),
         ]
         
-        conventional = bf16x8_dot_conventional(*a, *b)
-        optimized = bf16x8_dot_optimized(*a, *b)
+        conventional = bf16x8_dot_fp32_conventional(*a, *b)
+        optimized = bf16x8_dot_fp32_optimized(*a, *b)
         
         N = 4
         
@@ -461,7 +461,7 @@ class TestFusedDotProduct(unittest.TestCase):
             Var(name="b_3", sign=BFloat16T()),
         ]
         
-        design = bf16x8_dot_conventional(*a, *b)
+        design = bf16x8_dot_fp32_conventional(*a, *b)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 
@@ -526,7 +526,7 @@ class TestFusedDotProduct(unittest.TestCase):
             Var(name="b_3", sign=BFloat16T()),
         ]
         
-        design = bf16x8_dot_optimized(*a, *b)
+        design = bf16x8_dot_fp32_optimized(*a, *b)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 

@@ -118,8 +118,8 @@ if __name__ == "__main__":
     multiplier.check_determinism()
     multiplier.check_spec()
 
-    with open("examples/bf16_multiplier_jit.hpp", "w") as file:
+    with open("examples/c_models/bf16_multiplier_jit.hpp", "w") as file:
         file.write(multiplier.to_cpp(jittable=True))
 
-    with open("examples/bf16_multiplier_no_jit.hpp", "w") as file:
+    with open("examples/c_models/bf16_multiplier_no_jit.hpp", "w") as file:
         file.write(multiplier.to_cpp(jittable=False))

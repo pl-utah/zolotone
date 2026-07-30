@@ -142,8 +142,8 @@ if __name__ == '__main__':
     #adder.check_determinism()
     adder.check_spec()
 
-    with open("examples/adder_jit.hpp", "w") as file:
+    with open("examples/c_models/fp32_add_jit.hpp", "w") as file:
         file.write(adder.to_cpp(jittable=True))
 
-    with open("examples/adder_no_jit.hpp", "w") as file:
+    with open("examples/c_models/fp32_add_no_jit.hpp", "w") as file:
         file.write(adder.to_cpp(jittable=False))
