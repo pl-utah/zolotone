@@ -16,11 +16,11 @@ def dot_product_spec(a0, a1, a2, a3,
 
     product_is_inf = [A[i].is_inf | B[i].is_inf for i in range(N)]
     product_is_negative = [A[i].sign.ne(B[i].sign) for i in range(N)]
-    has_positive_inf = reduce(or_, [product_is_inf[i] & (~product_is_negative[i]) for i in range(N)])
-    has_negative_inf = reduce(or_, [product_is_inf[i] & product_is_negative[i] for i in range(N)])
+    has_positive_inf = ormap(*[product_is_inf[i] & (~product_is_negative[i]) for i in range(N)])
+    has_negative_inf = ormap(*[product_is_inf[i] & product_is_negative[i] for i in range(N)])
 
-    invalid_product = reduce(or_, [(A[i].is_inf & B[i].is_zero) | (B[i].is_inf & A[i].is_zero) for i in range(N)])
-    any_input_is_nan = reduce(or_, [value.is_nan for value in (*A, *B)])
+    invalid_product = ormap(*[(A[i].is_inf & B[i].is_zero) | (B[i].is_inf & A[i].is_zero) for i in range(N)])
+    any_input_is_nan = ormap(*[value.is_nan for value in (*A, *B)])
     nan_case = (
         any_input_is_nan
         | invalid_product
@@ -28,7 +28,7 @@ def dot_product_spec(a0, a1, a2, a3,
     )
     negative_inf_case = has_negative_inf & (~nan_case)
     positive_inf_case = has_positive_inf & (~nan_case)
-    finite_case = reduce(and_, [value.is_finite for value in (*A, *B)])
+    finite_case = andmap(*[value.is_finite for value in (*A, *B)])
 
     finite_value = sum([A[i].value * B[i].value for i in range(N)], ctx.real_val(0))
     finite_result = fp32.encode(finite_value, ctx)
