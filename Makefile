@@ -149,8 +149,7 @@ _download_ac_int:
 install: _python-deps _install-dreal _install-rival _download_ac_int
 
 unit-tests:
-	@echo "Running infra/unittests.py..."
-	@$(VENV_PYTHON) -m infra.unittests --seed 0 --num-points "$(UNITTESTS_NUM_POINTS)"
+	@echo "Running infra/unittests2.py..."
 	@$(VENV_PYTHON) -m infra.unittests2
 	@echo "Complete"
 

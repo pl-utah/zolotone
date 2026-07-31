@@ -82,8 +82,8 @@ def bf16_add(x: Node, y: Node) -> Node:
     y_shift_amount = uq_sub(aligned_exponent, y_effective_exponent)
 
     # Shifts with sticky bits
-    x_significand_wide = uq_resize(X.mantissa, 1, BFloat16.mantissa_bits + 3)
-    y_significand_wide = uq_resize(Y.mantissa, 1, BFloat16.mantissa_bits + 3)
+    x_significand_wide = uq_resize(x_significand, 1, BFloat16.mantissa_bits + 3)
+    y_significand_wide = uq_resize(y_significand, 1, BFloat16.mantissa_bits + 3)
 
     x_aligned_significand = uq_rshift_jam(x_significand_wide, x_shift_amount)
     y_aligned_significand = uq_rshift_jam(y_significand_wide, y_shift_amount)
