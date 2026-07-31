@@ -680,13 +680,23 @@ class TestPowSpecOp(unittest.TestCase):
 
 
 class TestSpecContextLearning(unittest.TestCase):
+    def test_real_literal_shortcuts(self):
+        ctx = SpecContext("real-literal-shortcuts")
+
+        self.assertEqual(ctx.zero(), RealLit(0))
+        self.assertEqual(ctx.one(), RealLit(1))
+        self.assertEqual(ctx.two(), RealLit(2))
+        self.assertIsInstance(ctx.zero(), RealLit)
+        self.assertIsInstance(ctx.one(), RealLit)
+        self.assertIsInstance(ctx.two(), RealLit)
+
     def test_learned_literals_reads_real_var_equalities(self):
         ctx = SpecContext("learn-real")
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(ctx.real_val(1)))
-        ctx.assume(ctx.real_val(2).eq(y))
+        ctx.assume(x.eq(ctx.one()))
+        ctx.assume(ctx.two().eq(y))
 
         learned = ctx.learned_literals()
         self.assertEqual(len(learned), 2)
@@ -698,7 +708,7 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(ctx.real_val(2) + ctx.real_val(3)))
+        ctx.assume(x.eq(ctx.two() + ctx.real_val(3)))
         ctx.assume((ctx.real_val(10) - ctx.real_val(4)).eq(y))
 
         learned = ctx.learned_literals()
@@ -724,8 +734,8 @@ class TestSpecContextLearning(unittest.TestCase):
         p = ctx.bool("p")
         q = ctx.bool("q")
 
-        ctx.assume(p.eq(ctx.real_val(2).eq(ctx.real_val(2))))
-        ctx.assume((ctx.real_val(2).eq(ctx.real_val(3))).eq(q))
+        ctx.assume(p.eq(ctx.two().eq(ctx.two())))
+        ctx.assume((ctx.two().eq(ctx.real_val(3))).eq(q))
 
         learned = ctx.learned_literals()
         self.assertEqual(len(learned), 2)
@@ -755,9 +765,9 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         p = ctx.bool("p")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()))
         ctx.assume(p.eq(ctx.true()))
-        ctx.assume(x.eq(ctx.real_val(1)))
+        ctx.assume(x.eq(ctx.one()))
 
         with self.assertRaises(ValueError):
             ctx.learned_literals()
@@ -767,9 +777,9 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()))
         before = ctx.copy()
-        ctx.assume(x.eq(ctx.real_val(1)))
+        ctx.assume(x.eq(ctx.one()))
 
         self.assertEqual(
             ctx.assumes,
@@ -793,8 +803,8 @@ class TestSpecContextLearning(unittest.TestCase):
         y = ctx.real("y")
 
         ctx.assume(and_res.eq(x * y))
-        ctx.assume(x.eq(ctx.real_val(0)))
-        ctx.assume(y.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()))
+        ctx.assume(y.eq(ctx.zero()))
 
         simplified = ctx.simplify()
 
@@ -818,8 +828,8 @@ class TestSpecContextLearning(unittest.TestCase):
         y = ctx.real("y")
 
         ctx.assume(xor_res.eq(x + y))
-        ctx.assume((xor_res * ctx.real_val(1)).eq(x + y))
-        ctx.check((xor_res + ctx.real_val(1)).eq((x + y) + ctx.real_val(1)))
+        ctx.assume((xor_res * ctx.one()).eq(x + y))
+        ctx.check((xor_res + ctx.one()).eq((x + y) + ctx.one()))
 
         simplified = ctx.simplify()
 
@@ -833,8 +843,8 @@ class TestSpecContextLearning(unittest.TestCase):
         y = ctx.real("y")
         z = ctx.real("z")
 
-        ctx.assume(alias.eq(y + ctx.real_val(1)))
-        ctx.assume(alias.eq(z + ctx.real_val(1)))
+        ctx.assume(alias.eq(y + ctx.one()))
+        ctx.assume(alias.eq(z + ctx.one()))
 
         simplified = ctx.simplify()
 
@@ -860,8 +870,8 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(y + ctx.real_val(1)))
-        ctx.assume(y.eq(x + ctx.real_val(1)))
+        ctx.assume(x.eq(y + ctx.one()))
+        ctx.assume(y.eq(x + ctx.one()))
 
         self.assertEqual(
             ctx.assumes,
@@ -876,8 +886,8 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(y + ctx.real_val(1)))
-        ctx.check(y.eq(x + ctx.real_val(1)))
+        ctx.assume(x.eq(y + ctx.one()))
+        ctx.check(y.eq(x + ctx.one()))
 
         self.assertEqual(ctx.checks, [Eq(y, x + RealLit(1))])
 
@@ -886,9 +896,9 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         p = ctx.bool("p")
 
-        ctx.assume(x.eq(ctx.real_val(1) + ctx.real_val(2)))
-        ctx.assume(ctx.real_val(4).eq(x + ctx.real_val(1)))
-        ctx.assume(p.eq(ctx.real_val(2).eq(ctx.real_val(2))))
+        ctx.assume(x.eq(ctx.one() + ctx.two()))
+        ctx.assume(ctx.real_val(4).eq(x + ctx.one()))
+        ctx.assume(p.eq(ctx.two().eq(ctx.two())))
 
         simplified = ctx.simplify()
 
@@ -904,9 +914,9 @@ class TestSpecContextLearning(unittest.TestCase):
         y = ctx.real("y")
         z = ctx.real("z")
 
-        ctx.assume(x.eq(y + ctx.real_val(1)))
-        ctx.assume(y.eq(z + ctx.real_val(1)))
-        ctx.assume(z.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(y + ctx.one()))
+        ctx.assume(y.eq(z + ctx.one()))
+        ctx.assume(z.eq(ctx.zero()))
 
         simplified = ctx.simplify()
 
@@ -920,8 +930,8 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx = SpecContext("simplify-checks")
         x = ctx.real("x")
 
-        ctx.assume(x.eq(ctx.real_val(1)))
-        ctx.check((x + ctx.real_val(2)).eq(ctx.real_val(3)))
+        ctx.assume(x.eq(ctx.one()))
+        ctx.check((x + ctx.two()).eq(ctx.real_val(3)))
 
         simplified = ctx.simplify()
 
@@ -947,7 +957,7 @@ class TestSpecContextLearning(unittest.TestCase):
     def test_context_fixpoint_learns_negated_compound_boolean_fact(self):
         ctx = SpecContext("simplify-negated-compound-bool")
         x = ctx.real("x")
-        overflow = abs(x) > ctx.real_val(1)
+        overflow = abs(x) > ctx.one()
 
         ctx.assume(overflow.eq(ctx.false()))
         ctx.check(overflow.eq(ctx.false()))
@@ -964,7 +974,7 @@ class TestSpecContextLearning(unittest.TestCase):
     def test_context_fixpoint_learns_positive_compound_boolean_fact(self):
         ctx = SpecContext("simplify-positive-compound-bool")
         x = ctx.real("x")
-        in_range = (x >= ctx.real_val(-1)) & (x <= ctx.real_val(1))
+        in_range = (x >= ctx.real_val(-1)) & (x <= ctx.one())
 
         ctx.assume(in_range.eq(ctx.true()))
         ctx.check(in_range)
@@ -982,8 +992,8 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx = SpecContext("simplify-compound-assumptions")
         x = ctx.real("x")
         y = ctx.real("y")
-        positive_x = x > ctx.real_val(0)
-        positive_y = y > ctx.real_val(0)
+        positive_x = x > ctx.zero()
+        positive_y = y > ctx.zero()
 
         ctx.assume(positive_x)
         ctx.assume(positive_y)
@@ -995,7 +1005,7 @@ class TestSpecContextLearning(unittest.TestCase):
     def test_context_fixpoint_keeps_one_anchor_for_duplicate_compound_facts(self):
         ctx = SpecContext("simplify-duplicate-compound")
         x = ctx.real("x")
-        positive = x > ctx.real_val(0)
+        positive = x > ctx.zero()
 
         ctx.assume(positive)
         ctx.assume(positive)
@@ -1028,8 +1038,8 @@ class TestSpecContextLearning(unittest.TestCase):
         selected = ctx.fresh_real("selected")
         condition = ctx.bool("condition")
 
-        ctx.assume(selected.eq(If(condition, ctx.real_val(1), ctx.real_val(0))))
-        ctx.assume((ctx.real_val(1) - selected).eq(ctx.real_val(1)))
+        ctx.assume(selected.eq(If(condition, ctx.one(), ctx.zero())))
+        ctx.assume((ctx.one() - selected).eq(ctx.one()))
         ctx.check(condition)
 
         simplified = ctx.simplify()
@@ -1038,9 +1048,9 @@ class TestSpecContextLearning(unittest.TestCase):
             simplified.assumes,
             [
                 (
-                    ctx.real_val(1)
-                    - If(condition, ctx.real_val(1), ctx.real_val(0))
-                ).eq(ctx.real_val(1))
+                    ctx.one()
+                    - If(condition, ctx.one(), ctx.zero())
+                ).eq(ctx.one())
             ],
         )
         self.assertEqual(simplified.checks, [condition])
@@ -1050,8 +1060,8 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         p = ctx.bool("p")
 
-        ctx.assume(x.eq(ctx.real_val(1)))
-        ctx.assume((ctx.real_val(2) - ctx.real_val(1)).eq(x))
+        ctx.assume(x.eq(ctx.one()))
+        ctx.assume((ctx.two() - ctx.one()).eq(x))
         ctx.assume(p.eq(ctx.true()))
         ctx.assume(ctx.real_val(3).eq(ctx.real_val(3)).eq(p))
 
@@ -1067,8 +1077,8 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx = SpecContext("simplify-conflict")
         x = ctx.real("x")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
-        ctx.assume(x.eq(ctx.real_val(1)))
+        ctx.assume(x.eq(ctx.zero()))
+        ctx.assume(x.eq(ctx.one()))
 
         with self.assertRaises(ValueError):
             ctx.simplify()
@@ -1078,8 +1088,8 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(y + ctx.real_val(1)))
-        ctx.assume(y.eq(ctx.real_val(2)))
+        ctx.assume(x.eq(y + ctx.one()))
+        ctx.assume(y.eq(ctx.two()))
         ctx.check(x.eq(ctx.real_val(3)))
 
         simplified = ctx.simplify()
@@ -1097,8 +1107,8 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx = SpecContext("simplify-conflict-output")
         x = ctx.real("x")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
-        ctx.assume(x.eq(ctx.real_val(1)))
+        ctx.assume(x.eq(ctx.zero()))
+        ctx.assume(x.eq(ctx.one()))
 
         with self.assertRaises(ValueError):
             ctx.simplify()
@@ -1125,8 +1135,8 @@ class TestSpecContextLearning(unittest.TestCase):
     def test_simplify_ctx_alternates_regular_and_rival_until_saturated(self):
         ctx = SpecContext("alternating-simplification")
         x = ctx.real("x")
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
+        zero = ctx.zero()
+        one = ctx.one()
         ctx.assume(x >= zero)
         ctx.assume(abs(x).eq(one))
         ctx.check(x.eq(one))
@@ -2491,7 +2501,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-bool-real")
         predicate = ctx.bool("predicate")
         x = ctx.real("x")
-        ctx.assume(predicate & (x >= ctx.real_val(0)))
+        ctx.assume(predicate & (x >= ctx.zero()))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["predicate", "x"]),
@@ -2502,7 +2512,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-closed")
         x = ctx.real("x")
 
-        ctx.assume((x >= ctx.real_val(1)) & (x <= ctx.real_val(254)))
+        ctx.assume((x >= ctx.one()) & (x <= ctx.real_val(254)))
 
         self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [[(1.0, 254.0)]])
 
@@ -2510,7 +2520,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-reversed")
         x = ctx.real("x")
 
-        ctx.assume((ctx.real_val(1) <= x) & (ctx.real_val(254) >= x))
+        ctx.assume((ctx.one() <= x) & (ctx.real_val(254) >= x))
 
         self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [[(1.0, 254.0)]])
 
@@ -2518,7 +2528,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-strict")
         x = ctx.real("x")
 
-        ctx.assume((x > ctx.real_val(1)) & (x < ctx.real_val(254)))
+        ctx.assume((x > ctx.one()) & (x < ctx.real_val(254)))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["x"]),
@@ -2529,7 +2539,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-reversed-strict")
         x = ctx.real("x")
 
-        ctx.assume((ctx.real_val(1) < x) & (ctx.real_val(254) > x))
+        ctx.assume((ctx.one() < x) & (ctx.real_val(254) > x))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["x"]),
@@ -2554,7 +2564,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-point-or")
         sign = ctx.real("sign")
 
-        ctx.assume(sign.eq(ctx.real_val(0)) | ctx.real_val(1).eq(sign))
+        ctx.assume(sign.eq(ctx.zero()) | ctx.one().eq(sign))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["sign"]),
@@ -2566,8 +2576,8 @@ class TestRivalTranslation(unittest.TestCase):
         sign = ctx.real("sign")
         exponent = ctx.real("exponent")
 
-        ctx.assume(sign.eq(ctx.real_val(0)) | sign.eq(ctx.real_val(1)))
-        ctx.assume(exponent.eq(ctx.real_val(0)) | exponent.eq(ctx.real_val(255)))
+        ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
+        ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["sign", "exponent"]),
@@ -2584,8 +2594,8 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x >= ctx.real_val(1))
-        ctx.assume(y <= ctx.real_val(2))
+        ctx.assume(x >= ctx.one())
+        ctx.assume(y <= ctx.two())
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["y", "x", "z"]),
@@ -2596,8 +2606,8 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-conflict")
         x = ctx.real("x")
 
-        ctx.assume(x >= ctx.real_val(2))
-        ctx.assume(x <= ctx.real_val(1))
+        ctx.assume(x >= ctx.two())
+        ctx.assume(x <= ctx.one())
 
         self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [])
 
@@ -2606,8 +2616,8 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume((x + y).eq(ctx.real_val(1)))
-        ctx.assume(x >= ctx.real_val(0))
+        ctx.assume((x + y).eq(ctx.one()))
+        ctx.assume(x >= ctx.zero())
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["x", "y"]),
@@ -2619,7 +2629,7 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume((x >= ctx.real_val(0)) | (x + y).eq(ctx.real_val(1)))
+        ctx.assume((x >= ctx.zero()) | (x + y).eq(ctx.one()))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["x", "y"]),
@@ -2631,8 +2641,8 @@ class TestRivalTranslation(unittest.TestCase):
         sign = ctx.real("sign")
         exponent = ctx.real("exponent")
 
-        ctx.assume(sign.eq(ctx.real_val(0)) | sign.eq(ctx.real_val(1)))
-        ctx.assume(exponent.eq(ctx.real_val(0)) | exponent.eq(ctx.real_val(255)))
+        ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
+        ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["sign", "exponent"]),
@@ -2649,8 +2659,8 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
         z = ctx.real("z")
-        good_x = x >= ctx.real_val(0)
-        good_z = z >= ctx.real_val(0)
+        good_x = x >= ctx.zero()
+        good_z = z >= ctx.zero()
         maybe = x.eq(y)
         ctx.assume(good_x)
         ctx.assume(good_z)
@@ -2707,8 +2717,8 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_feasibility_returns_first_clean_rect(self):
         ctx = SpecContext("rival-feasible-rect")
         x = ctx.real("x")
-        ctx.assume(x.eq(ctx.real_val(0)) | x.eq(ctx.real_val(1)))
-        ctx.check(x.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()) | x.eq(ctx.one()))
+        ctx.check(x.eq(ctx.zero()))
 
         clean_rect = [(0.0, 0.0)]
         bad_rect = [(1.0, 1.0)]
@@ -2752,7 +2762,7 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_preserves_rect_assumptions_for_checks(self):
         ctx = SpecContext("rival-trim-assumption-rects")
         x = ctx.real("x")
-        bounded = x >= ctx.real_val(0)
+        bounded = x >= ctx.zero()
         ctx.assume(bounded)
         ctx.check(bounded)
 
@@ -2787,7 +2797,7 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_only_rewrites_non_rect_assumptions(self):
         ctx = SpecContext("rival-trim-preserve-rect-assumption")
         x = ctx.real("x")
-        zero = ctx.real_val(0)
+        zero = ctx.zero()
         redundant = abs(x).eq(x)
         contributing = (x >= zero) & redundant
         ctx.assume(contributing)
@@ -2801,7 +2811,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-trim-maybe")
         x = ctx.real("x")
         y = ctx.real("y")
-        assume = x >= ctx.real_val(0)
+        assume = x >= ctx.zero()
         check = x.eq(y)
         ctx.assume(assume)
         ctx.check(check)
@@ -2853,8 +2863,8 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_keeps_if_with_unconstrained_bool_condition(self):
         ctx = SpecContext("rival-trim-bool-if")
         predicate = ctx.bool("predicate")
-        one = ctx.real_val(1)
-        check = If(predicate, one, ctx.real_val(2)).eq(one)
+        one = ctx.one()
+        check = If(predicate, one, ctx.two()).eq(one)
         ctx.check(check)
 
         trimmed = rival_trim_context(ctx)
@@ -2864,9 +2874,9 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_does_not_treat_undefined_predicate_as_false(self):
         ctx = SpecContext("rival-trim-undefined-predicate")
         x = ctx.real("x")
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
-        two = ctx.real_val(2)
+        zero = ctx.zero()
+        one = ctx.one()
+        two = ctx.two()
         undefined = (x ** ctx.real_val(-1)) > zero
         checks = [
             ~undefined,
@@ -2891,8 +2901,8 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_requires_every_assumption_rect(self):
         ctx = SpecContext("rival-trim-all-rects")
         sign = ctx.real("sign")
-        bit_domain = sign.eq(ctx.real_val(0)) | sign.eq(ctx.real_val(1))
-        check = sign.eq(ctx.real_val(0))
+        bit_domain = sign.eq(ctx.zero()) | sign.eq(ctx.one())
+        check = sign.eq(ctx.zero())
         ctx.assume(bit_domain)
         ctx.check(check)
 
@@ -2928,7 +2938,7 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_rewrites_extrema_from_assumption_bounds(self):
         ctx = SpecContext("rival-trim-bounded-extrema")
         x = ctx.real("x")
-        one = ctx.real_val(1)
+        one = ctx.one()
         ctx.assume(x >= one)
         ctx.check(x.max(one).eq(x))
         ctx.check(one.max(x).eq(x))
@@ -2943,7 +2953,7 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_requires_bound_in_every_disjunct(self):
         ctx = SpecContext("rival-trim-disjunctive-bounds")
         x = ctx.real("x")
-        one = ctx.real_val(1)
+        one = ctx.one()
         ctx.assume((x >= one) | (x <= -one))
         unresolved = x.max(one).eq(x)
         ctx.check(unresolved)
@@ -2955,8 +2965,8 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_uses_bound_shared_by_every_disjunct(self):
         ctx = SpecContext("rival-trim-shared-disjunctive-bound")
         x = ctx.real("x")
-        one = ctx.real_val(1)
-        two = ctx.real_val(2)
+        one = ctx.one()
+        two = ctx.two()
         ctx.assume((x >= one) | (x >= two))
         ctx.check(x.max(one).eq(x))
 
@@ -2968,8 +2978,8 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-trim-bounded-comparisons")
         x = ctx.real("x")
         y = ctx.real("y")
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
+        zero = ctx.zero()
+        one = ctx.one()
         five = ctx.real_val(5)
         eight = ctx.real_val(8)
         ctx.assume((x >= one) & (x <= five))
@@ -2989,7 +2999,7 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_does_not_discharge_bound_assumption_itself(self):
         ctx = SpecContext("rival-trim-retained-bound")
         x = ctx.real("x")
-        one = ctx.real_val(1)
+        one = ctx.one()
         bound = x >= one
         ctx.assume(bound)
 
@@ -3000,7 +3010,7 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_simplifies_abs_from_known_sign(self):
         nonnegative_ctx = SpecContext("rival-trim-nonnegative-abs")
         x = nonnegative_ctx.real("x")
-        zero = nonnegative_ctx.real_val(0)
+        zero = nonnegative_ctx.zero()
         nonnegative_ctx.assume(x >= zero)
         nonnegative_ctx.check(abs(x).eq(x))
 
@@ -3015,9 +3025,9 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_selects_if_branch_from_assumptions(self):
         ctx = SpecContext("rival-trim-bounded-if")
         x = ctx.real("x")
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
-        two = ctx.real_val(2)
+        zero = ctx.zero()
+        one = ctx.one()
+        two = ctx.two()
         ctx.assume(x >= zero)
         ctx.check(If(x >= zero, one, two).eq(one))
 
@@ -3028,8 +3038,8 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_trim_context_keeps_abs_and_if_across_mixed_disjuncts(self):
         ctx = SpecContext("rival-trim-mixed-sign")
         x = ctx.real("x")
-        one = ctx.real_val(1)
-        two = ctx.real_val(2)
+        one = ctx.one()
+        two = ctx.two()
         sign_domain = (x >= one) | (x <= -one)
         abs_check = abs(x).eq(x)
         if_check = If(x >= one, one, two).eq(one)
@@ -3063,7 +3073,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         def deterministic_spec(x, ctx):
             seen_inputs.append(x)
             out = ctx.fresh_real("out")
-            ctx.assume(out.eq(x + ctx.real_val(1)))
+            ctx.assume(out.eq(x + ctx.one()))
             return out
 
         @Primitive(name="deterministic_primitive", spec=deterministic_spec)
@@ -3152,8 +3162,8 @@ class TestSpecificationDeterminism(unittest.TestCase):
     def test_underconstrained_primitive_is_not_deterministic(self):
         def nondeterministic_spec(_x, ctx):
             out = ctx.fresh_real("out")
-            zero = ctx.real_val(0)
-            one = ctx.real_val(1)
+            zero = ctx.zero()
+            one = ctx.one()
             ctx.assume(out.eq(zero) | out.eq(one))
             return out
 
@@ -3180,12 +3190,12 @@ class TestSpecificationDeterminism(unittest.TestCase):
 
         def collect_zero(ctx):
             collect_counts["zero"] += 1
-            ctx.assume(x.eq(ctx.real_val(0)))
+            ctx.assume(x.eq(ctx.zero()))
             return x
 
         def collect_one(ctx):
             collect_counts["one"] += 1
-            ctx.assume(x.eq(ctx.real_val(1)))
+            ctx.assume(x.eq(ctx.one()))
             return x
 
         with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
@@ -3246,11 +3256,11 @@ class TestSpecificationDeterminism(unittest.TestCase):
         x = base_ctx.real("x")
 
         def collect_zero(ctx):
-            ctx.assume(x.eq(ctx.real_val(0)))
+            ctx.assume(x.eq(ctx.zero()))
             return x
 
         def collect_one(ctx):
-            ctx.assume(x.eq(ctx.real_val(1)))
+            ctx.assume(x.eq(ctx.one()))
             return x
 
         with (
@@ -3686,9 +3696,9 @@ class TestSolverApis(unittest.TestCase):
         ctx = SpecContext("simplify-conflict-schedule")
         x = ctx.real("x")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
-        ctx.assume(x.eq(ctx.real_val(1)))
-        ctx.check(x.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()))
+        ctx.assume(x.eq(ctx.one()))
+        ctx.check(x.eq(ctx.zero()))
 
         status, proof_trace = solver_engine.check_equivalence(
             ctx,
@@ -3733,7 +3743,7 @@ class TestSolverApis(unittest.TestCase):
     def test_spec_context_is_pickleable(self):
         ctx = SpecContext("pickle-context")
         x = ctx.real("x")
-        ctx.check((x + ctx.real_val(1)).eq(ctx.real_val(2)))
+        ctx.check((x + ctx.one()).eq(ctx.two()))
 
         restored = pickle.loads(pickle.dumps(ctx))
 
@@ -3876,8 +3886,8 @@ class TestSignSpecs(unittest.TestCase):
         ctx = SpecContext("bit-operator-canonical")
         x = ctx.real("x")
         y = ctx.real("y")
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
+        zero = ctx.zero()
+        one = ctx.one()
 
         expected = {
             and_spec: If(x.eq(one) & y.eq(one), one, zero),
@@ -3895,9 +3905,9 @@ class TestSignSpecs(unittest.TestCase):
         ctx = SpecContext("bit-operator-egglog")
         x = ctx.real("x")
         y = ctx.real("y")
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
-        two = ctx.real_val(2)
+        zero = ctx.zero()
+        one = ctx.one()
+        two = ctx.two()
         and_conditional = If(x.eq(one) & y.eq(one), one, zero)
         or_conditional = If(x.eq(one) | y.eq(one), one, zero)
         xor_conditional = If(x.ne(y), one, zero)
@@ -3930,8 +3940,8 @@ class TestSignSpecs(unittest.TestCase):
         ctx = SpecContext("bit-operator-egglog-unguarded")
         x = ctx.real("x")
         y = ctx.real("y")
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
+        zero = ctx.zero()
+        one = ctx.one()
         ctx.check(If(x.eq(one) & y.eq(one), one, zero).eq(x * y))
         ctx.check(If(x.eq(one) | y.eq(one), one, zero).eq(x.max(y)))
         ctx.check(If(x.ne(y), one, zero).eq(x.max(y) - x * y))

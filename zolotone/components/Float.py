@@ -98,7 +98,7 @@ def fp32_decode_spec(x: fp32, ctx):
     ) = x.decode()[1:]
 
     def bool_to_real(flag):
-        return If(flag, ctx.real_val(1), ctx.real_val(0))
+        return If(flag, ctx.one(), ctx.zero())
 
     return (
         sign,
@@ -113,9 +113,9 @@ def fp32_decode_spec(x: fp32, ctx):
 
 
 def fp32_pack_spec(s, e, m, ctx):
-    zero = ctx.real_val(0)
-    one = ctx.real_val(1)
-    two = ctx.real_val(2)
+    zero = ctx.zero()
+    one = ctx.one()
+    two = ctx.two()
     max_exponent = ctx.real_val(Float32.inf_code)
 
     ctx.assume(s.eq(zero) | s.eq(one))

@@ -66,12 +66,12 @@ class bf16(FPExpr):
         is_inf = ctx.fresh_bool(f"{name}_is_inf")
         is_nan = ctx.fresh_bool(f"{name}_is_nan")
 
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
+        zero = ctx.zero()
+        one = ctx.one()
         max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
         max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
 
-        two = ctx.real_val(2)
+        two = ctx.two()
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
 
@@ -131,9 +131,9 @@ class bf16(FPExpr):
                 f"bf16.encode value must be RealExpr, got {type(value).__name__}"
             )
 
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
-        two = ctx.real_val(2)
+        zero = ctx.zero()
+        one = ctx.one()
+        two = ctx.two()
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bits = ctx.real_val(cls.exponent_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
@@ -255,7 +255,7 @@ class bf16(FPExpr):
     @classmethod
     def zero(cls, ctx) -> bf16:
         return cls(
-            value=ctx.real_val(0),
+            value=ctx.zero(),
             sign=RealLit(0),
             exponent=RealLit(0),
             mantissa=RealLit(0),
@@ -269,7 +269,7 @@ class bf16(FPExpr):
     @classmethod
     def nzero(cls, ctx) -> bf16:
         return cls(
-            value=ctx.real_val(0),
+            value=ctx.zero(),
             sign=RealLit(1),
             exponent=RealLit(0),
             mantissa=RealLit(0),

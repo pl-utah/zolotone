@@ -10,7 +10,7 @@ Wf = 30
 
 
 def spec_est_global_shift(E_max, E_p, ctx):
-    return (E_max - E_p) * (ctx.real_val(2) ** ctx.real_val(s))
+    return (E_max - E_p) * (ctx.two() ** ctx.real_val(s))
 
 @Primitive(name="_est_global_shift", spec=spec_est_global_shift)
 def _est_global_shift(E_max: Node, E_p: Node) -> Node:
@@ -22,8 +22,8 @@ def _est_global_shift(E_max: Node, E_p: Node) -> Node:
 
 
 def spec_est_local_shift(E_trail, ctx):
-    two = ctx.real_val(2)
-    one = ctx.real_val(1)
+    two = ctx.two()
+    one = ctx.one()
     return (two ** ctx.real_val(s)) - one - E_trail
 
 @Primitive(name="_est_local_shift", spec=spec_est_local_shift)
@@ -32,8 +32,8 @@ def _est_local_shift(E_trail: Node) -> Node:
 
 
 def spec_prepend_ones(x, ctx):
-    two = ctx.real_val(2)
-    one = ctx.real_val(1)
+    two = ctx.two()
+    one = ctx.one()
     real_s = ctx.real_val(s)
     return x * (two ** real_s) + (two ** real_s) - one
 
@@ -66,7 +66,7 @@ def dot_product_spec(a0, a1, a2, a3,
     positive_inf_case = has_positive_inf & (~nan_case)
     finite_case = andmap(*[value.is_finite for value in (*A, *B)])
 
-    finite_value = sum([A[i].value * B[i].value for i in range(N)], ctx.real_val(0))
+    finite_value = sum([A[i].value * B[i].value for i in range(N)], ctx.zero())
     finite_result = fp32.encode(finite_value, ctx)
 
     return Cases(
@@ -223,15 +223,15 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     with context() as ctx:
         for i in range(N):
             # M_p[i] * 2 ** (E_m * 2**s + 2**s - 1)
-            lhs = ctx.spec_of(M_p[i]) * ctx.real_val(2) ** (
-                ctx.spec_of(E_m) * ctx.real_val(2) ** ctx.real_val(s)
-                + ctx.real_val(2) ** ctx.real_val(s)
-                - ctx.real_val(1)
+            lhs = ctx.spec_of(M_p[i]) * ctx.two() ** (
+                ctx.spec_of(E_m) * ctx.two() ** ctx.real_val(s)
+                + ctx.two() ** ctx.real_val(s)
+                - ctx.one()
             )
             rhs = (
                 ctx.spec_of(M_a[i])
                 * ctx.spec_of(M_b[i])
-                * ctx.real_val(2) ** ctx.spec_of(E_p[i])
+                * ctx.two() ** ctx.spec_of(E_p[i])
             )
             ctx.check(lhs.eq(rhs))
     

@@ -51,7 +51,7 @@ def if_then_else_spec(sel, in1, in0, ctx):
     if isinstance(sel, BoolExpr):
         condition = sel
     elif isinstance(sel, RealExpr):
-        condition = sel.ne(ctx.real_val(0))
+        condition = sel.ne(ctx.zero())
     else:
         raise TypeError()
 

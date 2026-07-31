@@ -295,6 +295,15 @@ class SpecContext:
     
     def real_val(self, value: int | float):
         return RealLit(value=value)
+
+    def zero(self) -> RealLit:
+        return self.real_val(0)
+
+    def one(self) -> RealLit:
+        return self.real_val(1)
+
+    def two(self) -> RealLit:
+        return self.real_val(2)
     
     def real(self, name: str) -> RealVar:
         return RealVar(name=name)

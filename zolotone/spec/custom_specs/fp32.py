@@ -11,7 +11,7 @@ def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
 
 
 def sign_multiplier(ctx, sign: RealExpr) -> RealExpr:
-    one = ctx.real_val(1)
+    one = ctx.one()
     return If(sign.eq(one), ctx.real_val(-1), one)
 
 
@@ -64,12 +64,12 @@ class fp32(FPExpr):
         is_inf = ctx.fresh_bool(f"{name}_is_inf")
         is_nan = ctx.fresh_bool(f"{name}_is_nan")
 
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
+        zero = ctx.zero()
+        one = ctx.one()
         max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
         max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
 
-        two = ctx.real_val(2)
+        two = ctx.two()
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
         
@@ -129,9 +129,9 @@ class fp32(FPExpr):
                 f"fp32.encode value must be RealExpr, got {type(value).__name__}"
             )
         
-        zero = ctx.real_val(0)
-        one = ctx.real_val(1)
-        two = ctx.real_val(2)
+        zero = ctx.zero()
+        one = ctx.one()
+        two = ctx.two()
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bits = ctx.real_val(cls.exponent_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)

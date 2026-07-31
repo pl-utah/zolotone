@@ -112,7 +112,7 @@ def bf16_decode_spec(x: bf16, ctx):
     ) = x.decode()[1:]
 
     def bool_to_real(flag):
-        return If(flag, ctx.real_val(1), ctx.real_val(0))
+        return If(flag, ctx.one(), ctx.zero())
 
     return (
         sign,
@@ -127,9 +127,9 @@ def bf16_decode_spec(x: bf16, ctx):
 
 
 def bf16_pack_spec(s, e, m, ctx):
-    zero = ctx.real_val(0)
-    one = ctx.real_val(1)
-    two = ctx.real_val(2)
+    zero = ctx.zero()
+    one = ctx.one()
+    two = ctx.two()
     max_exponent = ctx.real_val(BFloat16.inf_code)
 
     ctx.assume(s.eq(zero) | s.eq(one))

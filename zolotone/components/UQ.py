@@ -224,7 +224,7 @@ def uq_to_q(x: Node) -> Node:
     return basic_identity(x=x, out=out)
 
 
-@Primitive(name="uq_rshift", spec=lambda x, amount, ctx: x * (ctx.real_val(2) ** (-amount)))
+@Primitive(name="uq_rshift", spec=lambda x, amount, ctx: x * (ctx.two() ** (-amount)))
 def uq_rshift(x: Node, amount: Node) -> Node:
     return basic_rshift(
         x=x,
@@ -233,7 +233,7 @@ def uq_rshift(x: Node, amount: Node) -> Node:
     )
 
 
-@Primitive(name="uq_rshift_jam", spec=lambda x, amount, ctx: x * (ctx.real_val(2) ** (-amount)))
+@Primitive(name="uq_rshift_jam", spec=lambda x, amount, ctx: x * (ctx.two() ** (-amount)))
 def uq_rshift_jam(x: Node, amount: Node) -> Node:
     one = Const(
         UQ(1, x.node_type.int_bits, x.node_type.frac_bits)
@@ -253,7 +253,7 @@ def uq_rshift_jam(x: Node, amount: Node) -> Node:
 
 
 # TODO: truncation
-@Primitive(name="uq_lshift", spec=lambda x, amount, ctx: x * (ctx.real_val(2) ** amount))
+@Primitive(name="uq_lshift", spec=lambda x, amount, ctx: x * (ctx.two() ** amount))
 def uq_lshift(x: Node, amount: Node) -> Node:
     root = basic_lshift(
         x=x,
@@ -308,7 +308,7 @@ def uq_split(x: Node, idx: int) -> Node:
         lo = ctx.fresh_real("lo")
         hi = ctx.fresh_real("hi")
         
-        two = ctx.real_val(2)
+        two = ctx.two()
         
         # x = hi * 2^lo_int_bits + lo * 2^-hi_frac_bits
         ctx.assume(
@@ -359,6 +359,6 @@ def uq_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
     return impl(x)
 
 
-@Primitive(name="uq_is_zero", spec=lambda x, ctx: x.eq(ctx.real_val(0)))
+@Primitive(name="uq_is_zero", spec=lambda x, ctx: x.eq(ctx.zero()))
 def uq_is_zero(x: Node) -> Node:
     return basic_invert(basic_or_reduce(x, Const(UQ(0, 1, 0))), Const(UQ(0, 1, 0)))

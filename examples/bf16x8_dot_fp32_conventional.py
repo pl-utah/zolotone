@@ -27,7 +27,7 @@ def dot_product_spec(a0, a1, a2, a3,
     positive_inf_case = has_positive_inf & (~nan_case)
     finite_case = andmap(*[value.is_finite for value in (*A, *B)])
 
-    finite_value = sum([A[i].value * B[i].value for i in range(N)], ctx.real_val(0))
+    finite_value = sum([A[i].value * B[i].value for i in range(N)], ctx.zero())
     finite_result = fp32.encode(finite_value, ctx)
 
     return Cases(

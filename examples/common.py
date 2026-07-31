@@ -6,7 +6,7 @@ def add_implicit_bit(x: Node) -> Primitive:
     frac_bits = x.node_type.frac_bits
     
     def spec(x, ctx):
-        return x + ctx.real_val(1)
+        return x + ctx.one()
     
     @Primitive(name="add_implicit_bit", spec=spec)
     def impl(x):
@@ -21,7 +21,7 @@ def fraction_to_integer(x: Node) -> Primitive:
     frac_bits = x.node_type.frac_bits
 
     def spec(x, ctx):
-        return x * (ctx.real_val(2) ** ctx.real_val(frac_bits))
+        return x * (ctx.two() ** ctx.real_val(frac_bits))
 
     @Primitive(name="fraction_to_integer", spec=spec, c_inline=True)
     def impl(x: Node):
@@ -36,7 +36,7 @@ def integer_to_fraction(x: Node) -> Primitive:
     int_bits = x.node_type.int_bits
 
     def spec(x, ctx):
-        return x * (ctx.real_val(2) ** (-ctx.real_val(int_bits)))
+        return x * (ctx.two() ** (-ctx.real_val(int_bits)))
 
     @Primitive(name="integer_to_fraction", spec=spec, c_inline=True)
     def impl(x: Node):
@@ -46,9 +46,9 @@ def integer_to_fraction(x: Node) -> Primitive:
 
 def and_spec(x, y, ctx):
     return If(
-        x.eq(ctx.real_val(1)) & y.eq(ctx.real_val(1)),
-        ctx.real_val(1),
-        ctx.real_val(0),
+        x.eq(ctx.one()) & y.eq(ctx.one()),
+        ctx.one(),
+        ctx.zero(),
     )
 
 @Primitive(name="bit_and", spec=and_spec, c_inline=True)
@@ -58,7 +58,7 @@ def bit_and(x: Node, y: Node) -> Node:
     return basic_and(x, y, Const(UQ(0, 1, 0)))
 
 def xor_spec(x, y, ctx):
-    return If(x.ne(y), ctx.real_val(1), ctx.real_val(0))
+    return If(x.ne(y), ctx.one(), ctx.zero())
 
 @Primitive(name="bit_xor", spec=xor_spec, c_inline=True)
 def bit_xor(x: Node, y: Node) -> Node:
@@ -68,9 +68,9 @@ def bit_xor(x: Node, y: Node) -> Node:
 
 def or_spec(x, y, ctx):
     return If(
-        x.eq(ctx.real_val(1)) | y.eq(ctx.real_val(1)),
-        ctx.real_val(1),
-        ctx.real_val(0),
+        x.eq(ctx.one()) | y.eq(ctx.one()),
+        ctx.one(),
+        ctx.zero(),
     )
 
 @Primitive(name="bit_or", spec=or_spec, c_inline=True)
@@ -81,9 +81,9 @@ def bit_or(x: Node, y: Node) -> Node:
 
 def neg_spec(x, ctx):
     return If(
-        x.eq(ctx.real_val(1)),
-        ctx.real_val(0),
-        ctx.real_val(1),
+        x.eq(ctx.one()),
+        ctx.zero(),
+        ctx.one(),
     )
 
 @Primitive(name="bit_neg", spec=neg_spec, c_inline=True)

@@ -10,7 +10,7 @@ from .encode_Float32 import (
 
 
 def bf16_encodings_spec(m, e, ctx):
-    return m * ctx.real_val(2) ** ctx.real_val(BFloat16.mantissa_bits), e
+    return m * ctx.two() ** ctx.real_val(BFloat16.mantissa_bits), e
 
 
 @Primitive(name="bf16_encodings", spec=bf16_encodings_spec)
@@ -44,7 +44,7 @@ def bf16_encode_spec(s, e, m, ctx):
         sign
         * m
         * (
-            ctx.real_val(2)
+            ctx.two()
             ** (e - ctx.real_val(BFloat16.exponent_bias))
         )
     )

@@ -52,14 +52,14 @@ def q_signs_xor_spec(x, y, ctx):
     y_sign = ctx.fresh_real("y_sign")
     res = ctx.fresh_real("xored_signs")
 
-    ctx.assume(x_sign.eq(ctx.real_val(1)) | x_sign.eq(ctx.real_val(0)))
-    ctx.assume(y_sign.eq(ctx.real_val(1)) | y_sign.eq(ctx.real_val(0)))
-    ctx.assume(res.eq(ctx.real_val(1)) | res.eq(ctx.real_val(0)))
+    ctx.assume(x_sign.eq(ctx.one()) | x_sign.eq(ctx.zero()))
+    ctx.assume(y_sign.eq(ctx.one()) | y_sign.eq(ctx.zero()))
+    ctx.assume(res.eq(ctx.one()) | res.eq(ctx.zero()))
     x_sign_value = sign_multiplier(ctx, x_sign)
     y_sign_value = sign_multiplier(ctx, y_sign)
     ctx.assume(x.eq(x_sign_value * abs(x)))
     ctx.assume(y.eq(y_sign_value * abs(y)))
-    ctx.assume(res.eq(If(x_sign.ne(y_sign), ctx.real_val(1), ctx.real_val(0))))
+    ctx.assume(res.eq(If(x_sign.ne(y_sign), ctx.one(), ctx.zero())))
     return res
 
 @Primitive(name="q_signs_xor", spec=q_signs_xor_spec)
@@ -174,7 +174,7 @@ def q_aligner(x: Node,
 
 def q_sign_bit_spec(x, ctx):
     sign = ctx.fresh_real("sign")
-    ctx.assume(sign.eq(ctx.real_val(0)) | sign.eq(ctx.real_val(1)))
+    ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
     ctx.assume(x.eq(sign_multiplier(ctx, sign) * abs(x)))
     return sign
 
@@ -273,7 +273,7 @@ def q_mul(x: Node, y: Node) -> Node:
     return basic_mul(x=x_adj, y=y_adj, out=out)
 
 
-@Primitive(name="q_lshift", spec=lambda x, n, ctx: x * (ctx.real_val(2) ** n))
+@Primitive(name="q_lshift", spec=lambda x, n, ctx: x * (ctx.two() ** n))
 def q_lshift(x: Node, n: Node) -> Node:
     return basic_lshift(x=x, amount=n, out=x.copy())
 
@@ -286,7 +286,7 @@ def q_to_uq(x: Node) -> Node:
     return basic_identity(x=x, out=Const(UQ(0, int_bits, frac_bits)))
 
 
-@Primitive(name="q_rshift", spec=lambda x, n, ctx: x * (ctx.real_val(2) ** (-n)))
+@Primitive(name="q_rshift", spec=lambda x, n, ctx: x * (ctx.two() ** (-n)))
 def q_rshift(x: Node, n: Node) -> Node:
     return basic_rshift(x=x, amount=n, out=x.copy())
 
@@ -312,7 +312,7 @@ def q_abs(x: Node) -> Node:
 
 def q_is_zero_spec(x, ctx):
     result = ctx.fresh_bool("q_is_zero")
-    ctx.assume(result.eq(x.eq(ctx.real_val(0))))
+    ctx.assume(result.eq(x.eq(ctx.zero())))
     return result
 
 @Primitive(name="q_is_zero", spec=q_is_zero_spec)
