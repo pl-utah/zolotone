@@ -357,15 +357,15 @@ class Float32(RuntimeType):
         from ..spec.custom_specs.fp32 import fp32
 
         if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 0:
-            return fp32.inf()
+            return fp32.inf(ctx)
         elif self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 1:
-            return fp32.ninf()
+            return fp32.ninf(ctx)
         elif self.exponent == self.nan_code and self.mantissa != 0:
-            return fp32.nan()
+            return fp32.nan(ctx)
         elif self.exponent == 0 and self.mantissa == 0 and self.sign == 1:
-            return fp32.nzero()
+            return fp32.nzero(ctx)
         elif self.exponent == 0 and self.mantissa == 0 and self.sign == 0:
-            return fp32.zero()
+            return fp32.zero(ctx)
         elif self.exponent == 0 and self.mantissa != 0:
              return fp32(
                  value=ctx.real_val(self.to_val()),
@@ -443,6 +443,10 @@ class BFloat16(RuntimeType):
     mantissa_bits = 7
     exponent_bits = 8
     exponent_bias = 127
+    inf_code = 255
+    sub_code = 0
+    nan_code = 255
+    zero_code = 0
     
     def __init__(self, val: int):
         if not isinstance(val, int):
@@ -484,21 +488,78 @@ class BFloat16(RuntimeType):
     def __str__(self):
         return f"BFloat16({str(self.to_val())})"
     
-    # TODO: add Subnormals
     def to_val(self):
         """Converts to IEEE754-style float value."""
-        frac = 1.0 + self.mantissa / (2 ** self.mantissa_bits)
-        exp_val = self.exponent - self.exponent_bias
-        
-        value = (-1) ** self.sign * frac * (2 ** exp_val)
-        return float(value)
+        if self.exponent == self.inf_code and self.mantissa == 0:
+            return float("-inf") if self.sign else float("inf")
+        if self.exponent == self.nan_code and self.mantissa != 0:
+            return float("nan")
+        if self.exponent == 0:
+            fraction = self.mantissa / (2 ** self.mantissa_bits)
+            exponent = 1 - self.exponent_bias
+            return float((-1) ** self.sign * fraction * (2 ** exponent))
+
+        fraction = 1.0 + self.mantissa / (2 ** self.mantissa_bits)
+        exponent = self.exponent - self.exponent_bias
+        return float((-1) ** self.sign * fraction * (2 ** exponent))
     
-    # TODO: that's sketchy
     def to_spec(self, ctx):
-        return ctx.real_val(self.to_val())
+        from ..spec.custom_specs.bf16 import bf16
+
+        if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 0:
+            return bf16.inf(ctx)
+        if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 1:
+            return bf16.ninf(ctx)
+        if self.exponent == self.nan_code and self.mantissa != 0:
+            return bf16.nan(ctx)
+        if self.exponent == 0 and self.mantissa == 0 and self.sign == 1:
+            return bf16.nzero(ctx)
+        if self.exponent == 0 and self.mantissa == 0 and self.sign == 0:
+            return bf16.zero(ctx)
+
+        return bf16(
+            value=ctx.real_val(self.to_val()),
+            sign=ctx.real_val(self.sign),
+            exponent=ctx.real_val(self.exponent),
+            mantissa=ctx.real_val(self.mantissa),
+            is_norm=ctx.bool_val(self.exponent != 0),
+            is_sub=ctx.bool_val(self.exponent == 0),
+            is_zero=ctx.bool_val(False),
+            is_inf=ctx.bool_val(False),
+            is_nan=ctx.bool_val(False),
+        )
     
     def static_type(self):
         return BFloat16T()
+
+    @classmethod
+    def nInf(cls):
+        return cls.from_fields(sign=1, exponent=cls.inf_code, mantissa=0)
+
+    @classmethod
+    def Inf(cls):
+        return cls.from_fields(sign=0, exponent=cls.inf_code, mantissa=0)
+
+    @classmethod
+    def nZero(cls):
+        return cls.from_fields(sign=1, exponent=cls.zero_code, mantissa=0)
+
+    @classmethod
+    def Zero(cls):
+        return cls.from_fields(sign=0, exponent=cls.zero_code, mantissa=0)
+
+    @classmethod
+    def NaN(cls, payload: int | None = None):
+        if payload is None:
+            payload = 1 << (cls.mantissa_bits - 1)
+        if not isinstance(payload, int):
+            raise TypeError(f"BFloat16 NaN payload must be int, got {type(payload).__name__}")
+        if not (1 <= payload < (1 << cls.mantissa_bits)):
+            raise ValueError(
+                f"BFloat16 NaN payload must fit in {cls.mantissa_bits} mantissa "
+                f"bits and be non-zero, got {payload}"
+            )
+        return cls.from_fields(sign=0, exponent=cls.nan_code, mantissa=payload)
     
     @classmethod
     def random_generator(cls, seed = None, shared_exponent_bits: int = 0):

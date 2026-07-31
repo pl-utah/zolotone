@@ -63,6 +63,6 @@ if __name__ == '__main__':
     inputs = [Var(f"arg_{i}", sign=UQT(10, 0)) for i in range(4)]
     design = OPTIMIZED_MAX_EXP4(*inputs)
     # design.print_tree(depth=1)
-    with open("examples/max_exp.hpp", "w") as file:
+    with open("examples/c_models/max_exp.hpp", "w") as file:
         file.write(design.to_cpp())
     

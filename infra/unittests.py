@@ -10,11 +10,11 @@ from pathlib import Path
 
 from zolotone import *
 from zolotone.egglog.rules import check_rules, rewrite_rules
-from examples.optimized import Optimized
-from examples.conventional import Conventional
+from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.bf16x8_dot_fp32_conventional import bf16x8_dot_fp32_conventional
 from examples.CSA import CSA_tree4
-from examples.FP32_IEEE_adder import FP32_IEEE_adder
-from examples.FP32_IEEE_mult import FP32_IEEE_mult
+from examples.fp32_add import fp32_add
+from examples.fp32_mult import fp32_mult
 from examples.max_exponent import OPTIMIZED_MAX_EXP4
 
 from infra.compile_cpp import jit_compile, nonjit_compile
@@ -91,7 +91,10 @@ class TestFusedDotProduct(unittest.TestCase):
     
     def test_run_spec_verification_and_timing(self):
         print("\nRunning test_run_spec_verification_and_timing:")
-        print("\tConstructing CSA_tree4, Conventional, and Optimized composites.")
+        print(
+            "\tConstructing CSA_tree4, bf16x8_dot_fp32_conventional, "
+            "and bf16x8_dot_fp32_optimized composites."
+        )
         print("\tRunning run_spec() for each design and reporting verification runtime.\n")
 
         rnd = random.Random(self.SEED)
@@ -112,8 +115,8 @@ class TestFusedDotProduct(unittest.TestCase):
             Var(name="b_3", sign=BFloat16T()),
         ]
         
-        conventional = Conventional(*a, *b)
-        optimized = Optimized(*a, *b)
+        conventional = bf16x8_dot_fp32_conventional(*a, *b)
+        optimized = bf16x8_dot_fp32_optimized(*a, *b)
         
         report1 = run_spec_with_metrics(csa_tree4)
         report2 = run_spec_with_metrics(conventional)
@@ -147,8 +150,8 @@ class TestFusedDotProduct(unittest.TestCase):
             Var(name="b_3", sign=BFloat16T()),
         ]
         
-        conventional = Conventional(*a, *b)
-        optimized = Optimized(*a, *b)
+        conventional = bf16x8_dot_fp32_conventional(*a, *b)
+        optimized = bf16x8_dot_fp32_optimized(*a, *b)
         
         N = 4
         
@@ -193,7 +196,7 @@ class TestFusedDotProduct(unittest.TestCase):
     def test_cpp_lowering_performance_multiplier(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_mult(x, y)
+        design = fp32_mult(x, y)
         
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
@@ -248,7 +251,7 @@ class TestFusedDotProduct(unittest.TestCase):
     def test_cpp_lowering_performance_adder(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_adder(x, y)
+        design = fp32_add(x, y)
         
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
@@ -303,7 +306,7 @@ class TestFusedDotProduct(unittest.TestCase):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
     
-        design = FP32_IEEE_adder(x, y)
+        design = fp32_add(x, y)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 
@@ -323,7 +326,7 @@ class TestFusedDotProduct(unittest.TestCase):
     def test_fp32_adder_zero_handling(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_adder(x, y)
+        design = fp32_add(x, y)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 
@@ -371,7 +374,7 @@ class TestFusedDotProduct(unittest.TestCase):
     def test_fp32_adder_exponent_alignment_regression(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_adder(x, y)
+        design = fp32_add(x, y)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 
@@ -395,7 +398,7 @@ class TestFusedDotProduct(unittest.TestCase):
     def test_fp32_adder_nan_handling(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_adder(x, y)
+        design = fp32_add(x, y)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 
@@ -419,7 +422,7 @@ class TestFusedDotProduct(unittest.TestCase):
     def test_fp32_adder_infinity_handling(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_adder(x, y)
+        design = fp32_add(x, y)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 
@@ -458,7 +461,7 @@ class TestFusedDotProduct(unittest.TestCase):
             Var(name="b_3", sign=BFloat16T()),
         ]
         
-        design = Conventional(*a, *b)
+        design = bf16x8_dot_fp32_conventional(*a, *b)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 
@@ -523,7 +526,7 @@ class TestFusedDotProduct(unittest.TestCase):
             Var(name="b_3", sign=BFloat16T()),
         ]
         
-        design = Optimized(*a, *b)
+        design = bf16x8_dot_fp32_optimized(*a, *b)
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
 

@@ -11,7 +11,7 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
 
     def spec(x, ctx):
         increment = ctx.fresh_real("increment")
-        ctx.assume(increment.eq(ctx.real_val(0)))
+        ctx.assume(increment.eq(ctx.zero()))
         return tuple([x, increment])
     
     @Primitive(name="uq_RNE_IEEE", spec=spec)
@@ -63,7 +63,7 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
 def round_mantissa_spec(m, e, ctx):
     m_ = ctx.fresh_real('rounded_m')
     e_ = ctx.fresh_real('rounded_e')
-    ctx.assume((m * ctx.real_val(2) ** e).eq(m_ * ctx.real_val(2) ** e_))
+    ctx.assume((m * ctx.two() ** e).eq(m_ * ctx.two() ** e_))
     return m_, e_
 
 def round_mantissa(m: Node, e: Node, target_bits: int = Float32.mantissa_bits, rounding_mode: str = "RNE") -> Primitive:
@@ -147,7 +147,7 @@ def lzc(x: Node) -> Node:
 def normalize_to_1_xxx_spec(m, e, ctx):
     m_ = ctx.fresh_real('normalized_m')
     e_ = ctx.fresh_real('normalized_e')
-    ctx.assume((m * ctx.real_val(2) ** e).eq(m_ * ctx.real_val(2) ** e_))
+    ctx.assume((m * ctx.two() ** e).eq(m_ * ctx.two() ** e_))
     return m_, e_
 
 @Primitive(name="normalize_to_1_xxx", spec=normalize_to_1_xxx_spec)
@@ -196,7 +196,7 @@ def normalize_to_1_xxx(m: Node, e: Node) -> Node:
 
 
 # Expects UQ<1, ...> as an input, returns UQ<0, ...>
-@Primitive(name="drop_implicit_bit", spec=lambda x, ctx: x - ctx.real_val(1))
+@Primitive(name="drop_implicit_bit", spec=lambda x, ctx: x - ctx.one())
 def drop_implicit_bit(x: Node):
     return uq_select(x, x.node_type.frac_bits - 1, 0)
 
@@ -204,7 +204,7 @@ def drop_implicit_bit(x: Node):
 def shift_if_subnormal_spec(m, e, ctx):
     m_ = ctx.fresh_real('classified_m')
     e_ = ctx.fresh_real('classified_e')
-    ctx.assume((m * ctx.real_val(2) ** e).eq(m_ * ctx.real_val(2) ** e_))
+    ctx.assume((m * ctx.two() ** e).eq(m_ * ctx.two() ** e_))
     return m_, e_
 
 @Primitive(name="shift_if_subnormal", spec=shift_if_subnormal_spec)
@@ -250,7 +250,7 @@ def shift_if_subnormal(normalized_m_uq: Node, normalized_e_q: Node):
 
 
 def fp32_encodings_spec(m, e, ctx):
-    return m * ctx.real_val(2) ** ctx.real_val(Float32.mantissa_bits), e
+    return m * ctx.two() ** ctx.real_val(Float32.mantissa_bits), e
 
 # TODO: this function should work for any input, or at least give an error
 @Primitive(name="fp32_encodings", spec=fp32_encodings_spec)
@@ -273,7 +273,7 @@ def fp32_encodings(m_rounded_uq: Node, e_rounded_uq: Node):
 
 def fp32_encode_spec(s, e, m, ctx):
     sign = sign_multiplier(ctx, s)
-    finite_value = sign * m * (ctx.real_val(2) ** (e - ctx.real_val(Float32.exponent_bias)))
+    finite_value = sign * m * (ctx.two() ** (e - ctx.real_val(Float32.exponent_bias)))
     return fp32.encode(finite_value, ctx)
 
 

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from fractions import Fraction
 from itertools import product
 import math
-from time import perf_counter
 import sys
 from typing import Any, Iterable, Sequence
 
@@ -22,14 +21,38 @@ __all__ = [
 class RivalAnalysis:
     status: tuple[bool, bool]
     hints: Any
-    converged: bool
 
 
 @dataclass(frozen=True)
 class RivalExprSearch:
-    expr: Any
     machine: RivalMachine
     split_indexes: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _RivalRectDomain:
+    var_indexes: dict[str, int]
+    bool_var_names: frozenset[str]
+    base_rect: tuple[tuple[float, float], ...]
+
+    @classmethod
+    def build(
+        cls,
+        free_vars: Sequence[str],
+        bool_var_names: Iterable[str],
+    ) -> "_RivalRectDomain":
+        indexes = {name: index for index, name in enumerate(free_vars)}
+        bool_names = frozenset(bool_var_names)
+        base_rect = tuple(
+            (0.0, 1.0)
+            if name in bool_names
+            else (-math.inf, math.inf)
+            for name in free_vars
+        )
+        return cls(indexes, bool_names, base_rect)
+
+    def new_rect(self) -> list[tuple[float, float]]:
+        return list(self.base_rect)
 
 
 class RivalMachine:
@@ -41,11 +64,10 @@ class RivalMachine:
         rect: Sequence[tuple[float, float]],
         hints: Any | None = None,
     ) -> RivalAnalysis:
-        status, next_hints, converged = self._raw_machine.apply_with_hints(rect, hints)
+        status, next_hints = self._raw_machine.apply_with_hints(rect, hints)
         return RivalAnalysis(
             status=(bool(status[0]), bool(status[1])),
             hints=next_hints,
-            converged=bool(converged),
         )
 
 
@@ -80,35 +102,64 @@ def collect_free_vars(exprs: Iterable[SpecNode]) -> list[str]:
     return sorted(found)
 
 
+def _collect_bool_var_names(exprs: Iterable[SpecNode]) -> set[str]:
+    bool_names: set[str] = set()
+    real_names: set[str] = set()
+    for expr in exprs:
+        for var in variables(expr):
+            if isinstance(var, BoolVar):
+                bool_names.add(var.name)
+            elif isinstance(var, RealVar):
+                real_names.add(var.name)
+
+    ambiguous = sorted(bool_names & real_names)
+    if ambiguous:
+        raise ValueError(
+            "Rival variables cannot be both Boolean and real: "
+            f"{ambiguous}"
+        )
+    return bool_names
+
+
 def get_rival_rects(
     assumes: Sequence[BoolExpr],
     free_vars: Sequence[str],
+    bool_var_names: Iterable[str] | None = None,
 ) -> list[list[tuple[float, float]]]:
-    var_indexes = {name: index for index, name in enumerate(free_vars)}
-    rects = [_rival_unbounded_rect(len(free_vars))]
-    for assume in assumes:
-        alternatives = _rival_rect_alternatives(
-            assume,
-            var_indexes,
-            len(free_vars),
-        )
+    resolved_bool_var_names = _collect_bool_var_names(assumes) if bool_var_names is None else set(bool_var_names)
+    rects, _ = _get_rival_rects_and_contributors(assumes, free_vars, resolved_bool_var_names)
+    return rects
+
+
+def _get_rival_rects_and_contributors(
+    assumes: Sequence[BoolExpr],
+    free_vars: Sequence[str],
+    bool_var_names: set[str],
+) -> tuple[list[list[tuple[float, float]]], list[bool]]:
+    domain = _RivalRectDomain.build(free_vars, bool_var_names)
+    rects = [domain.new_rect()]
+    contributors = [False] * len(assumes)
+    for index, assume in enumerate(assumes):
+        alternatives = _rival_rect_alternatives(assume, domain)
         if alternatives is None:
             continue
+        contributors[index] = True
         rects = _intersect_rival_rect_sets(rects, alternatives)
         if not rects:
             break
-    return rects
+    return rects, contributors
 
 
 def rival_feasibility_check(ctx: "SpecContext", max_depth: int = 1, checks=False):
     max_depth = int(max_depth)
     exprs = ctx.assumes + ctx.checks if checks else ctx.assumes
     free_vars = collect_free_vars(exprs)
+    bool_var_names = _collect_bool_var_names(exprs)
     
     if not exprs:
         return "feasible"
     
-    rects = get_rival_rects(ctx.assumes, free_vars)
+    rects = get_rival_rects(ctx.assumes, free_vars, bool_var_names)
     if not rects:
         return "not feasible"
 
@@ -137,38 +188,163 @@ def rival_feasibility_check(ctx: "SpecContext", max_depth: int = 1, checks=False
     return "unknown" if may_be_feasible else "not feasible"
 
 
-# Drop expressions that are certainly true. Assumptions must hold without
-# relying on themselves; checks may use a conservative rectangular enclosure
-# of the assumption domain.
+def _rewrite_proven_expressions(
+    nodes: Sequence[SpecNode],
+    *,
+    free_vars: Sequence[str],
+    rects: Sequence[Sequence[tuple[float, float]]],
+) -> list[SpecNode]:
+    proof_cache: dict[BoolExpr, bool | None] = {}
+
+    def prove(predicate: BoolExpr) -> bool | None:
+        predicate = predicate.constant_fold()
+        if isinstance(predicate, BoolLit):
+            return predicate.value
+        if not rects:
+            return None
+
+        cached = proof_cache.get(predicate)
+        if cached is not None or predicate in proof_cache:
+            return cached
+
+        true_machine = build_machine([predicate], free_vars)
+        true_statuses = [
+            true_machine.apply_with_hints(rect, None).status
+            for rect in rects
+        ]
+        if all(status == (False, False) for status in true_statuses):
+            result = True
+        elif all(status == (True, True) for status in true_statuses):
+            # An asserted predicate that always errors may be either false or
+            # undefined. Prove falsity by successfully asserting its negation
+            # instead of interpreting an error status as Boolean false.
+            negated = (~predicate).constant_fold()
+            if isinstance(negated, BoolLit):
+                result = not negated.value
+            else:
+                false_machine = build_machine([negated], free_vars)
+                false_statuses = [false_machine.apply_with_hints(rect, None).status for rect in rects]
+                result = False if all(status == (False, False) for status in false_statuses) else None
+        else:
+            result = None
+        proof_cache[predicate] = result
+        return result
+
+    def rewrite(node: SpecNode, *, top_level: bool = False) -> SpecNode:
+        old_children = children(node)
+        new_children = tuple(rewrite(child) for child in old_children)
+        rewritten = (
+            node
+            if all(old is new for old, new in zip(old_children, new_children))
+            else type(node)(*new_children)
+        ).constant_fold()
+
+        if isinstance(rewritten, BoolLit):
+            return rewritten
+
+        if isinstance(rewritten, (Eq, NotEq, Lt, Le, Gt, Ge, BoolEq)):
+            truth = prove(rewritten)
+            return BoolLit(truth) if truth is not None else rewritten
+
+        if isinstance(rewritten, If):
+            truth = prove(rewritten.cond)
+            if truth is True:
+                return rewritten.on_true
+            if truth is False:
+                return rewritten.on_false
+            return rewritten
+
+        if isinstance(rewritten, Abs):
+            zero = RealLit(0)
+            nonnegative = prove(rewritten.value >= zero)
+            if nonnegative is True:
+                return rewritten.value
+            if nonnegative is False:
+                return (-rewritten.value).constant_fold()
+
+            nonpositive = prove(rewritten.value <= zero)
+            if nonpositive is True:
+                return (-rewritten.value).constant_fold()
+            if nonpositive is False:
+                return rewritten.value
+            return rewritten
+
+        if isinstance(rewritten, (Max, Min)):
+            lhs_is_at_least_rhs = prove(rewritten.lhs >= rewritten.rhs)
+            if lhs_is_at_least_rhs is not None:
+                if isinstance(rewritten, Max):
+                    return rewritten.lhs if lhs_is_at_least_rhs else rewritten.rhs
+                return rewritten.rhs if lhs_is_at_least_rhs else rewritten.lhs
+
+            lhs_is_at_most_rhs = prove(rewritten.lhs <= rewritten.rhs)
+            if lhs_is_at_most_rhs is None:
+                return rewritten
+            if isinstance(rewritten, Max):
+                return rewritten.rhs if lhs_is_at_most_rhs else rewritten.lhs
+            return rewritten.lhs if lhs_is_at_most_rhs else rewritten.rhs
+
+        if top_level and isinstance(rewritten, BoolExpr):
+            truth = prove(rewritten)
+            return BoolLit(truth) if truth is not None else rewritten
+
+        return rewritten
+
+    return [rewrite(node, top_level=True) for node in nodes]
+
+
+# Preserve assumptions used to construct the rectangular domain. Rewrite all
+# other assumptions and checks only when every applicable rectangle agrees,
+# then drop expressions that are certainly true.
 def rival_trim_context(ctx: "SpecContext") -> "SpecContext":
     exprs = ctx.assumes + ctx.checks
     free_vars = collect_free_vars(exprs)
-    unbounded_rects = [_rival_unbounded_rect(len(free_vars))]
-    check_rects = get_rival_rects(
+    bool_var_names = _collect_bool_var_names(exprs)
+    assumption_rects, assumption_contributes_to_rect = _get_rival_rects_and_contributors(
         ctx.assumes,
         free_vars,
+        bool_var_names,
+    )
+    # Assumes that do not store pure facts and can be simplified
+    rewritable_assumes = [
+        assume
+        for assume, contributes in zip(
+            ctx.assumes,
+            assumption_contributes_to_rect,
+        )
+        if not contributes
+    ]
+    rewritten_assumes = iter(
+        _rewrite_proven_expressions(
+            rewritable_assumes,
+            free_vars=free_vars,
+            rects=assumption_rects,
+        )
+    )
+    rewritten_ctx = ctx.copy(
+        assumes=[
+            assume if contributes else next(rewritten_assumes)
+            for assume, contributes in zip(
+                ctx.assumes,
+                assumption_contributes_to_rect,
+            )
+        ],
+        checks=_rewrite_proven_expressions(
+            ctx.checks,
+            free_vars=free_vars,
+            rects=assumption_rects,
+        ),
     )
 
-    def is_always_true(
-        expr: BoolExpr,
-        rects: Sequence[Sequence[tuple[float, float]]],
-    ) -> bool:
-        machine = build_machine([expr], free_vars)
-        return all(
-            machine.apply_with_hints(rect, None).status == (False, False)
-            for rect in rects
-        )
-
-    return ctx.copy(
+    return rewritten_ctx.copy(
         assumes=[
             assume
-            for assume in ctx.assumes
-            if not is_always_true(assume, unbounded_rects)
+            for assume in rewritten_ctx.assumes
+            if not identical_nodes(assume, BoolLit(True))
         ],
         checks=[
             check
-            for check in ctx.checks
-            if not is_always_true(check, check_rects)
+            for check in rewritten_ctx.checks
+            if not identical_nodes(check, BoolLit(True))
         ],
     )
 
@@ -191,7 +367,6 @@ def _build_rival_expr_searches(
         }))
         searches.append(
             RivalExprSearch(
-                expr=expr,
                 machine=build_machine([expr], free_vars),
                 split_indexes=split_indexes,
             )
@@ -317,18 +492,24 @@ def _split_rival_interval(
     return None
 
 
-def _rival_unbounded_rect(dimensions: int) -> list[tuple[float, float]]:
-    return [(-math.inf, math.inf) for _ in range(dimensions)]
-
-
 def _rival_rect_alternatives(
     expr: BoolExpr,
-    var_indexes: dict[str, int],
-    dimensions: int,
+    domain: _RivalRectDomain,
 ) -> list[list[tuple[float, float]]] | None:
+    if isinstance(expr, BoolLit):
+        return None if expr.value else []
+
+    expr_vars = variables(expr)
+    if (
+        expr_vars
+        and all(isinstance(var, BoolVar) for var in expr_vars)
+        and all(var.name in domain.bool_var_names for var in expr_vars)
+    ):
+        return _rival_boolean_rect_alternatives(expr, domain)
+
     if isinstance(expr, And):
-        lhs = _rival_rect_alternatives(expr.lhs, var_indexes, dimensions)
-        rhs = _rival_rect_alternatives(expr.rhs, var_indexes, dimensions)
+        lhs = _rival_rect_alternatives(expr.lhs, domain)
+        rhs = _rival_rect_alternatives(expr.rhs, domain)
         if lhs == [] or rhs == []:
             return []
         if lhs is None:
@@ -336,25 +517,55 @@ def _rival_rect_alternatives(
         if rhs is None:
             return lhs
         return _intersect_rival_rect_sets(lhs, rhs)
-    
+
     if isinstance(expr, Or):
-        lhs = _rival_rect_alternatives(expr.lhs, var_indexes, dimensions)
-        rhs = _rival_rect_alternatives(expr.rhs, var_indexes, dimensions)
+        lhs = _rival_rect_alternatives(expr.lhs, domain)
+        rhs = _rival_rect_alternatives(expr.rhs, domain)
         if lhs is None or rhs is None:
             return None
         return lhs + rhs
-    
-    return _rival_comparison_rect(expr, var_indexes, dimensions)
+
+    return _rival_comparison_rect(expr, domain)
+
+
+def _rival_boolean_rect_alternatives(
+    expr: BoolExpr,
+    domain: _RivalRectDomain,
+) -> list[list[tuple[float, float]]] | None:
+    bool_vars = sorted(
+        (var for var in variables(expr) if isinstance(var, BoolVar)),
+        key=lambda var: var.name,
+    )
+    if any(var.name not in domain.var_indexes for var in bool_vars):
+        return None
+
+    alternatives: list[list[tuple[float, float]]] = []
+    for values in product((False, True), repeat=len(bool_vars)):
+        replacements = {
+            var: BoolLit(value)
+            for var, value in zip(bool_vars, values)
+        }
+        folded = substitute_literals(expr, replacements).constant_fold()
+        if not isinstance(folded, BoolLit):
+            return None
+        if not folded.value:
+            continue
+
+        rect = domain.new_rect()
+        for var, value in zip(bool_vars, values):
+            point = 1.0 if value else 0.0
+            rect[domain.var_indexes[var.name]] = (point, point)
+        alternatives.append(rect)
+    return alternatives
 
 
 def _rival_comparison_rect(
     expr: BoolExpr,
-    var_indexes: dict[str, int],
-    dimensions: int,
+    domain: _RivalRectDomain,
 ) -> list[list[tuple[float, float]]] | None:
     if not isinstance(expr, (Eq, Lt, Le, Gt, Ge)):
         return None
-    
+
     var: RealVar
     literal: RealLit
     var_on_lhs: bool
@@ -368,43 +579,33 @@ def _rival_comparison_rect(
         var_on_lhs = False
     else:
         return None
-    
+
     literal_enclosure = _rival_literal_enclosure(literal)
     if literal_enclosure is None:
         return None
     literal_lower, literal_upper = literal_enclosure
-    
-    var_index = var_indexes.get(var.name)
+
+    var_index = domain.var_indexes.get(var.name)
     if var_index is None:
-        return [_rival_unbounded_rect(dimensions)]
-    
+        return [domain.new_rect()]
+
     lower = -math.inf
     upper = math.inf
     if isinstance(expr, Eq):
         lower = literal_lower
         upper = literal_upper
-    elif isinstance(expr, Gt):
+    elif isinstance(expr, (Gt, Ge)):
         if var_on_lhs:
             lower = literal_lower
         else:
             upper = literal_upper
-    elif isinstance(expr, Ge):
-        if var_on_lhs:
-            lower = literal_lower
-        else:
-            upper = literal_upper
-    elif isinstance(expr, Lt):
+    elif isinstance(expr, (Lt, Le)):
         if var_on_lhs:
             upper = literal_upper
         else:
             lower = literal_lower
-    elif isinstance(expr, Le):
-        if var_on_lhs:
-            upper = literal_upper
-        else:
-            lower = literal_lower
-    
-    rect = _rival_unbounded_rect(dimensions)
+
+    rect = domain.new_rect()
     rect[var_index] = (lower, upper)
     return [] if lower > upper else [rect]
 

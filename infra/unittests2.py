@@ -2,6 +2,8 @@ import unittest
 import contextlib
 import os
 import pickle
+import random
+import struct
 import sys
 import time
 from unittest.mock import Mock, patch
@@ -13,7 +15,7 @@ from egglog import EGraph
 
 from zolotone import *
 from zolotone.ast import nodes as ast_nodes
-from zolotone.egglog.rules import load_rules
+from zolotone.egglog.rules import constant_rules, load_rules
 from zolotone.smt import dreal_check_eq, z3_check_eq
 from zolotone.solver import engine as solver_engine
 from zolotone.solver.report import build_proof_report
@@ -28,11 +30,17 @@ from zolotone.rival import (
 )
 from zolotone.spec.spec_context import simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
-from examples.FP32_IEEE_adder import FP32_IEEE_adder
-from examples.FP32_IEEE_mult import FP32_IEEE_mult
-from examples.common import xor_spec
-from examples.conventional import Conventional
-from examples.optimized import Optimized
+from examples.fp32_add import fp32_add
+from examples.fp32_mult import fp32_mult
+from examples.bf16_add import bf16_add
+from examples.bf16_mult import bf16_mult
+from examples.bf16_relu import bf16_relu
+from examples.common import and_spec, neg_spec, or_spec, xor_spec
+from examples.bf16x8_dot_fp32_conventional import (
+    bf16x8_dot_fp32_conventional,
+    dot_product_spec as bf16x8_dot_fp32_spec,
+)
+from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
 
 from infra.compile_cpp import jit_compile, nonjit_compile
 
@@ -136,7 +144,7 @@ class TestConstantFolding(unittest.TestCase):
     def test_fp32_multiplier_special_cases(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_mult(x, y)
+        design = fp32_mult(x, y)
 
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
@@ -166,7 +174,7 @@ class TestConstantFolding(unittest.TestCase):
     def test_fp32_multiplier_zero_handling(self):
         x = Var(name="x", sign=Float32T())
         y = Var(name="y", sign=Float32T())
-        design = FP32_IEEE_mult(x, y)
+        design = fp32_mult(x, y)
 
         tempdir_jit, fn_jit = jit_compile(design)
         tempdir_no_jit, fn_no_jit = nonjit_compile(design)
@@ -311,11 +319,141 @@ class TestConstantFolding(unittest.TestCase):
         for i, bits in enumerate(vals[4:]):
             b[i].load_val(BFloat16(bits))
 
-        conventional = Conventional(*a, *b).evaluate()
-        optimized = Optimized(*a, *b).evaluate()
+        conventional = bf16x8_dot_fp32_conventional(*a, *b).evaluate()
+        optimized = bf16x8_dot_fp32_optimized(*a, *b).evaluate()
 
         self.assertEqual(conventional.val, 388040612)
         self.assertEqual(conventional, optimized)
+
+    def test_dot_products_preserve_sticky_evidence_during_alignment(self):
+        # Exact sum: 1 + 2**-24 + 2**-31. The 2**-31 term is sticky
+        # evidence that makes the FP32 result round up rather than tie to even.
+        a_values = [0x3F80, 0x3980, 0x3800, 0x0000]
+        b_values = [0x3F80, 0x3980, 0x3780, 0x0000]
+        a = [Var(name=f"a_{i}", sign=BFloat16T()) for i in range(4)]
+        b = [Var(name=f"b_{i}", sign=BFloat16T()) for i in range(4)]
+
+        for variable, bits in zip(a, a_values, strict=True):
+            variable.load_val(BFloat16(bits))
+        for variable, bits in zip(b, b_values, strict=True):
+            variable.load_val(BFloat16(bits))
+
+        designs = {
+            "conventional": bf16x8_dot_fp32_conventional(*a, *b),
+            "optimized": bf16x8_dot_fp32_optimized(*a, *b),
+        }
+        for name, design in designs.items():
+            with self.subTest(design=name):
+                self.assertEqual(design.evaluate().val, 0x3F800001)
+
+    def test_dot_products_handle_subnormals_and_special_values(self):
+        a = [Var(name=f"a_{i}", sign=BFloat16T()) for i in range(4)]
+        b = [Var(name=f"b_{i}", sign=BFloat16T()) for i in range(4)]
+        designs = {
+            "conventional": bf16x8_dot_fp32_conventional(*a, *b),
+            "optimized": bf16x8_dot_fp32_optimized(*a, *b),
+        }
+
+        zero = BFloat16.Zero()
+        one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)
+        largest_finite = BFloat16.from_fields(
+            sign=0,
+            exponent=254,
+            mantissa=127,
+        )
+        smallest_subnormal = BFloat16.from_fields(sign=0, exponent=0, mantissa=1)
+
+        cases = [
+            (
+                "subnormal",
+                [smallest_subnormal, zero, zero, zero],
+                [one, zero, zero, zero],
+                0x00010000,
+            ),
+            (
+                "zero product does not set the maximum exponent",
+                [smallest_subnormal, zero, zero, zero],
+                [one, largest_finite, zero, zero],
+                0x00010000,
+            ),
+            (
+                "all zero products",
+                [zero, zero, zero, zero],
+                [zero, zero, zero, zero],
+                Float32.Zero().val,
+            ),
+            (
+                "three normal products and one zero product",
+                [one, zero, one, one],
+                [one, zero, one, one],
+                Float32.from_fields(
+                    sign=0,
+                    exponent=128,
+                    mantissa=1 << 22,
+                ).val,
+            ),
+            (
+                "positive infinity",
+                [BFloat16.Inf(), zero, zero, zero],
+                [one, zero, zero, zero],
+                Float32.Inf().val,
+            ),
+            (
+                "negative infinity",
+                [BFloat16.nInf(), zero, zero, zero],
+                [one, zero, zero, zero],
+                Float32.nInf().val,
+            ),
+            (
+                "opposing infinities",
+                [BFloat16.Inf(), BFloat16.nInf(), zero, zero],
+                [one, one, zero, zero],
+                Float32.NaN().val,
+            ),
+            (
+                "zero times infinity",
+                [zero, zero, zero, zero],
+                [BFloat16.Inf(), zero, zero, zero],
+                Float32.NaN().val,
+            ),
+            (
+                "NaN input",
+                [BFloat16.NaN(), zero, zero, zero],
+                [one, zero, zero, zero],
+                Float32.NaN().val,
+            ),
+        ]
+
+        for name, a_values, b_values, expected in cases:
+            for design_name, design in designs.items():
+                with self.subTest(name=name, design=design_name):
+                    for variable, value in zip(a, a_values):
+                        variable.load_val(value)
+                    for variable, value in zip(b, b_values):
+                        variable.load_val(value)
+                    self.assertEqual(design.evaluate().val, expected)
+
+            with self.subTest(name=name, design="spec"):
+                outer_ctx = SpecContext(f"dot-product-{name}")
+                outer_result = bf16x8_dot_fp32_spec(
+                    *(value.to_spec(outer_ctx) for value in (*a_values, *b_values)),
+                    ctx=outer_ctx,
+                ).constant_fold()
+                expected_result = Float32(expected).to_spec(outer_ctx)
+                if (
+                    expected_result.is_inf.constant_fold().value
+                    or expected_result.is_nan.constant_fold().value
+                ):
+                    self.assertEqual(
+                        outer_result.classification_flags(),
+                        expected_result.classification_flags(),
+                    )
+                if expected_result.is_inf.constant_fold().value:
+                    self.assertEqual(
+                        outer_result.sign.constant_fold(),
+                        expected_result.sign.constant_fold(),
+                    )
+                outer_ctx.validate_requirements()
 
 
 class TestFingerprint(unittest.TestCase):
@@ -542,13 +680,23 @@ class TestPowSpecOp(unittest.TestCase):
 
 
 class TestSpecContextLearning(unittest.TestCase):
+    def test_real_literal_shortcuts(self):
+        ctx = SpecContext("real-literal-shortcuts")
+
+        self.assertEqual(ctx.zero(), RealLit(0))
+        self.assertEqual(ctx.one(), RealLit(1))
+        self.assertEqual(ctx.two(), RealLit(2))
+        self.assertIsInstance(ctx.zero(), RealLit)
+        self.assertIsInstance(ctx.one(), RealLit)
+        self.assertIsInstance(ctx.two(), RealLit)
+
     def test_learned_literals_reads_real_var_equalities(self):
         ctx = SpecContext("learn-real")
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(ctx.real_val(1)))
-        ctx.assume(ctx.real_val(2).eq(y))
+        ctx.assume(x.eq(ctx.one()))
+        ctx.assume(ctx.two().eq(y))
 
         learned = ctx.learned_literals()
         self.assertEqual(len(learned), 2)
@@ -560,7 +708,7 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(ctx.real_val(2) + ctx.real_val(3)))
+        ctx.assume(x.eq(ctx.two() + ctx.real_val(3)))
         ctx.assume((ctx.real_val(10) - ctx.real_val(4)).eq(y))
 
         learned = ctx.learned_literals()
@@ -586,8 +734,8 @@ class TestSpecContextLearning(unittest.TestCase):
         p = ctx.bool("p")
         q = ctx.bool("q")
 
-        ctx.assume(p.eq(ctx.real_val(2).eq(ctx.real_val(2))))
-        ctx.assume((ctx.real_val(2).eq(ctx.real_val(3))).eq(q))
+        ctx.assume(p.eq(ctx.two().eq(ctx.two())))
+        ctx.assume((ctx.two().eq(ctx.real_val(3))).eq(q))
 
         learned = ctx.learned_literals()
         self.assertEqual(len(learned), 2)
@@ -617,9 +765,9 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         p = ctx.bool("p")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()))
         ctx.assume(p.eq(ctx.true()))
-        ctx.assume(x.eq(ctx.real_val(1)))
+        ctx.assume(x.eq(ctx.one()))
 
         with self.assertRaises(ValueError):
             ctx.learned_literals()
@@ -629,9 +777,9 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()))
         before = ctx.copy()
-        ctx.assume(x.eq(ctx.real_val(1)))
+        ctx.assume(x.eq(ctx.one()))
 
         self.assertEqual(
             ctx.assumes,
@@ -655,8 +803,8 @@ class TestSpecContextLearning(unittest.TestCase):
         y = ctx.real("y")
 
         ctx.assume(and_res.eq(x * y))
-        ctx.assume(x.eq(ctx.real_val(0)))
-        ctx.assume(y.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()))
+        ctx.assume(y.eq(ctx.zero()))
 
         simplified = ctx.simplify()
 
@@ -680,8 +828,8 @@ class TestSpecContextLearning(unittest.TestCase):
         y = ctx.real("y")
 
         ctx.assume(xor_res.eq(x + y))
-        ctx.assume((xor_res * ctx.real_val(1)).eq(x + y))
-        ctx.check((xor_res + ctx.real_val(1)).eq((x + y) + ctx.real_val(1)))
+        ctx.assume((xor_res * ctx.one()).eq(x + y))
+        ctx.check((xor_res + ctx.one()).eq((x + y) + ctx.one()))
 
         simplified = ctx.simplify()
 
@@ -695,8 +843,8 @@ class TestSpecContextLearning(unittest.TestCase):
         y = ctx.real("y")
         z = ctx.real("z")
 
-        ctx.assume(alias.eq(y + ctx.real_val(1)))
-        ctx.assume(alias.eq(z + ctx.real_val(1)))
+        ctx.assume(alias.eq(y + ctx.one()))
+        ctx.assume(alias.eq(z + ctx.one()))
 
         simplified = ctx.simplify()
 
@@ -722,8 +870,8 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(y + ctx.real_val(1)))
-        ctx.assume(y.eq(x + ctx.real_val(1)))
+        ctx.assume(x.eq(y + ctx.one()))
+        ctx.assume(y.eq(x + ctx.one()))
 
         self.assertEqual(
             ctx.assumes,
@@ -738,8 +886,8 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(y + ctx.real_val(1)))
-        ctx.check(y.eq(x + ctx.real_val(1)))
+        ctx.assume(x.eq(y + ctx.one()))
+        ctx.check(y.eq(x + ctx.one()))
 
         self.assertEqual(ctx.checks, [Eq(y, x + RealLit(1))])
 
@@ -748,9 +896,9 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         p = ctx.bool("p")
 
-        ctx.assume(x.eq(ctx.real_val(1) + ctx.real_val(2)))
-        ctx.assume(ctx.real_val(4).eq(x + ctx.real_val(1)))
-        ctx.assume(p.eq(ctx.real_val(2).eq(ctx.real_val(2))))
+        ctx.assume(x.eq(ctx.one() + ctx.two()))
+        ctx.assume(ctx.real_val(4).eq(x + ctx.one()))
+        ctx.assume(p.eq(ctx.two().eq(ctx.two())))
 
         simplified = ctx.simplify()
 
@@ -766,9 +914,9 @@ class TestSpecContextLearning(unittest.TestCase):
         y = ctx.real("y")
         z = ctx.real("z")
 
-        ctx.assume(x.eq(y + ctx.real_val(1)))
-        ctx.assume(y.eq(z + ctx.real_val(1)))
-        ctx.assume(z.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(y + ctx.one()))
+        ctx.assume(y.eq(z + ctx.one()))
+        ctx.assume(z.eq(ctx.zero()))
 
         simplified = ctx.simplify()
 
@@ -782,8 +930,8 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx = SpecContext("simplify-checks")
         x = ctx.real("x")
 
-        ctx.assume(x.eq(ctx.real_val(1)))
-        ctx.check((x + ctx.real_val(2)).eq(ctx.real_val(3)))
+        ctx.assume(x.eq(ctx.one()))
+        ctx.check((x + ctx.two()).eq(ctx.real_val(3)))
 
         simplified = ctx.simplify()
 
@@ -809,7 +957,7 @@ class TestSpecContextLearning(unittest.TestCase):
     def test_context_fixpoint_learns_negated_compound_boolean_fact(self):
         ctx = SpecContext("simplify-negated-compound-bool")
         x = ctx.real("x")
-        overflow = abs(x) > ctx.real_val(1)
+        overflow = abs(x) > ctx.one()
 
         ctx.assume(overflow.eq(ctx.false()))
         ctx.check(overflow.eq(ctx.false()))
@@ -826,7 +974,7 @@ class TestSpecContextLearning(unittest.TestCase):
     def test_context_fixpoint_learns_positive_compound_boolean_fact(self):
         ctx = SpecContext("simplify-positive-compound-bool")
         x = ctx.real("x")
-        in_range = (x >= ctx.real_val(-1)) & (x <= ctx.real_val(1))
+        in_range = (x >= ctx.real_val(-1)) & (x <= ctx.one())
 
         ctx.assume(in_range.eq(ctx.true()))
         ctx.check(in_range)
@@ -844,8 +992,8 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx = SpecContext("simplify-compound-assumptions")
         x = ctx.real("x")
         y = ctx.real("y")
-        positive_x = x > ctx.real_val(0)
-        positive_y = y > ctx.real_val(0)
+        positive_x = x > ctx.zero()
+        positive_y = y > ctx.zero()
 
         ctx.assume(positive_x)
         ctx.assume(positive_y)
@@ -857,7 +1005,7 @@ class TestSpecContextLearning(unittest.TestCase):
     def test_context_fixpoint_keeps_one_anchor_for_duplicate_compound_facts(self):
         ctx = SpecContext("simplify-duplicate-compound")
         x = ctx.real("x")
-        positive = x > ctx.real_val(0)
+        positive = x > ctx.zero()
 
         ctx.assume(positive)
         ctx.assume(positive)
@@ -890,8 +1038,8 @@ class TestSpecContextLearning(unittest.TestCase):
         selected = ctx.fresh_real("selected")
         condition = ctx.bool("condition")
 
-        ctx.assume(selected.eq(If(condition, ctx.real_val(1), ctx.real_val(0))))
-        ctx.assume((ctx.real_val(1) - selected).eq(ctx.real_val(1)))
+        ctx.assume(selected.eq(If(condition, ctx.one(), ctx.zero())))
+        ctx.assume((ctx.one() - selected).eq(ctx.one()))
         ctx.check(condition)
 
         simplified = ctx.simplify()
@@ -900,9 +1048,9 @@ class TestSpecContextLearning(unittest.TestCase):
             simplified.assumes,
             [
                 (
-                    ctx.real_val(1)
-                    - If(condition, ctx.real_val(1), ctx.real_val(0))
-                ).eq(ctx.real_val(1))
+                    ctx.one()
+                    - If(condition, ctx.one(), ctx.zero())
+                ).eq(ctx.one())
             ],
         )
         self.assertEqual(simplified.checks, [condition])
@@ -912,8 +1060,8 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         p = ctx.bool("p")
 
-        ctx.assume(x.eq(ctx.real_val(1)))
-        ctx.assume((ctx.real_val(2) - ctx.real_val(1)).eq(x))
+        ctx.assume(x.eq(ctx.one()))
+        ctx.assume((ctx.two() - ctx.one()).eq(x))
         ctx.assume(p.eq(ctx.true()))
         ctx.assume(ctx.real_val(3).eq(ctx.real_val(3)).eq(p))
 
@@ -929,8 +1077,8 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx = SpecContext("simplify-conflict")
         x = ctx.real("x")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
-        ctx.assume(x.eq(ctx.real_val(1)))
+        ctx.assume(x.eq(ctx.zero()))
+        ctx.assume(x.eq(ctx.one()))
 
         with self.assertRaises(ValueError):
             ctx.simplify()
@@ -940,8 +1088,8 @@ class TestSpecContextLearning(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x.eq(y + ctx.real_val(1)))
-        ctx.assume(y.eq(ctx.real_val(2)))
+        ctx.assume(x.eq(y + ctx.one()))
+        ctx.assume(y.eq(ctx.two()))
         ctx.check(x.eq(ctx.real_val(3)))
 
         simplified = ctx.simplify()
@@ -959,8 +1107,8 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx = SpecContext("simplify-conflict-output")
         x = ctx.real("x")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
-        ctx.assume(x.eq(ctx.real_val(1)))
+        ctx.assume(x.eq(ctx.zero()))
+        ctx.assume(x.eq(ctx.one()))
 
         with self.assertRaises(ValueError):
             ctx.simplify()
@@ -983,6 +1131,23 @@ class TestSpecContextLearning(unittest.TestCase):
         trim.assert_not_called()
         self.assertEqual(report["feasibility_status"], "not feasible")
         self.assertEqual(report["status"], "sat")
+
+    def test_simplify_ctx_alternates_regular_and_rival_until_saturated(self):
+        ctx = SpecContext("alternating-simplification")
+        x = ctx.real("x")
+        zero = ctx.zero()
+        one = ctx.one()
+        ctx.assume(x >= zero)
+        ctx.assume(abs(x).eq(one))
+        ctx.check(x.eq(one))
+
+        report = simplify_ctx(ctx)
+
+        self.assertEqual(report["new_ctx"].assumes, [])
+        self.assertEqual(report["new_ctx"].checks, [])
+        self.assertEqual(report["status"], "unsat")
+        self.assertEqual(ctx.assumes, [x >= zero, abs(x).eq(one)])
+        self.assertEqual(ctx.checks, [x.eq(one)])
 
 class TestEgglogFloatLiterals(unittest.TestCase):
     def test_xnor_extracts_as_boolean_equality(self):
@@ -1057,6 +1222,38 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         expected_checks = [] if expected == BoolLit(True) else [expected]
         self.assertEqual(ctx.simplify().checks, expected_checks)
 
+    def test_fp_expr_declares_required_abstract_format_operations(self):
+        self.assertEqual(
+            FPExpr.__abstractmethods__,
+            {
+                "classification_flags",
+                "decode",
+                "encode",
+                "fresh",
+                "is_finite",
+                "observables_for_classification",
+            },
+        )
+
+    def test_fp_expr_requires_a_declared_value_field(self):
+        with self.assertRaisesRegex(TypeError, "must declare a value"):
+            class MissingValueFP(FPExpr):
+                pass
+
+    def test_fp_expr_requires_value_to_be_real_expr(self):
+        with self.assertRaisesRegex(TypeError, "value must be RealExpr"):
+            fp32(
+                value=object(),
+                sign=RealLit(0),
+                exponent=RealLit(0),
+                mantissa=RealLit(0),
+                is_norm=BoolLit(False),
+                is_sub=BoolLit(False),
+                is_zero=BoolLit(True),
+                is_inf=BoolLit(False),
+                is_nan=BoolLit(False),
+            )
+
     def test_constant_fold_method_folds_literal_tree(self):
         expr = (RealLit(2) + RealLit(3)) * RealLit(4)
 
@@ -1071,6 +1268,11 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         expr = (RealLit(2) + RealLit(3)).eq(RealLit(6))
 
         self.assertEqual(expr.constant_fold(), BoolLit(False))
+
+    def test_constant_fold_cancels_identical_subtraction(self):
+        x = RealVar("x")
+
+        self.assertEqual((x - x).constant_fold(), RealLit(0))
 
     def test_constant_fold_keeps_symbolic_if_shape(self):
         expr = If(BoolLit(True), RealVar("x"), RealVar("y"))
@@ -1109,29 +1311,29 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "If branches"):
             If(BoolVar("condition"), BoolVar("on_true"), RealLit(0))
 
-    def test_if_selects_fp_fields_generically(self):
-        condition = BoolVar("condition")
-        selected = If(condition, fp32.nan(), fp32.ninf())
-
-        self.assertIsInstance(selected, fp32)
-        self.assertIsInstance(selected.value, If)
-        self.assertEqual(
-            If(BoolLit(True), fp32.nan(), fp32.ninf()).constant_fold(),
-            fp32.nan(),
-        )
+    def test_if_rejects_fp_branches_and_directs_users_to_cases(self):
+        ctx = SpecContext("if-rejects-fp")
+        with self.assertRaisesRegex(
+            TypeError,
+            "If does not support FPExpr branches; use exhaustive Cases",
+        ):
+            If(BoolVar("condition"), fp32.nan(ctx), fp32.ninf(ctx))
 
     def test_if_rejects_mixed_real_and_fp_branches(self):
-        with self.assertRaisesRegex(TypeError, "If branches"):
-            If(BoolVar("condition"), fp32.nan(), RealLit(0))
+        ctx = SpecContext("if-rejects-mixed-fp")
+        with self.assertRaisesRegex(TypeError, "use exhaustive Cases"):
+            If(BoolVar("condition"), fp32.nan(ctx), RealLit(0))
 
     def test_cases_lower_to_ordered_nested_ifs(self):
         first = BoolVar("first")
         second = BoolVar("second")
+        ctx = SpecContext("ordered-cases")
 
         expr = Cases(
             case(first, RealLit(1)),
             case(second, RealLit(2)),
-            default(RealLit(3)),
+            case(BoolLit(True), RealLit(3)),
+            ctx=ctx,
         )
 
         self.assertEqual(
@@ -1140,32 +1342,77 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         )
 
     def test_cases_select_the_first_matching_case(self):
+        ctx = SpecContext("first-matching-case")
         expr = Cases(
             case(BoolLit(True), RealLit(1)),
             case(BoolLit(True), RealLit(2)),
-            default(RealLit(3)),
+            ctx=ctx,
         )
 
         self.assertEqual(expr.constant_fold(), RealLit(1))
 
     def test_cases_support_fp_values(self):
+        ctx = SpecContext("fp-cases")
         expr = Cases(
-            case(BoolLit(False), fp32.nan()),
-            case(BoolLit(True), fp32.ninf()),
-            default(fp32.inf()),
+            case(BoolLit(False), fp32.nan(ctx)),
+            case(BoolLit(True), fp32.ninf(ctx)),
+            ctx=ctx,
         )
 
         self.assertIsInstance(expr, fp32)
-        self.assertEqual(expr.constant_fold(), fp32.ninf())
+        self.assertEqual(expr.is_ninf.constant_fold(), BoolLit(True))
+
+    def test_special_encoding_preserves_finite_value(self):
+        ctx = SpecContext("finite-special-encoding")
+        finite = fp32(
+            value=RealLit(3),
+            sign=RealLit(0),
+            exponent=RealLit(128),
+            mantissa=RealLit(0),
+            is_norm=BoolLit(True),
+            is_sub=BoolLit(False),
+            is_zero=BoolLit(False),
+            is_inf=BoolLit(False),
+            is_nan=BoolLit(False),
+        )
+
+        encoded = special_encoding(finite, ctx)
+
+        self.assertEqual(encoded.constant_fold(), finite)
+
+    def test_special_encoding_freshens_nonfinite_value_per_collection(self):
+        ctx = SpecContext("nonfinite-special-encoding")
+        infinity = fp32(
+            value=RealVar("shared_input_special"),
+            sign=RealLit(0),
+            exponent=RealLit(255),
+            mantissa=RealLit(0),
+            is_norm=BoolLit(False),
+            is_sub=BoolLit(False),
+            is_zero=BoolLit(False),
+            is_inf=BoolLit(True),
+            is_nan=BoolLit(False),
+        )
+
+        first = special_encoding(infinity, ctx).constant_fold()
+        second = special_encoding(infinity, ctx).constant_fold()
+
+        self.assertIsInstance(first.value, RealVar)
+        self.assertIsInstance(second.value, RealVar)
+        self.assertNotEqual(first.value.name, second.value.name)
+        self.assertNotEqual(first.value.name, "shared_input_special")
+        self.assertNotEqual(second.value.name, "shared_input_special")
 
     def test_cases_support_bool_values(self):
         condition = BoolVar("condition")
         on_true = BoolVar("on_true")
         on_false = BoolVar("on_false")
+        ctx = SpecContext("bool-cases")
 
         expr = Cases(
             case(condition, on_true),
-            default(on_false),
+            case(~condition, on_false),
+            ctx=ctx,
         )
 
         self.assertIsInstance(expr, BoolExpr)
@@ -1174,40 +1421,96 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             (condition & on_true) | ((~condition) & on_false),
         )
 
-    def test_cases_allow_only_a_default(self):
-        fallback = RealVar("fallback")
-
-        self.assertIs(Cases(default(fallback)), fallback)
-
-    def test_cases_require_exactly_one_final_default(self):
+    def test_cases_require_at_least_one_case_and_a_context(self):
         condition = BoolVar("condition")
         value = RealLit(1)
+        ctx = SpecContext("invalid-cases")
 
-        with self.assertRaisesRegex(ValueError, "requires a default"):
-            Cases()
-        with self.assertRaisesRegex(ValueError, "requires a default"):
+        with self.assertRaisesRegex(ValueError, "at least one case"):
+            Cases(ctx=ctx)
+        with self.assertRaisesRegex(TypeError, "missing.*ctx"):
             Cases(case(condition, value))
-        with self.assertRaisesRegex(ValueError, "exactly one default"):
-            Cases(default(value), default(value))
-        with self.assertRaisesRegex(ValueError, "final entry"):
-            Cases(default(value), case(condition, value))
 
     def test_cases_validate_entries_conditions_and_values(self):
-        with self.assertRaisesRegex(TypeError, "created by case.*or default"):
-            Cases([default(RealLit(1))])
-        with self.assertRaisesRegex(TypeError, "created by case.*or default"):
-            Cases(object())
+        ctx = SpecContext("invalid-case-entries")
+
+        with self.assertRaisesRegex(TypeError, "created by case"):
+            Cases([case(BoolLit(True), RealLit(1))], ctx=ctx)
+        with self.assertRaisesRegex(TypeError, "created by case"):
+            Cases(object(), ctx=ctx)
         with self.assertRaisesRegex(TypeError, "Expected BoolExpr"):
             case(RealLit(1), RealLit(2))
         with self.assertRaisesRegex(TypeError, "Cases values"):
-            default(object())
+            case(BoolLit(True), object())
 
     def test_cases_reject_mismatched_branch_types(self):
-        with self.assertRaisesRegex(TypeError, "If branches"):
+        condition = BoolVar("condition")
+        ctx = SpecContext("mismatched-case-types")
+
+        with self.assertRaisesRegex(TypeError, "Cases branches"):
             Cases(
-                case(BoolVar("condition"), fp32.nan()),
-                default(RealLit(0)),
+                case(condition, fp32.nan(ctx)),
+                case(~condition, RealLit(0)),
+                ctx=ctx,
             )
+
+    def test_cases_validate_exhaustive_coverage(self):
+        ctx = SpecContext("exhaustive-cases")
+        condition = ctx.bool("condition")
+
+        Cases(
+            case(condition, RealLit(1)),
+            case(~condition, RealLit(2)),
+            ctx=ctx,
+        )
+
+        ctx.validate_requirements(timeout_ms=1000)
+
+    def test_cases_reject_incomplete_coverage(self):
+        ctx = SpecContext("incomplete-cases")
+        condition = ctx.bool("condition")
+
+        Cases(
+            case(condition, RealLit(1)),
+            ctx=ctx,
+        )
+
+        with self.assertRaisesRegex(
+            MalformedSpecification,
+            "Could not prove specification requirements",
+        ):
+            ctx.validate_requirements(timeout_ms=1000)
+
+    def test_cases_reject_unknown_coverage(self):
+        ctx = SpecContext("unknown-case-coverage")
+        Cases(
+            case(BoolLit(True), RealLit(1)),
+            ctx=ctx,
+        )
+
+        with (
+            patch(
+                "zolotone.smt.z3_check_eq",
+                return_value={
+                    "status": "unknown",
+                    "supplementary_info": "timeout",
+                },
+            ),
+            self.assertRaisesRegex(MalformedSpecification, "solver returned unknown"),
+        ):
+            ctx.validate_requirements(timeout_ms=1000)
+
+    def test_fp32_decoder_returns_named_fields(self):
+        ctx = SpecContext("structured-fp32-decode")
+
+        decoded = fp32_decode(Const(Float32.Zero()))
+
+        self.assertEqual(
+            tuple(ctx.spec_of(field).constant_fold() for field in decoded),
+            tuple(RealLit(value) for value in (0, 0, 0, 0, 0, 1, 0, 0)),
+        )
+        self.assertIs(decoded.sign, decoded[0])
+        self.assertIs(decoded.is_nan, decoded[7])
 
     def test_fp32_encoder_spec_canonicalizes_exact_zero(self):
         from examples.encode_Float32 import fp32_encode_spec
@@ -1228,6 +1531,21 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                     report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
 
                 self.assertEqual(report["status"], "unsat", report)
+
+    def test_fp32_encode_constructs_result_without_calling_fresh(self):
+        ctx = SpecContext("direct-fp32-encode")
+
+        with patch.object(
+            fp32,
+            "fresh",
+            side_effect=AssertionError("encode must construct fp32 directly"),
+        ):
+            encoded = fp32.encode(RealLit(1), ctx)
+
+        self.assertIsInstance(encoded, fp32)
+        self.assertNotIsInstance(encoded.is_norm, BoolVar)
+        self.assertIsInstance(encoded.exponent, RealVar)
+        self.assertIsInstance(encoded.mantissa, RealVar)
 
     def test_fp32_encode_design_canonicalizes_exact_zero(self):
         from examples.encode_Float32 import fp32_encode
@@ -1280,7 +1598,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(design.evaluate(), expected)
 
     def test_fp32_multiplier_spec_zero_handling(self):
-        from examples.FP32_IEEE_mult import spec_FP32_IEEE_mult
+        from examples.fp32_mult import spec_fp32_mult
 
         cases = (
             ("+0 * +0", 0x00000000, 0x00000000, "is_pzero"),
@@ -1300,7 +1618,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         for name, lhs_bits, rhs_bits, predicate in cases:
             with self.subTest(name=name):
                 ctx = SpecContext(f"fp32-mult-{name}")
-                result = spec_FP32_IEEE_mult(
+                result = spec_fp32_mult(
                     Float32(lhs_bits).to_spec(ctx),
                     Float32(rhs_bits).to_spec(ctx),
                     ctx,
@@ -1314,7 +1632,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_multiplier_spec_preserves_underflow_zero_sign(self):
-        from examples.FP32_IEEE_mult import spec_FP32_IEEE_mult
+        from examples.fp32_mult import spec_fp32_mult
 
         cases = (
             ("positive half-minimum tie", 0x00000001, 0x3f000000, "is_pzero"),
@@ -1326,7 +1644,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         for name, lhs_bits, rhs_bits, predicate in cases:
             with self.subTest(name=name):
                 ctx = SpecContext(f"fp32-mult-{name}")
-                result = spec_FP32_IEEE_mult(
+                result = spec_fp32_mult(
                     Float32(lhs_bits).to_spec(ctx),
                     Float32(rhs_bits).to_spec(ctx),
                     ctx,
@@ -1340,20 +1658,47 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_adder_spec_preserves_single_infinity(self):
-        from examples.FP32_IEEE_adder import spec_FP32_IEEE_adder
+        from examples.fp32_add import spec_fp32_add
 
+        ctx = SpecContext("fp32-adder-single-infinity")
         cases = (
-            (fp32.inf(), fp32.zero(), fp32.inf()),
-            (fp32.zero(), fp32.inf(), fp32.inf()),
-            (fp32.ninf(), fp32.zero(), fp32.ninf()),
-            (fp32.zero(), fp32.ninf(), fp32.ninf()),
+            (fp32.inf(ctx), fp32.zero(ctx), "is_pinf"),
+            (fp32.zero(ctx), fp32.inf(ctx), "is_pinf"),
+            (fp32.ninf(ctx), fp32.zero(ctx), "is_ninf"),
+            (fp32.zero(ctx), fp32.ninf(ctx), "is_ninf"),
         )
 
-        for lhs, rhs, expected in cases:
+        for lhs, rhs, expected_predicate in cases:
             with self.subTest(lhs=lhs, rhs=rhs):
-                ctx = SpecContext("fp32-adder-single-infinity")
-                result = spec_FP32_IEEE_adder(lhs, rhs, ctx)
-                self.assertEqual(result.constant_fold(), expected)
+                result = spec_fp32_add(lhs, rhs, ctx)
+                ctx.validate_requirements(timeout_ms=1000)
+                self.assertEqual(
+                    getattr(result, expected_predicate).constant_fold(),
+                    BoolLit(True),
+                )
+
+    def test_fp32_adder_cases_reject_missing_nan_branch(self):
+        ctx = SpecContext("fp32-adder-missing-nan-case")
+        x = fp32.inf(ctx)
+        y = fp32.ninf(ctx)
+        nan_case = (
+            x.is_nan
+            | y.is_nan
+            | (x.is_pinf & y.is_ninf)
+            | (x.is_ninf & y.is_pinf)
+        )
+        neg_inf_case = (x.is_ninf | y.is_ninf) & (~nan_case)
+        pos_inf_case = (x.is_pinf | y.is_pinf) & (~nan_case)
+
+        Cases(
+            case(neg_inf_case, fp32.ninf(ctx)),
+            case(pos_inf_case, fp32.inf(ctx)),
+            case(x.is_finite & y.is_finite, fp32.zero(ctx)),
+            ctx=ctx,
+        )
+
+        with self.assertRaises(MalformedSpecification):
+            ctx.validate_requirements(timeout_ms=1000)
 
     def test_constant_fold_partially_rebuilds_symbolic_real_expr(self):
         x = RealVar("x")
@@ -1414,33 +1759,41 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "non-finite RealLit"):
                     RealLit(value)
 
-    def test_float32_value_is_a_finite_only_real_variable(self):
+    def test_float32_value_selects_finite_formula_or_fresh_special(self):
         ctx = SpecContext("float32-finite-value")
         value = fp32.fresh("x", ctx)
 
-        self.assertIsInstance(value.value, RealVar)
-        self.assertTrue(
-            any(
-                isinstance(assume, Or)
-                and value.is_zero in variables(assume)
-                and value.value in variables(assume)
-                for assume in ctx.assumes
-            )
-        )
+        self.assertIsInstance(value.value, If)
+        self.assertEqual(value.value.cond, value.is_norm)
+        subnormal_case = value.value.on_false
+        self.assertIsInstance(subnormal_case, If)
+        self.assertEqual(subnormal_case.cond, value.is_sub)
+        zero_case = subnormal_case.on_false
+        self.assertIsInstance(zero_case, If)
+        self.assertEqual(zero_case.cond, value.is_zero)
+        self.assertEqual(zero_case.on_true, RealLit(0))
+        self.assertIsInstance(zero_case.on_false, RealVar)
+        self.assertTrue(zero_case.on_false.name.startswith("special_"))
 
     def test_fp32_uses_explicit_non_finite_constructors(self):
+        ctx = SpecContext("explicit-fp32-specials")
         cases = (
-            ("nan", fp32.nan(), "is_nan"),
-            ("inf", fp32.inf(), "is_pinf"),
-            ("ninf", fp32.ninf(), "is_ninf"),
+            ("nan", fp32.nan(ctx), "is_nan"),
+            ("inf", fp32.inf(ctx), "is_pinf"),
+            ("ninf", fp32.ninf(ctx), "is_ninf"),
         )
 
+        special_names = set()
         for name, encoded, expected_predicate in cases:
             with self.subTest(value=name):
+                self.assertIsInstance(encoded.value, RealVar)
+                self.assertTrue(encoded.value.name.startswith("special_"))
+                special_names.add(encoded.value.name)
                 self.assertEqual(
                     getattr(encoded, expected_predicate).constant_fold(),
                     BoolLit(True),
                 )
+        self.assertEqual(len(special_names), len(cases))
 
     def test_encode_fp32_infers_infinity_sign_from_value(self):
         cases = (
@@ -1509,22 +1862,10 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown fp32 classification"):
             value.observables_for_classification("finite")
 
-        ctx = SpecContext("different-output-classifications")
-        ast_nodes._add_classification_case_checks(
-            ctx,
-            value,
-            value,
-            {"inner_spec": "inf", "outer_spec": "nan"},
-        )
-        self.assertEqual(
-            ctx.checks,
-            [flag.eq(flag) for flag in value.classification_flags().values()],
-        )
-
     def test_nested_fp32_outputs_are_split_and_lowered_to_scalar_queries(self):
-        inner = fp32.zero()
-        outer = fp32.zero()
         ctx = SpecContext("nested-fp32")
+        inner = fp32.zero(ctx)
+        outer = fp32.zero(ctx)
 
         cases = ast_nodes._split_classification_cases(
             ctx,
@@ -1537,8 +1878,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             for case in cases
             if ast_nodes._case_labels(case.name)
             == {
-                "inner_spec.0.0": "zero",
-                "outer_spec.0.0": "zero",
+                "output.0.0": "zero",
             }
         )
 
@@ -1551,15 +1891,459 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 RealLit(7).eq(RealLit(7)),
             ],
         )
-        self.assertTrue(
-            ast_nodes._output_classifications_match(ast_nodes._case_labels(case.name))
-        )
-
+        labels = ast_nodes._case_labels(case.name)
+        self.assertEqual(labels, {"output.0.0": "zero"})
         status, _ = solver_engine.check_equivalence(
             case,
             schedule=[{"tool": "simplify"}],
         )
         self.assertEqual(status, "unsat")
+
+    def test_classification_cases_are_constructed_lazily(self):
+        ctx = SpecContext("lazy-classification-cases")
+        inner = fp32.zero(ctx)
+        outer = fp32.zero(ctx)
+
+        with patch.object(ctx, "copy", wraps=ctx.copy) as copy_ctx:
+            cases = ast_nodes._split_classification_cases(
+                ctx,
+                [],
+                inner,
+                outer,
+            )
+            self.assertEqual(copy_ctx.call_count, 0)
+
+            next(cases)
+            self.assertEqual(copy_ctx.call_count, 1)
+
+            next(cases)
+            self.assertEqual(copy_ctx.call_count, 2)
+
+    def test_corresponding_fp32_outputs_share_classification_cases(self):
+        ctx = SpecContext("paired-output-classification-cases")
+        inner = fp32.fresh("inner", ctx)
+        outer = fp32.fresh("outer", ctx)
+
+        cases = list(ast_nodes._split_classification_cases(
+            ctx,
+            [],
+            inner,
+            outer,
+        ))
+
+        self.assertEqual(len(cases), len(inner.classification_flags()))
+        for split_ctx in cases:
+            labels = ast_nodes._case_labels(split_ctx.name)
+            self.assertEqual(set(labels), {"output"})
+
+
+class TestBFloat16Spec(unittest.TestCase):
+    def test_bf16_value_selects_finite_formula_or_fresh_special(self):
+        ctx = SpecContext("bf16-finite-value")
+        value = bf16.fresh("x", ctx)
+
+        self.assertIsInstance(value.value, If)
+        self.assertEqual(value.value.cond, value.is_norm)
+        subnormal_case = value.value.on_false
+        self.assertIsInstance(subnormal_case, If)
+        self.assertEqual(subnormal_case.cond, value.is_sub)
+        zero_case = subnormal_case.on_false
+        self.assertIsInstance(zero_case, If)
+        self.assertEqual(zero_case.cond, value.is_zero)
+        self.assertEqual(zero_case.on_true, RealLit(0))
+        self.assertIsInstance(zero_case.on_false, RealVar)
+        self.assertTrue(zero_case.on_false.name.startswith("special_"))
+
+    def test_bf16_static_inputs_use_structured_spec_values(self):
+        ctx = SpecContext("structured-bf16-input")
+
+        value = BFloat16T().to_spec("input", ctx)
+
+        self.assertIsInstance(value, bf16)
+
+    def test_bf16_decoder_delegates_to_structured_decode(self):
+        ctx = SpecContext("structured-bf16-decode")
+
+        decoded = bf16_decode(Const(BFloat16.Zero()))
+
+        self.assertEqual(
+            tuple(ctx.spec_of(field).constant_fold() for field in decoded),
+            tuple(RealLit(value) for value in (0, 0, 0, 0, 0, 1, 0, 0)),
+        )
+        self.assertIs(decoded.sign, decoded[0])
+        self.assertIs(decoded.is_nan, decoded[7])
+
+    def test_bf16_format_and_explicit_non_finite_constructors(self):
+        self.assertEqual(bf16.exponent_bits, 8)
+        self.assertEqual(bf16.mantissa_bits, 7)
+        self.assertEqual(bf16.exponent_bias, 127)
+
+        ctx = SpecContext("explicit-bf16-specials")
+        cases = (
+            (bf16.nan(ctx), "is_nan"),
+            (bf16.inf(ctx), "is_pinf"),
+            (bf16.ninf(ctx), "is_ninf"),
+            (bf16.zero(ctx), "is_pzero"),
+            (bf16.nzero(ctx), "is_nzero"),
+        )
+        special_names = set()
+        for value, predicate in cases:
+            with self.subTest(predicate=predicate):
+                if predicate in {"is_nan", "is_pinf", "is_ninf"}:
+                    self.assertIsInstance(value.value, RealVar)
+                    self.assertTrue(value.value.name.startswith("special_"))
+                    special_names.add(value.value.name)
+                else:
+                    self.assertEqual(value.value, RealLit(0))
+                self.assertEqual(
+                    getattr(value, predicate).constant_fold(),
+                    BoolLit(True),
+                )
+        self.assertEqual(len(special_names), 3)
+
+    def test_bf16_encode_classifies_representative_values(self):
+        greatest_normal = (2 - 2 ** -bf16.mantissa_bits) * 2 ** 127
+        cases = (
+            ("positive-zero", 0.0, "is_pzero"),
+            ("negative-underflow", -(2 ** -134), "is_nzero"),
+            ("smallest-subnormal", 2 ** -133, "is_sub"),
+            ("smallest-normal", 2 ** -126, "is_norm"),
+            ("greatest-normal", greatest_normal, "is_norm"),
+            ("positive-overflow", 4e38, "is_pinf"),
+            ("negative-overflow", -4e38, "is_ninf"),
+        )
+
+        for name, real_value, predicate in cases:
+            with self.subTest(value=name):
+                ctx = SpecContext(f"bf16-encode-{name}")
+                encoded = bf16.encode(RealLit(real_value), ctx)
+                ctx.check(getattr(encoded, predicate))
+
+                report = simplify_ctx(ctx)
+                if report["status"] == "unknown":
+                    report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+
+                self.assertEqual(report["status"], "unsat", report)
+
+    def test_bf16_known_classification_exposes_only_observable_fields(self):
+        value = bf16(
+            value=RealVar("value"),
+            sign=RealVar("sign"),
+            exponent=RealVar("exponent"),
+            mantissa=RealVar("mantissa"),
+            is_norm=BoolVar("is_norm"),
+            is_sub=BoolVar("is_sub"),
+            is_zero=BoolVar("is_zero"),
+            is_inf=BoolVar("is_inf"),
+            is_nan=BoolVar("is_nan"),
+        )
+
+        self.assertEqual(value.observables_for_classification("norm"), (value.value,))
+        self.assertEqual(value.observables_for_classification("sub"), (value.value,))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("inf"), (value.sign,))
+        self.assertEqual(
+            value.observables_for_classification("nan"),
+            (BoolLit(True),),
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown bf16 classification"):
+            value.observables_for_classification("finite")
+
+    def test_bf16_encode_requires_real_expression(self):
+        with self.assertRaisesRegex(TypeError, "bf16.encode value must be RealExpr"):
+            bf16.encode(1.0, SpecContext("bf16-invalid-encode"))
+
+    def test_bf16_encode_constructs_result_without_calling_fresh(self):
+        ctx = SpecContext("direct-bf16-encode")
+
+        with patch.object(
+            bf16,
+            "fresh",
+            side_effect=AssertionError("encode must construct bf16 directly"),
+        ):
+            encoded = bf16.encode(RealLit(1), ctx)
+
+        self.assertIsInstance(encoded, bf16)
+        self.assertNotIsInstance(encoded.is_norm, BoolVar)
+        self.assertIsInstance(encoded.exponent, RealVar)
+        self.assertIsInstance(encoded.mantissa, RealVar)
+
+
+class TestBFloat16Add(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(lhs: BFloat16, rhs: BFloat16) -> int:
+        result = lhs.to_val() + rhs.to_val()
+        if math.isnan(result):
+            return BFloat16.NaN().val
+        if math.isinf(result):
+            return BFloat16.nInf().val if result < 0 else BFloat16.Inf().val
+
+        try:
+            fp32_bits = struct.unpack(">I", struct.pack(">f", result))[0]
+        except OverflowError:
+            return BFloat16.nInf().val if result < 0 else BFloat16.Inf().val
+
+        rounding_bias = 0x7FFF + ((fp32_bits >> 16) & 1)
+        return ((fp32_bits + rounding_bias) >> 16) & 0xFFFF
+
+    def _make_design(self):
+        lhs = Var(name="lhs", sign=BFloat16T())
+        rhs = Var(name="rhs", sign=BFloat16T())
+        return lhs, rhs, bf16_add(lhs, rhs)
+
+    def test_bf16_add_specifications_can_be_chained(self):
+        lhs = Var(name="lhs", sign=BFloat16T())
+        rhs = Var(name="rhs", sign=BFloat16T())
+        inner = bf16_add(lhs, rhs)
+        outer = bf16_add(inner, lhs)
+        ctx = SpecContext("chained-bf16-add")
+
+        output = ctx.spec_of(outer)
+
+        self.assertIsInstance(output, bf16)
+        ctx.validate_requirements(timeout_ms=1000)
+
+    def test_bf16_add_handles_rounding_subnormals_and_special_values(self):
+        one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)
+        negative_one = BFloat16.from_fields(sign=1, exponent=127, mantissa=0)
+        half_ulp_at_one = BFloat16.from_fields(sign=0, exponent=119, mantissa=0)
+        smallest_subnormal = BFloat16.from_fields(sign=0, exponent=0, mantissa=1)
+        max_finite = BFloat16.from_fields(sign=0, exponent=254, mantissa=127)
+
+        cases = (
+            ("one-plus-one", one, one, BFloat16.from_fields(0, 0, 128)),
+            ("cancellation", one, negative_one, BFloat16.Zero()),
+            ("ties-to-even", one, half_ulp_at_one, one),
+            (
+                "subnormal-add",
+                smallest_subnormal,
+                smallest_subnormal,
+                BFloat16.from_fields(0, 2, 0),
+            ),
+            ("overflow", max_finite, max_finite, BFloat16.Inf()),
+            ("positive-infinity", BFloat16.Inf(), one, BFloat16.Inf()),
+            ("negative-infinity", BFloat16.nInf(), one, BFloat16.nInf()),
+            (
+                "opposite-infinities",
+                BFloat16.Inf(),
+                BFloat16.nInf(),
+                BFloat16.NaN(),
+            ),
+            ("nan", BFloat16.NaN(), one, BFloat16.NaN()),
+            ("negative-zero", BFloat16.nZero(), BFloat16.nZero(), BFloat16.nZero()),
+        )
+
+        lhs, rhs, design = self._make_design()
+        for name, lhs_value, rhs_value, expected in cases:
+            with self.subTest(case=name):
+                lhs.load_val(lhs_value)
+                rhs.load_val(rhs_value)
+                actual = design.evaluate()
+                if math.isnan(expected.to_val()):
+                    self.assertTrue(math.isnan(actual.to_val()))
+                else:
+                    self.assertEqual(actual, expected)
+
+    def test_bf16_add_matches_rne_reference_for_random_finite_inputs(self):
+        lhs, rhs, design = self._make_design()
+        rng = random.Random(0)
+
+        for _ in range(500):
+            lhs_value = BFloat16.from_fields(
+                sign=rng.getrandbits(1),
+                exponent=rng.randrange(BFloat16.inf_code),
+                mantissa=rng.getrandbits(BFloat16.mantissa_bits),
+            )
+            rhs_value = BFloat16.from_fields(
+                sign=rng.getrandbits(1),
+                exponent=rng.randrange(BFloat16.inf_code),
+                mantissa=rng.getrandbits(BFloat16.mantissa_bits),
+            )
+            lhs.load_val(lhs_value)
+            rhs.load_val(rhs_value)
+
+            with self.subTest(lhs=lhs_value.val, rhs=rhs_value.val):
+                self.assertEqual(
+                    design.evaluate().val,
+                    self._reference_bits(lhs_value, rhs_value),
+                )
+
+    def test_bf16_add_jit_matches_python_evaluation(self):
+        lhs, rhs, design = self._make_design()
+        tempdir, compiled = jit_compile(design)
+        rng = random.Random(1)
+        try:
+            for _ in range(100):
+                lhs_bits = rng.getrandbits(16)
+                rhs_bits = rng.getrandbits(16)
+                lhs.load_val(BFloat16(lhs_bits))
+                rhs.load_val(BFloat16(rhs_bits))
+                self.assertEqual(
+                    compiled(lhs_bits, rhs_bits),
+                    design.evaluate().val,
+                )
+        finally:
+            tempdir.cleanup()
+
+
+class TestBFloat16Mult(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(lhs: BFloat16, rhs: BFloat16) -> int:
+        result = lhs.to_val() * rhs.to_val()
+        if math.isnan(result):
+            return BFloat16.NaN().val
+        if math.isinf(result):
+            return BFloat16.nInf().val if result < 0 else BFloat16.Inf().val
+
+        try:
+            fp32_bits = struct.unpack(">I", struct.pack(">f", result))[0]
+        except OverflowError:
+            return BFloat16.nInf().val if result < 0 else BFloat16.Inf().val
+
+        rounding_bias = 0x7FFF + ((fp32_bits >> 16) & 1)
+        return ((fp32_bits + rounding_bias) >> 16) & 0xFFFF
+
+    def _make_design(self):
+        lhs = Var(name="lhs", sign=BFloat16T())
+        rhs = Var(name="rhs", sign=BFloat16T())
+        return lhs, rhs, bf16_mult(lhs, rhs)
+
+    def test_bf16_mult_specifications_can_be_chained(self):
+        lhs = Var(name="lhs", sign=BFloat16T())
+        rhs = Var(name="rhs", sign=BFloat16T())
+        inner = bf16_mult(lhs, rhs)
+        outer = bf16_mult(inner, lhs)
+        ctx = SpecContext("chained-bf16-mult")
+
+        output = ctx.spec_of(outer)
+
+        self.assertIsInstance(output, bf16)
+        ctx.validate_requirements(timeout_ms=1000)
+
+    def test_bf16_mult_handles_rounding_subnormals_and_special_values(self):
+        cases = (
+            ("one", 0x3F80, 0x3F80, 0x3F80),
+            ("negative", 0xBF80, 0x4000, 0xC000),
+            ("rounded-product", 0x3FC0, 0x3FC0, 0x4010),
+            ("min-subnormal-identity", 0x0001, 0x3F80, 0x0001),
+            ("positive-half-minimum-tie", 0x0001, 0x3F00, 0x0000),
+            ("negative-half-minimum-tie", 0x8001, 0x3F00, 0x8000),
+            ("subnormal-tie-to-even", 0x0001, 0x3FC0, 0x0002),
+            ("min-normal-halved", 0x0080, 0x3F00, 0x0040),
+            ("largest-subnormal-doubled", 0x007F, 0x4000, 0x00FE),
+            ("overflow", 0x7F7F, 0x4000, 0x7F80),
+            ("negative-zero", 0x8000, 0x3F80, 0x8000),
+            ("zero-times-infinity", 0x0000, 0x7F80, 0x7FC0),
+            ("negative-infinity", 0xFF80, 0x4000, 0xFF80),
+            ("nan", 0x7FC0, 0x3F80, 0x7FC0),
+        )
+
+        lhs, rhs, design = self._make_design()
+        for name, lhs_bits, rhs_bits, expected_bits in cases:
+            with self.subTest(case=name):
+                lhs.load_val(BFloat16(lhs_bits))
+                rhs.load_val(BFloat16(rhs_bits))
+                self.assertEqual(design.evaluate().val, expected_bits)
+
+    def test_bf16_mult_matches_rne_reference_for_random_finite_inputs(self):
+        lhs, rhs, design = self._make_design()
+        rng = random.Random(0)
+
+        for _ in range(500):
+            lhs_value = BFloat16.from_fields(
+                sign=rng.getrandbits(1),
+                exponent=rng.randrange(BFloat16.inf_code),
+                mantissa=rng.getrandbits(BFloat16.mantissa_bits),
+            )
+            rhs_value = BFloat16.from_fields(
+                sign=rng.getrandbits(1),
+                exponent=rng.randrange(BFloat16.inf_code),
+                mantissa=rng.getrandbits(BFloat16.mantissa_bits),
+            )
+            lhs.load_val(lhs_value)
+            rhs.load_val(rhs_value)
+
+            with self.subTest(lhs=lhs_value.val, rhs=rhs_value.val):
+                self.assertEqual(
+                    design.evaluate().val,
+                    self._reference_bits(lhs_value, rhs_value),
+                )
+
+    def test_bf16_mult_cpp_lowering_matches_python_evaluation(self):
+        lhs, rhs, design = self._make_design()
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        rng = random.Random(1)
+        try:
+            for _ in range(100):
+                lhs_bits = rng.getrandbits(16)
+                rhs_bits = rng.getrandbits(16)
+                lhs.load_val(BFloat16(lhs_bits))
+                rhs.load_val(BFloat16(rhs_bits))
+                expected = design.evaluate().val
+                self.assertEqual(compiled_jit(lhs_bits, rhs_bits), expected)
+                self.assertEqual(compiled_no_jit(lhs_bits, rhs_bits), expected)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
+
+
+class TestBFloat16ReLU(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(value: BFloat16) -> int:
+        if value.exponent == BFloat16.nan_code and value.mantissa != 0:
+            return BFloat16.NaN().val
+        if value.sign:
+            return BFloat16.Zero().val
+        return value.val
+
+    def _make_design(self):
+        value = Var(name="value", sign=BFloat16T())
+        return value, bf16_relu(value)
+
+    def test_bf16_relu_specifications_can_be_chained(self):
+        value = Var(name="value", sign=BFloat16T())
+        inner = bf16_relu(value)
+        outer = bf16_relu(inner)
+        ctx = SpecContext("chained-bf16-relu")
+
+        output = ctx.spec_of(outer)
+
+        self.assertIsInstance(output, bf16)
+        ctx.validate_requirements(timeout_ms=1000)
+
+    def test_bf16_relu_handles_finite_and_special_values(self):
+        cases = (
+            ("positive-normal", 0x3FC0, 0x3FC0),
+            ("negative-normal", 0xBFC0, 0x0000),
+            ("positive-subnormal", 0x0001, 0x0001),
+            ("negative-subnormal", 0x8001, 0x0000),
+            ("positive-zero", 0x0000, 0x0000),
+            ("negative-zero", 0x8000, 0x0000),
+            ("positive-infinity", 0x7F80, 0x7F80),
+            ("negative-infinity", 0xFF80, 0x0000),
+            ("positive-nan", 0x7FC1, BFloat16.NaN().val),
+            ("negative-nan", 0xFFC1, BFloat16.NaN().val),
+        )
+
+        value, design = self._make_design()
+        for name, input_bits, expected_bits in cases:
+            with self.subTest(case=name):
+                value.load_val(BFloat16(input_bits))
+                self.assertEqual(design.evaluate().val, expected_bits)
+
+    def test_bf16_relu_cpp_lowering_matches_reference_for_all_inputs(self):
+        value, design = self._make_design()
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        try:
+            for input_bits in range(1 << 16):
+                expected = self._reference_bits(BFloat16(input_bits))
+                self.assertEqual(compiled_jit(input_bits), expected)
+                self.assertEqual(compiled_no_jit(input_bits), expected)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
 
 
 class TestRivalTranslation(unittest.TestCase):
@@ -1677,11 +2461,58 @@ class TestRivalTranslation(unittest.TestCase):
             [[(-math.inf, math.inf), (-math.inf, math.inf)]],
         )
 
+    def test_rival_rects_use_boolean_point_domains(self):
+        true_ctx = SpecContext("rival-rects-bool-true")
+        true_predicate = true_ctx.bool("predicate")
+        true_ctx.assume(true_predicate)
+
+        false_ctx = SpecContext("rival-rects-bool-false")
+        false_predicate = false_ctx.bool("predicate")
+        false_ctx.assume(~false_predicate)
+
+        self.assertEqual(
+            get_rival_rects([], ["predicate"], ["predicate"]),
+            [[(0.0, 1.0)]],
+        )
+        self.assertEqual(
+            get_rival_rects(true_ctx.assumes, ["predicate"]),
+            [[(1.0, 1.0)]],
+        )
+        self.assertEqual(
+            get_rival_rects(false_ctx.assumes, ["predicate"]),
+            [[(0.0, 0.0)]],
+        )
+
+    def test_rival_rects_enumerate_boolean_equalities(self):
+        ctx = SpecContext("rival-rects-bool-equality")
+        p = ctx.bool("p")
+        q = ctx.bool("q")
+        ctx.assume(p.eq(q))
+
+        self.assertEqual(
+            get_rival_rects(ctx.assumes, ["p", "q"]),
+            [
+                [(0.0, 0.0), (0.0, 0.0)],
+                [(1.0, 1.0), (1.0, 1.0)],
+            ],
+        )
+
+    def test_rival_rects_combine_boolean_and_real_bounds(self):
+        ctx = SpecContext("rival-rects-bool-real")
+        predicate = ctx.bool("predicate")
+        x = ctx.real("x")
+        ctx.assume(predicate & (x >= ctx.zero()))
+
+        self.assertEqual(
+            get_rival_rects(ctx.assumes, ["predicate", "x"]),
+            [[(1.0, 1.0), (0.0, math.inf)]],
+        )
+
     def test_rival_rects_extract_closed_bounds(self):
         ctx = SpecContext("rival-rects-closed")
         x = ctx.real("x")
 
-        ctx.assume((x >= ctx.real_val(1)) & (x <= ctx.real_val(254)))
+        ctx.assume((x >= ctx.one()) & (x <= ctx.real_val(254)))
 
         self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [[(1.0, 254.0)]])
 
@@ -1689,7 +2520,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-reversed")
         x = ctx.real("x")
 
-        ctx.assume((ctx.real_val(1) <= x) & (ctx.real_val(254) >= x))
+        ctx.assume((ctx.one() <= x) & (ctx.real_val(254) >= x))
 
         self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [[(1.0, 254.0)]])
 
@@ -1697,7 +2528,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-strict")
         x = ctx.real("x")
 
-        ctx.assume((x > ctx.real_val(1)) & (x < ctx.real_val(254)))
+        ctx.assume((x > ctx.one()) & (x < ctx.real_val(254)))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["x"]),
@@ -1708,7 +2539,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-reversed-strict")
         x = ctx.real("x")
 
-        ctx.assume((ctx.real_val(1) < x) & (ctx.real_val(254) > x))
+        ctx.assume((ctx.one() < x) & (ctx.real_val(254) > x))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["x"]),
@@ -1733,7 +2564,7 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-point-or")
         sign = ctx.real("sign")
 
-        ctx.assume(sign.eq(ctx.real_val(0)) | ctx.real_val(1).eq(sign))
+        ctx.assume(sign.eq(ctx.zero()) | ctx.one().eq(sign))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["sign"]),
@@ -1745,8 +2576,8 @@ class TestRivalTranslation(unittest.TestCase):
         sign = ctx.real("sign")
         exponent = ctx.real("exponent")
 
-        ctx.assume(sign.eq(ctx.real_val(0)) | sign.eq(ctx.real_val(1)))
-        ctx.assume(exponent.eq(ctx.real_val(0)) | exponent.eq(ctx.real_val(255)))
+        ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
+        ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["sign", "exponent"]),
@@ -1763,8 +2594,8 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume(x >= ctx.real_val(1))
-        ctx.assume(y <= ctx.real_val(2))
+        ctx.assume(x >= ctx.one())
+        ctx.assume(y <= ctx.two())
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["y", "x", "z"]),
@@ -1775,8 +2606,8 @@ class TestRivalTranslation(unittest.TestCase):
         ctx = SpecContext("rival-rects-conflict")
         x = ctx.real("x")
 
-        ctx.assume(x >= ctx.real_val(2))
-        ctx.assume(x <= ctx.real_val(1))
+        ctx.assume(x >= ctx.two())
+        ctx.assume(x <= ctx.one())
 
         self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [])
 
@@ -1785,8 +2616,8 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume((x + y).eq(ctx.real_val(1)))
-        ctx.assume(x >= ctx.real_val(0))
+        ctx.assume((x + y).eq(ctx.one()))
+        ctx.assume(x >= ctx.zero())
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["x", "y"]),
@@ -1798,7 +2629,7 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        ctx.assume((x >= ctx.real_val(0)) | (x + y).eq(ctx.real_val(1)))
+        ctx.assume((x >= ctx.zero()) | (x + y).eq(ctx.one()))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["x", "y"]),
@@ -1810,8 +2641,8 @@ class TestRivalTranslation(unittest.TestCase):
         sign = ctx.real("sign")
         exponent = ctx.real("exponent")
 
-        ctx.assume(sign.eq(ctx.real_val(0)) | sign.eq(ctx.real_val(1)))
-        ctx.assume(exponent.eq(ctx.real_val(0)) | exponent.eq(ctx.real_val(255)))
+        ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
+        ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
         self.assertEqual(
             get_rival_rects(ctx.assumes, ["sign", "exponent"]),
@@ -1828,8 +2659,8 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
         z = ctx.real("z")
-        good_x = x >= ctx.real_val(0)
-        good_z = z >= ctx.real_val(0)
+        good_x = x >= ctx.zero()
+        good_z = z >= ctx.zero()
         maybe = x.eq(y)
         ctx.assume(good_x)
         ctx.assume(good_z)
@@ -1852,22 +2683,19 @@ class TestRivalTranslation(unittest.TestCase):
                         return RivalAnalysis(
                             status=(False, True),
                             hints="root-hints",
-                            converged=False,
                         )
-                    return RivalAnalysis(status=(True, True), hints=None, converged=True)
+                    return RivalAnalysis(status=(True, True), hints=None)
 
                 machine.apply_with_hints.side_effect = apply
             elif exprs == [maybe]:
                 machine.apply_with_hints.return_value = RivalAnalysis(
                     status=(False, True),
                     hints=None,
-                    converged=False,
                 )
             else:
                 machine.apply_with_hints.return_value = RivalAnalysis(
                     status=(False, False),
                     hints=None,
-                    converged=True,
                 )
             return machine
 
@@ -1889,8 +2717,8 @@ class TestRivalTranslation(unittest.TestCase):
     def test_rival_feasibility_returns_first_clean_rect(self):
         ctx = SpecContext("rival-feasible-rect")
         x = ctx.real("x")
-        ctx.assume(x.eq(ctx.real_val(0)) | x.eq(ctx.real_val(1)))
-        ctx.check(x.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()) | x.eq(ctx.one()))
+        ctx.check(x.eq(ctx.zero()))
 
         clean_rect = [(0.0, 0.0)]
         bad_rect = [(1.0, 1.0)]
@@ -1906,13 +2734,11 @@ class TestRivalTranslation(unittest.TestCase):
                         return RivalAnalysis(
                             status=(False, False),
                             hints=None,
-                            converged=True,
                         )
                     if rect == bad_rect:
                         return RivalAnalysis(
                             status=(True, True),
                             hints=None,
-                            converged=True,
                         )
                     raise AssertionError(f"unexpected rect {rect}")
 
@@ -1921,7 +2747,6 @@ class TestRivalTranslation(unittest.TestCase):
                 machine.apply_with_hints.return_value = RivalAnalysis(
                     status=(False, False),
                     hints=None,
-                    converged=True,
                 )
             return machine
 
@@ -1934,14 +2759,13 @@ class TestRivalTranslation(unittest.TestCase):
         self.assertEqual(status, "feasible")
         self.assertEqual(combined_calls, [(clean_rect, None)])
 
-    def test_rival_trim_context_uses_assumption_rects_only_for_checks(self):
+    def test_rival_trim_context_preserves_rect_assumptions_for_checks(self):
         ctx = SpecContext("rival-trim-assumption-rects")
         x = ctx.real("x")
-        bounded = x >= ctx.real_val(0)
+        bounded = x >= ctx.zero()
         ctx.assume(bounded)
         ctx.check(bounded)
 
-        unbounded = [(-math.inf, math.inf)]
         assumption_rect = [(0.0, math.inf)]
         seen_rects = []
 
@@ -1958,7 +2782,6 @@ class TestRivalTranslation(unittest.TestCase):
                     if rect == assumption_rect
                     else (False, True),
                     hints=None,
-                    converged=True,
                 )
 
             machine.apply_with_hints.side_effect = apply
@@ -1969,13 +2792,26 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(trimmed.assumes, [bounded])
         self.assertEqual(trimmed.checks, [])
-        self.assertEqual(seen_rects, [unbounded, assumption_rect])
+        self.assertEqual(seen_rects, [assumption_rect])
+
+    def test_rival_trim_context_only_rewrites_non_rect_assumptions(self):
+        ctx = SpecContext("rival-trim-preserve-rect-assumption")
+        x = ctx.real("x")
+        zero = ctx.zero()
+        redundant = abs(x).eq(x)
+        contributing = (x >= zero) & redundant
+        ctx.assume(contributing)
+        ctx.assume(redundant)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [contributing])
 
     def test_rival_trim_context_keeps_maybe_exprs(self):
         ctx = SpecContext("rival-trim-maybe")
         x = ctx.real("x")
         y = ctx.real("y")
-        assume = x >= ctx.real_val(0)
+        assume = x >= ctx.zero()
         check = x.eq(y)
         ctx.assume(assume)
         ctx.check(check)
@@ -1986,7 +2822,6 @@ class TestRivalTranslation(unittest.TestCase):
             machine.apply_with_hints.return_value = RivalAnalysis(
                 status=(False, True),
                 hints=None,
-                converged=True,
             )
             return machine
 
@@ -1996,11 +2831,78 @@ class TestRivalTranslation(unittest.TestCase):
         self.assertEqual(trimmed.assumes, [assume])
         self.assertEqual(trimmed.checks, [check])
 
+    def test_rival_trim_context_keeps_unconstrained_bool_check(self):
+        ctx = SpecContext("rival-trim-bool-check")
+        predicate = ctx.bool("predicate")
+        ctx.check(predicate)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [predicate])
+
+    def test_rival_trim_context_uses_boolean_assumption_rect(self):
+        ctx = SpecContext("rival-trim-bool-assumption")
+        predicate = ctx.bool("predicate")
+        ctx.assume(predicate)
+        ctx.check(predicate)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [predicate])
+        self.assertEqual(trimmed.checks, [])
+
+    def test_rival_trim_context_proves_boolean_tautology(self):
+        ctx = SpecContext("rival-trim-bool-tautology")
+        predicate = ctx.bool("predicate")
+        ctx.check(predicate | ~predicate)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [])
+
+    def test_rival_trim_context_keeps_if_with_unconstrained_bool_condition(self):
+        ctx = SpecContext("rival-trim-bool-if")
+        predicate = ctx.bool("predicate")
+        one = ctx.one()
+        check = If(predicate, one, ctx.two()).eq(one)
+        ctx.check(check)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [check])
+
+    def test_rival_trim_context_does_not_treat_undefined_predicate_as_false(self):
+        ctx = SpecContext("rival-trim-undefined-predicate")
+        x = ctx.real("x")
+        zero = ctx.zero()
+        one = ctx.one()
+        two = ctx.two()
+        undefined = (x ** ctx.real_val(-1)) > zero
+        checks = [
+            ~undefined,
+            If(undefined, one, two).eq(two),
+            abs(x ** ctx.real_val(-1)).eq(one),
+            (x ** ctx.real_val(-1)).max(one).eq(one),
+            (x ** ctx.real_val(-1)).min(one).eq(one),
+        ]
+        ctx.assume(x.eq(zero))
+        for check in checks:
+            ctx.check(check)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, checks)
+        self.assertEqual(
+            rival_feasibility_check(trimmed, max_depth=0, checks=True),
+            "not feasible",
+        )
+        self.assertEqual(simplify_ctx(ctx)["status"], "sat")
+
     def test_rival_trim_context_requires_every_assumption_rect(self):
         ctx = SpecContext("rival-trim-all-rects")
         sign = ctx.real("sign")
-        bit_domain = sign.eq(ctx.real_val(0)) | sign.eq(ctx.real_val(1))
-        check = sign.eq(ctx.real_val(0))
+        bit_domain = sign.eq(ctx.zero()) | sign.eq(ctx.one())
+        check = sign.eq(ctx.zero())
         ctx.assume(bit_domain)
         ctx.check(check)
 
@@ -2011,7 +2913,6 @@ class TestRivalTranslation(unittest.TestCase):
                 machine.apply_with_hints.return_value = RivalAnalysis(
                     status=(False, True),
                     hints=None,
-                    converged=True,
                 )
             else:
                 self.assertEqual(exprs, [check])
@@ -2023,7 +2924,6 @@ class TestRivalTranslation(unittest.TestCase):
                         if rect == [(0.0, 0.0)]
                         else (True, True),
                         hints=None,
-                        converged=True,
                     )
 
                 machine.apply_with_hints.side_effect = apply
@@ -2035,14 +2935,145 @@ class TestRivalTranslation(unittest.TestCase):
         self.assertEqual(trimmed.assumes, [bit_domain])
         self.assertEqual(trimmed.checks, [check])
 
+    def test_rival_trim_context_rewrites_extrema_from_assumption_bounds(self):
+        ctx = SpecContext("rival-trim-bounded-extrema")
+        x = ctx.real("x")
+        one = ctx.one()
+        ctx.assume(x >= one)
+        ctx.check(x.max(one).eq(x))
+        ctx.check(one.max(x).eq(x))
+        ctx.check(x.min(one).eq(one))
+        ctx.check(one.min(x).eq(one))
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [x >= one])
+        self.assertEqual(trimmed.checks, [])
+
+    def test_rival_trim_context_requires_bound_in_every_disjunct(self):
+        ctx = SpecContext("rival-trim-disjunctive-bounds")
+        x = ctx.real("x")
+        one = ctx.one()
+        ctx.assume((x >= one) | (x <= -one))
+        unresolved = x.max(one).eq(x)
+        ctx.check(unresolved)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [unresolved])
+
+    def test_rival_trim_context_uses_bound_shared_by_every_disjunct(self):
+        ctx = SpecContext("rival-trim-shared-disjunctive-bound")
+        x = ctx.real("x")
+        one = ctx.one()
+        two = ctx.two()
+        ctx.assume((x >= one) | (x >= two))
+        ctx.check(x.max(one).eq(x))
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [])
+
+    def test_rival_trim_context_folds_comparisons_from_assumption_bounds(self):
+        ctx = SpecContext("rival-trim-bounded-comparisons")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        zero = ctx.zero()
+        one = ctx.one()
+        five = ctx.real_val(5)
+        eight = ctx.real_val(8)
+        ctx.assume((x >= one) & (x <= five))
+        ctx.assume(y >= one)
+        ctx.check(x >= zero)
+        ctx.check(x <= five)
+        ctx.check(x > zero)
+        ctx.check(x.eq(eight))
+        ctx.check(x.ne(eight))
+        ctx.check((x + y) >= (one + one))
+        ctx.check(x < zero)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [BoolLit(False), BoolLit(False)])
+
+    def test_rival_trim_context_does_not_discharge_bound_assumption_itself(self):
+        ctx = SpecContext("rival-trim-retained-bound")
+        x = ctx.real("x")
+        one = ctx.one()
+        bound = x >= one
+        ctx.assume(bound)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [bound])
+
+    def test_rival_trim_context_simplifies_abs_from_known_sign(self):
+        nonnegative_ctx = SpecContext("rival-trim-nonnegative-abs")
+        x = nonnegative_ctx.real("x")
+        zero = nonnegative_ctx.zero()
+        nonnegative_ctx.assume(x >= zero)
+        nonnegative_ctx.check(abs(x).eq(x))
+
+        nonpositive_ctx = SpecContext("rival-trim-nonpositive-abs")
+        y = nonpositive_ctx.real("y")
+        nonpositive_ctx.assume(y <= zero)
+        nonpositive_ctx.check(abs(y).eq(-y))
+
+        self.assertEqual(rival_trim_context(nonnegative_ctx).checks, [])
+        self.assertEqual(rival_trim_context(nonpositive_ctx).checks, [])
+
+    def test_rival_trim_context_selects_if_branch_from_assumptions(self):
+        ctx = SpecContext("rival-trim-bounded-if")
+        x = ctx.real("x")
+        zero = ctx.zero()
+        one = ctx.one()
+        two = ctx.two()
+        ctx.assume(x >= zero)
+        ctx.check(If(x >= zero, one, two).eq(one))
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [])
+
+    def test_rival_trim_context_keeps_abs_and_if_across_mixed_disjuncts(self):
+        ctx = SpecContext("rival-trim-mixed-sign")
+        x = ctx.real("x")
+        one = ctx.one()
+        two = ctx.two()
+        sign_domain = (x >= one) | (x <= -one)
+        abs_check = abs(x).eq(x)
+        if_check = If(x >= one, one, two).eq(one)
+        ctx.assume(sign_domain)
+        ctx.check(abs_check)
+        ctx.check(if_check)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.checks, [abs_check, if_check])
+
 class TestSpecificationDeterminism(unittest.TestCase):
+    def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):
+        def malformed_spec(x, ctx):
+            return Cases(
+                case(BoolLit(False), x),
+                ctx=ctx,
+            )
+
+        @Composite(name="non_exhaustive_cases", spec=malformed_spec)
+        def non_exhaustive_cases(x):
+            return x
+
+        node = non_exhaustive_cases(Var(name="x", sign=UQT(2, 0)))
+        with self.assertRaises(MalformedSpecification):
+            node.check_spec(schedule=[{"tool": "simplify"}])
+
     def test_deterministic_primitive_uses_same_inputs_for_both_spec_runs(self):
         seen_inputs = []
 
         def deterministic_spec(x, ctx):
             seen_inputs.append(x)
             out = ctx.fresh_real("out")
-            ctx.assume(out.eq(x + ctx.real_val(1)))
+            ctx.assume(out.eq(x + ctx.one()))
             return out
 
         @Primitive(name="deterministic_primitive", spec=deterministic_spec)
@@ -2063,11 +3094,76 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertEqual(len(seen_inputs), 2)
         self.assertIs(seen_inputs[0], seen_inputs[1])
 
+    def test_fp_inputs_get_independent_special_encoding_per_spec_run(self):
+        seen_inputs = []
+
+        def identity_spec(x, ctx):
+            del ctx
+            seen_inputs.append(x)
+            return x
+
+        @Primitive(name="fp_special_encoding", spec=identity_spec)
+        def fp_special_encoding(x):
+            return x.copy()
+
+        node = fp_special_encoding(Var(name="x", sign=Float32T()))
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            node.check_determinism(schedule=[{"tool": "simplify"}])
+
+        self.assertEqual(len(seen_inputs), 2)
+        first, second = seen_inputs
+        self.assertIsNot(first, second)
+        self.assertEqual(
+            first.classification_flags(),
+            second.classification_flags(),
+        )
+        self.assertIsInstance(first.value, If)
+        self.assertIsInstance(second.value, If)
+        self.assertNotEqual(first.value.on_false, second.value.on_false)
+
+    def test_check_spec_encodes_inner_and_outer_fp_inputs_independently(self):
+        inner_inputs = []
+        outer_inputs = []
+
+        def inner_spec(x, ctx):
+            del ctx
+            inner_inputs.append(x)
+            return x
+
+        @Primitive(name="inner_fp_identity", spec=inner_spec)
+        def inner_fp_identity(x):
+            return x.copy()
+
+        def outer_spec(x, ctx):
+            del ctx
+            outer_inputs.append(x)
+            return x
+
+        @Composite(name="outer_fp_identity", spec=outer_spec)
+        def outer_fp_identity(x):
+            return inner_fp_identity(x)
+
+        node = outer_fp_identity(Var(name="x", sign=Float32T()))
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            node.check_spec(schedule=[{"tool": "simplify"}])
+
+        self.assertEqual(len(inner_inputs), 1)
+        self.assertEqual(len(outer_inputs), 1)
+        inner = inner_inputs[0]
+        outer = outer_inputs[0]
+        self.assertEqual(
+            inner.classification_flags(),
+            outer.classification_flags(),
+        )
+        self.assertIsInstance(inner.value, If)
+        self.assertIsInstance(outer.value, If)
+        self.assertNotEqual(inner.value.on_false, outer.value.on_false)
+
     def test_underconstrained_primitive_is_not_deterministic(self):
         def nondeterministic_spec(_x, ctx):
             out = ctx.fresh_real("out")
-            zero = ctx.real_val(0)
-            one = ctx.real_val(1)
+            zero = ctx.zero()
+            one = ctx.one()
             ctx.assume(out.eq(zero) | out.eq(one))
             return out
 
@@ -2087,19 +3183,19 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertFalse(result["proved"])
         self.assertEqual(result["proof_traces"][-1][-1]["status"], "sat")
 
-    def test_combined_infeasibility_with_matching_side_feasibility_is_proved(self):
-        base_ctx = SpecContext("matching_side_feasibility")
+    def test_combined_infeasibility_is_discharged_without_recollection(self):
+        base_ctx = SpecContext("combined_infeasibility")
         x = base_ctx.real("x")
         collect_counts = {"zero": 0, "one": 0}
 
         def collect_zero(ctx):
             collect_counts["zero"] += 1
-            ctx.assume(x.eq(ctx.real_val(0)))
+            ctx.assume(x.eq(ctx.zero()))
             return x
 
         def collect_one(ctx):
             collect_counts["one"] += 1
-            ctx.assume(x.eq(ctx.real_val(1)))
+            ctx.assume(x.eq(ctx.one()))
             return x
 
         with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
@@ -2112,7 +3208,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
             )
 
         self.assertTrue(result["proved"])
-        self.assertEqual(collect_counts, {"zero": 2, "one": 2})
+        self.assertEqual(collect_counts, {"zero": 1, "one": 1})
 
     def test_combined_infeasibility_with_matching_infeasible_sides_is_proved(self):
         base_ctx = SpecContext("matching_infeasible_sides")
@@ -2133,7 +3229,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
 
         self.assertTrue(result["proved"])
 
-    def test_side_feasibility_mismatch_is_not_equivalent(self):
+    def test_side_feasibility_mismatch_is_not_proved(self):
         base_ctx = SpecContext("side_feasibility_mismatch")
         x = base_ctx.real("x")
 
@@ -2155,16 +3251,16 @@ class TestSpecificationDeterminism(unittest.TestCase):
 
         self.assertFalse(result["proved"])
 
-    def test_unknown_side_feasibility_is_not_equivalent(self):
+    def test_unknown_side_feasibility_is_not_proved(self):
         base_ctx = SpecContext("unknown_side_feasibility")
         x = base_ctx.real("x")
 
         def collect_zero(ctx):
-            ctx.assume(x.eq(ctx.real_val(0)))
+            ctx.assume(x.eq(ctx.zero()))
             return x
 
         def collect_one(ctx):
-            ctx.assume(x.eq(ctx.real_val(1)))
+            ctx.assume(x.eq(ctx.one()))
             return x
 
         with (
@@ -2260,47 +3356,12 @@ class TestSpecificationDeterminism(unittest.TestCase):
             result = node.check_determinism(schedule=[{"tool": "simplify"}])
 
         self.assertTrue(result["proved"])
-        self.assertEqual(len(result["proof_traces"]), 25)
+        self.assertEqual(len(result["proof_traces"]), 5)
 
 
 class TestSolverApis(unittest.TestCase):
-    def test_check_spec_preserves_mismatched_classification_case_verdict(self):
-        def infinity_spec(ctx):
-            del ctx
-            return fp32.inf()
-
-        @Composite(name="zero_vs_infinity", spec=infinity_spec)
-        def zero_vs_infinity():
-            return Const(Float32.Zero())
-
-        split_classification_cases = ast_nodes._split_classification_cases
-
-        def select_feasible_mismatch(*args, **kwargs):
-            return [
-                case
-                for case in split_classification_cases(*args, **kwargs)
-                if ast_nodes._case_labels(case.name)["inner_spec"] == "zero"
-                and ast_nodes._case_labels(case.name)["outer_spec"] == "inf"
-            ]
-
-        with (
-            patch.object(
-                ast_nodes,
-                "_split_classification_cases",
-                side_effect=select_feasible_mismatch,
-            ),
-            open(os.devnull, "w") as devnull,
-            contextlib.redirect_stdout(devnull),
-        ):
-            result = zero_vs_infinity().check_spec(
-                schedule=[{"tool": "simplify"}],
-            )
-
-        self.assertTrue(result["proved"])
-        self.assertEqual(result["proof_traces"][-1][-1]["status"], "sat")
-
     def test_fp32_multiplier_check_spec_proves_zero_input_cases(self):
-        multiplier = FP32_IEEE_mult(
+        multiplier = fp32_mult(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
@@ -2322,14 +3383,12 @@ class TestSolverApis(unittest.TestCase):
             inputs,
             spec_inner,
             spec_outer,
-            output_names=("inner_spec", "outer_spec"),
         ):
             cases = split_classification_cases(
                 ctx,
                 inputs,
                 spec_inner,
                 spec_outer,
-                output_names=output_names,
             )
             selected = [
                 case
@@ -2339,7 +3398,7 @@ class TestSolverApis(unittest.TestCase):
                     ast_nodes._case_labels(case.name)["arg1"],
                 ) in zero_input_pairs
             ]
-            self.assertEqual(len(selected), len(zero_input_pairs) * 25)
+            self.assertEqual(len(selected), len(zero_input_pairs) * 5)
             return selected
 
         with (
@@ -2356,11 +3415,180 @@ class TestSolverApis(unittest.TestCase):
         self.assertTrue(check_result["proved"])
         self.assertEqual(
             len(check_result["proof_traces"]),
-            len(zero_input_pairs) * 25,
+            len(zero_input_pairs) * 5,
+        )
+
+    def _assert_dot_product_check_spec_with_two_zero_inputs(
+        self,
+        design_fn,
+        *,
+        expect_egglog,
+    ):
+        zero = BFloat16.Zero()
+        one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)
+        largest_finite = BFloat16.from_fields(
+            sign=0,
+            exponent=254,
+            mantissa=127,
+        )
+        small_normal = BFloat16.from_fields(
+            sign=0,
+            exponent=BFloat16.exponent_bias - 40,
+            mantissa=0,
+        )
+        # The two small products sum to 2**-39. Before zero-product
+        # exponents were masked, zero * largest_finite selected the maximum
+        # exponent and shifted both real products completely away.
+        input_values = (
+            small_normal,
+            zero,
+            one,
+            small_normal,
+            one,
+            largest_finite,
+            zero,
+            one,
+        )
+        self.assertEqual(sum(value.val == zero.val for value in input_values), 2)
+
+        design = design_fn(*(
+            Var(name=f"arg_{idx}", sign=BFloat16T())
+            for idx in range(len(input_values))
+        ))
+        input_classifications = (
+            "norm",
+            "zero",
+            "norm",
+            "norm",
+            "norm",
+            "norm",
+            "zero",
+            "norm",
+        )
+
+        def select_normal_result_case(
+            ctx,
+            inputs,
+            spec_inner,
+            spec_outer,
+        ):
+            case_ctx = ctx.copy()
+            named_inputs = [
+                (f"arg{idx}", value)
+                for idx, value in enumerate(inputs)
+            ]
+            labels = {
+                name: classification
+                for (name, _), classification in zip(
+                    named_inputs,
+                    input_classifications,
+                    strict=True,
+                )
+            }
+            labels["output"] = "norm"
+
+            for symbolic, concrete in zip(inputs, input_values, strict=True):
+                concrete_spec = concrete.to_spec(case_ctx)
+                for symbolic_field, concrete_field in zip(
+                    symbolic.decode()[1:],
+                    concrete_spec.decode()[1:],
+                    strict=True,
+                ):
+                    case_ctx.assume(symbolic_field.eq(concrete_field))
+
+            for name, value in named_inputs:
+                ast_nodes._assume_classification_case(
+                    case_ctx,
+                    name,
+                    value,
+                    labels[name],
+                )
+            ast_nodes._assume_classification_case(
+                case_ctx,
+                "output",
+                spec_inner,
+                labels["output"],
+            )
+            ast_nodes._assume_classification(
+                case_ctx,
+                spec_outer,
+                labels["output"],
+            )
+            expected_labels = ",".join(
+                f"arg{idx}={classification}"
+                for idx, classification in enumerate(input_classifications)
+            )
+            self.assertEqual(
+                case_ctx.name,
+                f"{ctx.name}[{expected_labels},output=norm]",
+            )
+            ast_nodes._add_classification_case_checks(
+                case_ctx,
+                spec_inner,
+                spec_outer,
+                labels,
+            )
+            return [case_ctx]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_normal_result_case,
+            ),
+            open(os.devnull, "w") as devnull,
+            contextlib.redirect_stdout(devnull),
+        ):
+            check_result = design.check_spec(
+                schedule=[
+                    {"tool": "simplify"},
+                    {
+                        "tool": "egglog-rewrite",
+                        "iterations": 6,
+                        "scheduler": {
+                            "match_limit": 500_000,
+                            "ban_length": 1,
+                        },
+                    },
+                    {"tool": "simplify"},
+                ],
+            )
+
+        self.assertTrue(check_result["proved"], check_result)
+        self.assertEqual(len(check_result["proof_traces"]), 1)
+        proof_trace = check_result["proof_traces"][0]
+        self.assertTrue(
+            any(
+                report["tool"] in {"simplify", "egglog-rewrite"}
+                and report["status"] == "unsat"
+                for report in proof_trace
+            ),
+            proof_trace,
+        )
+        if expect_egglog:
+            self.assertTrue(
+                any(
+                    report["tool"] == "egglog-rewrite"
+                    and report["checks_after"] < report["checks_before"]
+                    for report in proof_trace
+                ),
+                proof_trace,
+            )
+
+    def test_conventional_check_spec_with_two_zero_inputs(self):
+        self._assert_dot_product_check_spec_with_two_zero_inputs(
+            bf16x8_dot_fp32_conventional,
+            expect_egglog=False,
+        )
+
+    def test_optimized_check_spec_with_two_zero_inputs(self):
+        self._assert_dot_product_check_spec_with_two_zero_inputs(
+            bf16x8_dot_fp32_optimized,
+            expect_egglog=True,
         )
 
     def test_fp32_adder_norm_inf_inf_inf_is_trimmed_before_egglog(self):
-        adder = FP32_IEEE_adder(
+        adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
@@ -2369,8 +3597,8 @@ class TestSolverApis(unittest.TestCase):
         inputs = [ctx.spec_of(arg) for arg in adder.inner_args]
         spec_outer = adder.spec(*inputs, ctx=ctx)
         target_name = (
-            "FP32_IEEE_adder["
-            "arg0=norm,arg1=inf,inner_spec=inf,outer_spec=inf]"
+            "fp32_add["
+            "arg0=norm,arg1=inf,output=inf]"
         )
         case = next(
             case
@@ -2394,7 +3622,7 @@ class TestSolverApis(unittest.TestCase):
 
 
     def test_fp32_adder_inf_inf_norm_side_case_uses_only_real_and_bool_exprs(self):
-        adder = FP32_IEEE_adder(
+        adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
@@ -2425,7 +3653,7 @@ class TestSolverApis(unittest.TestCase):
         self.assertTrue(all(uses_only_supported_exprs(expr) for expr in simplified.assumes))
 
     def test_fp32_adder_inf_inf_cannot_have_normal_outer_spec(self):
-        adder = FP32_IEEE_adder(
+        adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
@@ -2468,9 +3696,9 @@ class TestSolverApis(unittest.TestCase):
         ctx = SpecContext("simplify-conflict-schedule")
         x = ctx.real("x")
 
-        ctx.assume(x.eq(ctx.real_val(0)))
-        ctx.assume(x.eq(ctx.real_val(1)))
-        ctx.check(x.eq(ctx.real_val(0)))
+        ctx.assume(x.eq(ctx.zero()))
+        ctx.assume(x.eq(ctx.one()))
+        ctx.check(x.eq(ctx.zero()))
 
         status, proof_trace = solver_engine.check_equivalence(
             ctx,
@@ -2515,7 +3743,7 @@ class TestSolverApis(unittest.TestCase):
     def test_spec_context_is_pickleable(self):
         ctx = SpecContext("pickle-context")
         x = ctx.real("x")
-        ctx.check((x + ctx.real_val(1)).eq(ctx.real_val(2)))
+        ctx.check((x + ctx.one()).eq(ctx.two()))
 
         restored = pickle.loads(pickle.dumps(ctx))
 
@@ -2551,12 +3779,46 @@ class TestSolverApis(unittest.TestCase):
 
         self.assertIn("Unknown schedule tool rival_feasibility_check", str(raised.exception))
 
-    def test_fp32_adder_norm_norm_proves_with_egglog(self):
-        adder = FP32_IEEE_adder(
+    def test_fp32_adder_norm_sub_zero_zero_is_proved_infeasible(self):
+        adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
-        target_name = "FP32_IEEE_adder[arg0=norm,arg1=norm,inner_spec=norm,outer_spec=norm]"
+        target_name = (
+            "fp32_add["
+            "arg0=norm,arg1=sub,output=zero]"
+        )
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            open(os.devnull, "w") as devnull,
+            contextlib.redirect_stdout(devnull),
+        ):
+            check_result = adder.check_spec(
+                schedule=[{"tool": "simplify"}],
+            )
+
+        self.assertTrue(check_result["proved"])
+        self.assertEqual(
+            check_result["proof_traces"][0][0]["feasibility_status"],
+            "not feasible",
+        )
+
+    def test_fp32_adder_norm_norm_proves_with_egglog(self):
+        adder = fp32_add(
+            Var(name="a", sign=Float32T()),
+            Var(name="b", sign=Float32T()),
+        )
+        target_name = "fp32_add[arg0=norm,arg1=norm,output=norm]"
         split_classification_cases = ast_nodes._split_classification_cases
 
         def select_norm_norm_case(*args, **kwargs):
@@ -2598,48 +3860,6 @@ class TestSolverApis(unittest.TestCase):
             matching_traces[0],
         )
 
-    def test_conventional_zero_zero_proves_with_xor_sign_fact(self):
-        a = [Var(name=f"a_{idx}", sign=BFloat16T()) for idx in range(4)]
-        b = [Var(name=f"b_{idx}", sign=BFloat16T()) for idx in range(4)]
-        conventional = Conventional(*a, *b)
-        target_name = "Conventional[inner_spec=zero,outer_spec=zero]"
-        split_classification_cases = ast_nodes._split_classification_cases
-
-        def select_zero_zero_case(*args, **kwargs):
-            cases = split_classification_cases(*args, **kwargs)
-            return [next(case for case in cases if case.name == target_name)]
-
-        with (
-            patch.object(
-                ast_nodes,
-                "_split_classification_cases",
-                side_effect=select_zero_zero_case,
-            ),
-            open(os.devnull, "w") as devnull,
-            contextlib.redirect_stdout(devnull),
-        ):
-            check_result = conventional.check_spec(
-                schedule=[
-                    {"tool": "simplify"},
-                    {
-                        "tool": "egglog-rewrite",
-                        "iterations": 6,
-                        "scheduler": {"match_limit": 500_000, "ban_length": 1},
-                    },
-                ]
-            )
-
-        self.assertTrue(check_result["proved"])
-        proof_traces = check_result["proof_traces"]
-        self.assertEqual(len(proof_traces), 1)
-        self.assertTrue(
-            any(
-                report["tool"] == "egglog-rewrite" and report["status"] == "unsat"
-                for report in proof_traces[0]
-            ),
-            proof_traces[0],
-        )
-
     def test_z3_check_eq_returns_single_report(self):
         ctx = SpecContext("z3-api")
         ctx.check(RealLit(1).eq(RealLit(1)))
@@ -2662,22 +3882,83 @@ class TestSolverApis(unittest.TestCase):
 
 
 class TestSignSpecs(unittest.TestCase):
-    def test_xor_sign_multiplier_fact_follows_from_existing_xor_constraints(self):
-        ctx = SpecContext("xor-sign-multiplier")
+    def test_bit_operator_specs_use_one_canonical_conditional_form(self):
+        ctx = SpecContext("bit-operator-canonical")
         x = ctx.real("x")
         y = ctx.real("y")
+        zero = ctx.zero()
+        one = ctx.one()
 
-        result = xor_spec(x, y, ctx)
-        derived_fact = sign_multiplier(ctx, result).eq(
+        expected = {
+            and_spec: If(x.eq(one) & y.eq(one), one, zero),
+            or_spec: If(x.eq(one) | y.eq(one), one, zero),
+            xor_spec: If(x.ne(y), one, zero),
+        }
+
+        for spec, expected_result in expected.items():
+            with self.subTest(spec=spec.__name__):
+                self.assertEqual(spec(x, y, ctx), expected_result)
+        self.assertEqual(neg_spec(x, ctx), If(x.eq(one), zero, one))
+        self.assertEqual(ctx.assumes, [])
+
+    def test_egglog_unions_guarded_bit_operator_forms(self):
+        ctx = SpecContext("bit-operator-egglog")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        zero = ctx.zero()
+        one = ctx.one()
+        two = ctx.two()
+        and_conditional = If(x.eq(one) & y.eq(one), one, zero)
+        or_conditional = If(x.eq(one) | y.eq(one), one, zero)
+        xor_conditional = If(x.ne(y), one, zero)
+        neg_conditional = If(x.eq(one), zero, one)
+
+        ctx.assume(x.eq(zero) | x.eq(one))
+        ctx.assume(y.eq(zero) | y.eq(one))
+        ctx.check(and_conditional.eq(x * y))
+        ctx.check(and_conditional.eq(x.min(y)))
+        ctx.check(or_conditional.eq(x + y - x * y))
+        ctx.check(or_conditional.eq(x.max(y)))
+        ctx.check(xor_conditional.eq(x.max(y) - x * y))
+        ctx.check(xor_conditional.eq(x + y - two * x * y))
+        ctx.check(sign_multiplier(ctx, xor_conditional).eq(
             sign_multiplier(ctx, x) * sign_multiplier(ctx, y)
-        )
-        self.assertEqual(ctx.assumes[-1], derived_fact)
-        ctx.assumes.pop()
-        ctx.check(derived_fact)
+        ))
+        ctx.check(neg_conditional.eq(one - x))
+        ctx.check(neg_conditional.eq(If(x.eq(zero), one, zero)))
+        ctx.check(neg_conditional.eq(If(x.ne(zero), zero, one)))
+        ctx.check(neg_conditional.eq(If(x.ne(one), one, zero)))
 
-        report = z3_check_eq(ctx, timeout_ms=10000)
+        egraph = EGraph()
+        egraph.register(*constant_rules())
+        checks = ctx.to_egglog(egraph)
+        egraph.run(1)
 
-        self.assertEqual(report["status"], "unsat", report)
+        self.assertTrue(egraph.check_bool(*checks))
+
+    def test_egglog_does_not_apply_bit_operator_forms_without_guards(self):
+        ctx = SpecContext("bit-operator-egglog-unguarded")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        zero = ctx.zero()
+        one = ctx.one()
+        ctx.check(If(x.eq(one) & y.eq(one), one, zero).eq(x * y))
+        ctx.check(If(x.eq(one) | y.eq(one), one, zero).eq(x.max(y)))
+        ctx.check(If(x.ne(y), one, zero).eq(x.max(y) - x * y))
+        ctx.check(If(x.eq(one), zero, one).eq(one - x))
+        ctx.check(If(x.eq(one), zero, one).eq(If(x.eq(zero), one, zero)))
+        ctx.check(If(x.eq(one), zero, one).eq(If(x.ne(zero), zero, one)))
+        ctx.check(If(x.eq(one), zero, one).eq(If(x.ne(one), one, zero)))
+
+        egraph = EGraph()
+        egraph.register(*constant_rules())
+        checks = ctx.to_egglog(egraph)
+        egraph.run(1)
+
+        self.assertTrue(all(
+            not egraph.check_bool(check)
+            for check in checks
+        ))
 
     def test_q_signs_xor_spec_matches_constant_sign_combinations(self):
         cases = [

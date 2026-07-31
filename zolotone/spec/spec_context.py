@@ -18,6 +18,7 @@ class SpecContext:
     def __init__(self, name: str):
         self.assumes: list[BoolExpr] = []
         self.checks: list[BoolExpr] = []
+        self.requirements: list[BoolExpr] = []
         self._sym_counter = 0
         self.name = name
         self.spec_cache = {}
@@ -38,6 +39,36 @@ class SpecContext:
         if not isinstance(condition, BoolExpr):
             raise TypeError(f"SpecContext.check expects BoolExpr, got {type(condition).__name__}")
         self.checks.append(condition)
+    
+    def require(self, condition: BoolExpr) -> None:
+        """Register a condition that must hold for the specification to be valid."""
+        if not isinstance(condition, BoolExpr):
+            raise TypeError(
+                "SpecContext.require expects BoolExpr, "
+                f"got {type(condition).__name__}"
+            )
+        self.requirements.append(condition)
+    
+    def validate_requirements(self, timeout_ms: int = 10000) -> None:
+        """Reject a specification unless all requirements are proved."""
+        if not self.requirements:
+            return
+        
+        from ..smt import z3_check_eq
+        
+        validation_ctx = self.copy(checks=list(self.requirements))
+        report = z3_check_eq(validation_ctx, timeout_ms=timeout_ms)
+        if report["status"] == "unsat":
+            return
+        
+        detail = report.get("supplementary_info")
+        message = (
+            f"Could not prove specification requirements for {self.name!r}: "
+            f"solver returned {report['status']}"
+        )
+        if detail:
+            message = f"{message}. {detail}"
+        raise MalformedSpecification(message)
     
     def _context_not_empty(self):
         if len(self.checks) == 0:
@@ -264,6 +295,15 @@ class SpecContext:
     
     def real_val(self, value: int | float):
         return RealLit(value=value)
+
+    def zero(self) -> RealLit:
+        return self.real_val(0)
+
+    def one(self) -> RealLit:
+        return self.real_val(1)
+
+    def two(self) -> RealLit:
+        return self.real_val(2)
     
     def real(self, name: str) -> RealVar:
         return RealVar(name=name)
@@ -294,6 +334,7 @@ class SpecContext:
     def reset(self) -> None:
         self.assumes.clear()
         self.checks.clear()
+        self.requirements.clear()
         self._sym_counter = 0
         self.spec_cache.clear()
         self._spec_cache_valid = True
@@ -303,8 +344,10 @@ class SpecContext:
             "name": self.name,
             "assume_count": len(self.assumes),
             "check_count": len(self.checks),
+            "requirement_count": len(self.requirements),
             "assumes": [str(assume) for assume in self.assumes],
             "checks": [str(check) for check in self.checks],
+            "requirements": [str(requirement) for requirement in self.requirements],
             "context": str(self),
         }
     
@@ -317,9 +360,10 @@ class SpecContext:
         lines = [f"SpecContext({self.name})"]
         lines.extend(format_section("Assumes", self.assumes))
         lines.extend(format_section("Checks", self.checks))
+        lines.extend(format_section("Requirements", self.requirements))
         return "\n".join(lines)
     
-    def copy(self, assumes=None, checks=None):
+    def copy(self, assumes=None, checks=None, requirements=None):
         if assumes is None:
             # Spec AST nodes are immutable, so a shallow list copy is enough here.
             # Deep-copying rebuilds nodes such as Eq via pickle-style protocols,
@@ -327,10 +371,13 @@ class SpecContext:
             assumes = list(self.assumes)
         if checks is None:
             checks = list(self.checks)
+        if requirements is None:
+            requirements = list(self.requirements)
         
         new_ctx = SpecContext(self.name)
         new_ctx.assumes = assumes
         new_ctx.checks = checks
+        new_ctx.requirements = requirements
         new_ctx._sym_counter = self._sym_counter
         new_ctx.spec_cache = dict(self.spec_cache)
         new_ctx._spec_cache_valid = self._spec_cache_valid
@@ -341,12 +388,43 @@ class PoorSpec(ValueError):
     pass
 
 
+class MalformedSpecification(ValueError):
+    pass
+
+
+def _context_expression_state(ctx: SpecContext):
+    return tuple(ctx.assumes), tuple(ctx.checks)
+
+
+def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
+    """Alternate regular and Rival simplification to a structural fixpoint."""
+    current = ctx
+    seen_states = set()
+    max_passes = 32
+
+    for _ in range(max_passes):
+        current_state = _context_expression_state(current)
+        if current_state in seen_states:
+            warnings.warn(f"Simplification cycle detected for {ctx.name!r}", RuntimeWarning)
+            break
+        seen_states.add(current_state)
+
+        rewritten = rival_trim_context(current.simplify())
+        rewritten_state = _context_expression_state(rewritten)
+        current = rewritten
+        if rewritten_state == current_state:
+            break
+    else:
+        warnings.warn(f"Simplification did not saturate after {max_passes} passes for {ctx.name!r}", RuntimeWarning)
+
+    return current
+
+
 def simplify_ctx(ctx: SpecContext):
     run_started_at = perf_counter()
     
     try:
-        simplified_ctx = ctx.simplify()
-        simplified_ctx = rival_trim_context(simplified_ctx)
+        simplified_ctx = _simplify_with_rival(ctx)
     except PoorSpec as exc:
         return build_proof_report(
             ctx,

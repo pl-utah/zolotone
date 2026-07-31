@@ -12,6 +12,7 @@ def rewrite_rules():
     a = RealVar("a")
     b = RealVar("b")
     c = RealVar("c")
+    d = RealVar("d")
     x = RealVar("x")
     
     bool_var = BoolVar("p")
@@ -169,7 +170,94 @@ def constant_rules():
     cond = var("cond", MathBool)
     tru = var("tru", Math)
     fls = var("fls", Math)
+    zero = Math.Num(BigRat(0, 1))
+    one = Math.Num(BigRat(1, 1))
+    minus_one = Math.Num(BigRat(-1, 1))
+    two = Math.Num(BigRat(2, 1))
+
+    a_is_bit = MathBool.Or(Math.Eq(a, zero), Math.Eq(a, one))
+    b_is_bit = MathBool.Or(Math.Eq(b, zero), Math.Eq(b, one))
+    bit_result = var("bit_result", Math)
+
+    and_conditional = Math.If(
+        MathBool.And(Math.Eq(a, one), Math.Eq(b, one)),
+        one,
+        zero,
+    )
+    and_product = Math.Mul(a, b)
+    and_min = Math.Min(a, b)
+
+    or_conditional = Math.If(
+        MathBool.Or(Math.Eq(a, one), Math.Eq(b, one)),
+        one,
+        zero,
+    )
+    or_polynomial = Math.Add(
+        Math.Add(a, b),
+        Math.Neg(Math.Mul(a, b)),
+    )
+    or_max = Math.Max(a, b)
+
+    xor_conditional = Math.If(Math.NotEq(a, b), one, zero)
+    xor_max_product = Math.Add(
+        Math.Max(a, b),
+        Math.Neg(Math.Mul(a, b)),
+    )
+    xor_polynomial = Math.Add(
+        Math.Add(a, b),
+        Math.Neg(Math.Mul(Math.Mul(two, a), b)),
+    )
+
+    neg_conditional = Math.If(Math.Eq(a, one), zero, one)
+    neg_difference = Math.Add(one, Math.Neg(a))
+    neg_zero_conditional = Math.If(Math.Eq(a, zero), one, zero)
+    neg_not_zero_conditional = Math.If(Math.NotEq(a, zero), zero, one)
+    neg_not_one_conditional = Math.If(Math.NotEq(a, one), one, zero)
+
+    def sign_multiplier(value):
+        return Math.If(Math.Eq(value, one), minus_one, one)
+
     return [
+        # Equivalent bit-operator representations share e-classes only when
+        # their real-valued operands are known to be bits. Requiring the
+        # canonical conditional to exist avoids generating every operator for
+        # every bit-valued expression.
+        rule(
+            eq(bit_result).to(and_conditional),
+            eq(a_is_bit).to(MathBool.True_()),
+            eq(b_is_bit).to(MathBool.True_()),
+        ).then(
+            union(bit_result).with_(and_product),
+            union(bit_result).with_(and_min),
+        ),
+        rule(
+            eq(bit_result).to(or_conditional),
+            eq(a_is_bit).to(MathBool.True_()),
+            eq(b_is_bit).to(MathBool.True_()),
+        ).then(
+            union(bit_result).with_(or_polynomial),
+            union(bit_result).with_(or_max),
+        ),
+        rule(
+            eq(bit_result).to(xor_conditional),
+            eq(a_is_bit).to(MathBool.True_()),
+            eq(b_is_bit).to(MathBool.True_()),
+        ).then(
+            union(bit_result).with_(xor_max_product),
+            union(bit_result).with_(xor_polynomial),
+            union(sign_multiplier(bit_result)).with_(
+                Math.Mul(sign_multiplier(a), sign_multiplier(b))
+            ),
+        ),
+        rule(
+            eq(bit_result).to(neg_conditional),
+            eq(a_is_bit).to(MathBool.True_()),
+        ).then(
+            union(bit_result).with_(neg_difference),
+            union(bit_result).with_(neg_zero_conditional),
+            union(bit_result).with_(neg_not_zero_conditional),
+            union(bit_result).with_(neg_not_one_conditional),
+        ),
         # Reflect a proven object-language equality into egglog's native
         # equality so conditional assumptions can merge their operands.
         rule(eq(Math.Eq(a, b)).to(MathBool.True_())).then(union(a).with_(b)),

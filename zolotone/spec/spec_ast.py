@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from fractions import Fraction
 import math
 import sys
@@ -128,6 +128,54 @@ class RealExpr(SpecNode):
 
 
 class FPExpr(SpecNode, ABC):
+    value: "RealExpr"
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        declares_value = any(
+            base is not FPExpr
+            and "value" in base.__dict__.get("__annotations__", {})
+            for base in cls.__mro__
+        )
+        if not declares_value:
+            raise TypeError(
+                f"{cls.__name__} must declare a value: RealExpr field"
+            )
+
+    def __post_init__(self) -> None:
+        if not is_dataclass(self):
+            raise TypeError(
+                f"{type(self).__name__} must be a dataclass FPExpr"
+            )
+        if "value" not in {field.name for field in fields(self)}:
+            raise TypeError(
+                f"{type(self).__name__} must define a value dataclass field"
+            )
+        if not isinstance(self.value, RealExpr):
+            raise TypeError(
+                f"{type(self).__name__}.value must be RealExpr, got "
+                f"{type(self.value).__name__}"
+            )
+
+    @classmethod
+    @abstractmethod
+    def fresh(cls, name: str, ctx) -> "FPExpr":
+        """Create an unconstrained, well-formed value of this FP format."""
+
+    @classmethod
+    @abstractmethod
+    def encode(cls, value: "RealExpr", ctx) -> "FPExpr":
+        """Encode a mathematical real value into this FP format."""
+
+    @abstractmethod
+    def decode(self) -> tuple[SpecNode, ...]:
+        """Return this FP value's mathematical value and format fields."""
+
+    @property
+    @abstractmethod
+    def is_finite(self) -> "BoolExpr":
+        """Return whether this FP value has a finite classification."""
+
     @abstractmethod
     def classification_flags(self) -> dict[str, "BoolExpr"]:
         """Return the mutually exclusive classification predicates."""
@@ -139,25 +187,25 @@ class FPExpr(SpecNode, ABC):
     ) -> tuple[SpecNode, ...]:
         """Return observables when the classification is already known."""
 
-    # Unites two branches into a combined FPExpr
+    # Internal implementation used by Cases to combine two FP branches.
     @classmethod
-    def select(
+    def _select(
         cls,
         condition: "BoolExpr",
         on_true: "FPExpr",
         on_false: "FPExpr",
     ) -> "FPExpr":
-        """Select two same-format FP expressions field by field."""
+        """Select two same-format FP expressions field by field for Cases."""
 
         BoolExpr._coerce_bool_expr(condition)
         if type(on_true) is not type(on_false):
             raise TypeError(
-                "FP If branches must have the same type, got "
+                "Cases FP branches must have the same type, got "
                 f"{type(on_true).__name__} and {type(on_false).__name__}"
             )
         if not isinstance(on_true, cls) or not is_dataclass(on_true):
             raise TypeError(
-                f"FP If branches must be dataclass {cls.__name__} values"
+                f"Cases FP branches must be dataclass {cls.__name__} values"
             )
 
         selected_fields: dict[str, object] = {}
@@ -182,7 +230,7 @@ class FPExpr(SpecNode, ABC):
             elif isinstance(true_value, FPExpr):
                 if type(true_value) is not type(false_value):
                     raise TypeError(f"Mismatched FP field types for {field.name}")
-                selected_value = type(true_value).select(
+                selected_value = type(true_value)._select(
                     condition,
                     true_value,
                     false_value,
@@ -197,6 +245,51 @@ class FPExpr(SpecNode, ABC):
             selected_fields[field.name] = selected_value
 
         return type(on_true)(**selected_fields)
+
+
+def special_encoding(value: Any, ctx) -> Any:
+    """Give each spec collection an independent nonfinite FP value.
+
+    An FPExpr's real ``value`` is shared for finite inputs, but is not
+    semantically defined for infinities or NaNs.  Materialize that undefined
+    projection as a fresh real in the current collection while preserving all
+    classification fields.  Tuple-shaped spec inputs are handled recursively.
+    """
+
+    if isinstance(value, tuple):
+        return tuple(special_encoding(item, ctx) for item in value)
+    if not isinstance(value, FPExpr):
+        return value
+    if not is_dataclass(value):
+        raise TypeError(
+            "special_encoding requires dataclass FPExpr values, got "
+            f"{type(value).__name__}"
+        )
+
+    raw_value = getattr(value, "value", None)
+    if not isinstance(raw_value, RealExpr):
+        raise TypeError(
+            f"{type(value).__name__} must define a RealExpr value field "
+            "for special_encoding"
+        )
+
+    updates: dict[str, object] = {
+        "value": If(
+            value.is_finite,
+            raw_value,
+            ctx.fresh_real(f"{type(value).__name__}_special"),
+        )
+    }
+
+    for field in fields(value):
+        if not field.init or field.name == "value":
+            continue
+        field_value = getattr(value, field.name)
+        encoded_value = special_encoding(field_value, ctx)
+        if encoded_value is not field_value:
+            updates[field.name] = encoded_value
+
+    return replace(value, **updates)
     
 
 class BoolExpr(SpecNode):
@@ -540,27 +633,21 @@ class If(RealExpr):
 
     def __new__(cls, cond, on_true, on_false):
         BoolExpr._coerce_bool_expr(cond)
+        if isinstance(on_true, FPExpr) or isinstance(on_false, FPExpr):
+            raise TypeError(
+                "If does not support FPExpr branches; use exhaustive Cases instead"
+            )
+
         true_is_bool = isinstance(on_true, BoolExpr)
         false_is_bool = isinstance(on_false, BoolExpr)
         if true_is_bool or false_is_bool:
             if not (true_is_bool and false_is_bool):
                 raise TypeError(
-                    "If branches must both be BoolExpr, RealExpr, or matching "
-                    f"FPExpr values, got {type(on_true).__name__} and "
+                    "If branches must both be BoolExpr or RealExpr, got "
+                    f"{type(on_true).__name__} and "
                     f"{type(on_false).__name__}"
                 )
             return (cond & on_true) | ((~cond) & on_false)
-
-        true_is_fp = isinstance(on_true, FPExpr)
-        false_is_fp = isinstance(on_false, FPExpr)
-        if true_is_fp or false_is_fp:
-            if not (true_is_fp and false_is_fp):
-                raise TypeError(
-                    "If branches must both be BoolExpr, RealExpr, or matching "
-                    f"FPExpr values, got {type(on_true).__name__} and "
-                    f"{type(on_false).__name__}"
-                )
-            return type(on_true).select(cond, on_true, on_false)
         return super().__new__(cls)
 
     def __post_init__(self):
@@ -614,44 +701,58 @@ class _CaseEntry:
     value: _CaseValue
 
 
-@dataclass(frozen=True)
-class _DefaultEntry:
-    value: _CaseValue
-
-
 def case(condition: BoolExpr, value: _CaseValue) -> _CaseEntry:
     """Create an ordered conditional entry for :func:`Cases`."""
     BoolExpr._coerce_bool_expr(condition)
     return _CaseEntry(condition, _coerce_case_value(value))
 
 
-def default(value: _CaseValue) -> _DefaultEntry:
-    """Create the required fallback entry for :func:`Cases`."""
-    return _DefaultEntry(_coerce_case_value(value))
-
-
-def Cases(*entries: _CaseEntry | _DefaultEntry) -> _CaseValue:
-    """Lower ordered cases with a final default to nested ``If`` expressions."""
-    for entry in entries:
-        if not isinstance(entry, (_CaseEntry, _DefaultEntry)):
+def _select_case_value(
+    condition: BoolExpr,
+    on_true: _CaseValue,
+    on_false: _CaseValue,
+) -> _CaseValue:
+    true_is_fp = isinstance(on_true, FPExpr)
+    false_is_fp = isinstance(on_false, FPExpr)
+    if true_is_fp or false_is_fp:
+        if not (true_is_fp and false_is_fp):
             raise TypeError(
-                "Cases entries must be created by case() or default(), got "
+                "Cases branches must all be matching FPExpr values, or all "
+                "scalar expressions; got "
+                f"{type(on_true).__name__} and {type(on_false).__name__}"
+            )
+        if type(on_true) is not type(on_false):
+            raise TypeError(
+                "Cases FP branches must have the same type, got "
+                f"{type(on_true).__name__} and {type(on_false).__name__}"
+            )
+        return type(on_true)._select(condition, on_true, on_false)
+
+    return If(condition, on_true, on_false)
+
+
+def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
+    """Build an ordered, exhaustive scalar or floating-point expression."""
+    for entry in entries:
+        if not isinstance(entry, _CaseEntry):
+            raise TypeError(
+                "Cases entries must be created by case(), got "
                 f"{type(entry).__name__}"
             )
 
-    default_positions = [
-        idx for idx, entry in enumerate(entries) if isinstance(entry, _DefaultEntry)
-    ]
-    if not default_positions:
-        raise ValueError("Cases requires a default() entry")
-    if len(default_positions) != 1:
-        raise ValueError("Cases requires exactly one default() entry")
-    if default_positions[0] != len(entries) - 1:
-        raise ValueError("Cases requires default() to be the final entry")
+    if not entries:
+        raise ValueError("Cases requires at least one case() entry")
+    if not hasattr(ctx, "require"):
+        raise TypeError("Cases ctx must be a SpecContext")
+
+    coverage = entries[0].condition
+    for entry in entries[1:]:
+        coverage = coverage | entry.condition
 
     result = entries[-1].value
     for entry in reversed(entries[:-1]):
-        result = If(entry.condition, entry.value, result)
+        result = _select_case_value(entry.condition, entry.value, result)
+    ctx.require(coverage)
     return result
 
 
@@ -1086,6 +1187,9 @@ def _shortcut_fold(
 
     if isinstance(node, Sub):
         lhs, rhs = folded_args
+        # x - x -> 0
+        if identical_nodes(lhs, rhs):
+            return RealLit(0)
         # x - 0 -> x
         if isinstance(rhs, RealLit) and rhs.value == 0:
             return lhs

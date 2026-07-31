@@ -23,10 +23,10 @@ For example, the golden model for the FP32 IEEE adder states the finite
 computation directly while making the special-value behavior explicit:
 
 ```python
-from zolotone import Cases, case, default, fp32
+from zolotone import Cases, case, fp32
 
 
-def spec_FP32_IEEE_adder(x: "FP32", y: "FP32", ctx):
+def spec_fp32_add(x: "FP32", y: "FP32", ctx):
     nan_case = (
         x.is_nan
         | y.is_nan
@@ -42,16 +42,22 @@ def spec_FP32_IEEE_adder(x: "FP32", y: "FP32", ctx):
         case(neg_inf_case, fp32.ninf()),
         case(pos_inf_case, fp32.inf()),
         case(neg_zero_case, fp32.nzero()),
-        default(fp32.encode(value=x.value + y.value, ctx=ctx)),
+        case(
+            x.is_finite & y.is_finite,
+            fp32.encode(value=x.value + y.value, ctx=ctx),
+        ),
+        ctx=ctx,
     )
 ```
 
-`Cases` selects the first matching `case` in source order and requires exactly
-one `default` as its final entry.
+`Cases` selects the first matching `case` in source order. It requires the
+specification context and rejects the specification unless the case conditions
+cover every valid input. Floating-point (`FPExpr`) results must be branched with
+`Cases`; `If` is limited to scalar `BoolExpr` and `RealExpr` branches.
 
 This model says what the result means. It does not prescribe exponent
 alignment, significand formatting, rounding logic, or other implementation
-choices. Those belong in `FP32_IEEE_adder`, the implementation model, and are
+choices. Those belong in `fp32_add`, the implementation model, and are
 verified against this golden specification.
 
 ## Verification workflow

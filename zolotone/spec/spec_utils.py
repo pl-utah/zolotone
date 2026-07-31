@@ -5,6 +5,9 @@ from typing import Any
 
 from egglog import Expr
 
+from functools import reduce
+from operator import or_, and_
+
 from .spec_ast import (
     Abs,
     Add,
@@ -33,6 +36,13 @@ from .spec_ast import (
 )
 
 _MATH_BOOL_METHODS = {"Eq", "NotEq", "Lt", "Le", "Gt", "Ge"}
+
+
+def andmap(*args):
+    return reduce(and_, args)
+
+def ormap(*args):
+    return reduce(or_, args)
 
 
 def from_egglog(egg_node: Expr) -> RealExpr | BoolExpr:

@@ -1,6 +1,6 @@
 from ..types.runtime import RuntimeType, Tuple
 from ..types.static import StaticType, TupleT
-from ..spec import BoolExpr, FPExpr, If, RealExpr
+from ..spec import BoolExpr, Cases, case, FPExpr, If, RealExpr
 from .node import Node
 from .nodes import Op, Primitive
 
@@ -49,10 +49,19 @@ def if_then_else_spec(sel, in1, in0, ctx):
         )
     
     if isinstance(sel, BoolExpr):
-        return If(sel, in1, in0)
-    if isinstance(sel, RealExpr):
-        return If(sel.ne(ctx.real_val(0)), in1, in0)
-    raise TypeError()
+        condition = sel
+    elif isinstance(sel, RealExpr):
+        condition = sel.ne(ctx.zero())
+    else:
+        raise TypeError()
+
+    if branches_are_fp:
+        return Cases(
+            case(condition, in1),
+            case(~condition, in0),
+            ctx=ctx,
+        )
+    return If(condition, in1, in0)
 
 @Primitive(name="if_then_else", spec=if_then_else_spec, c_inline=True)
 def if_then_else(sel: Node, in1: Node, in0: Node) -> Node:

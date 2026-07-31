@@ -4,41 +4,43 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from ..spec_ast import BoolExpr, BoolLit, FPExpr, If, RealExpr, RealLit
+from .fp32 import sign_multiplier
 
 
 def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
     return (~lhs) | rhs
 
 
-def sign_multiplier(ctx, sign: RealExpr) -> RealExpr:
-    one = ctx.one()
-    return If(sign.eq(one), ctx.real_val(-1), one)
+def _assume_exclusive_classification(ctx, bf16_value: bf16) -> None:
+    flags = (
+        bf16_value.is_norm,
+        bf16_value.is_sub,
+        bf16_value.is_zero,
+        bf16_value.is_inf,
+        bf16_value.is_nan,
+    )
 
-
-def _assume_exclusive_classification(ctx, fp32_value: fp32) -> None:
-    flags = (fp32_value.is_norm, fp32_value.is_sub, fp32_value.is_zero, fp32_value.is_inf, fp32_value.is_nan)
-    
     at_least_one = flags[0]
     for flag in flags[1:]:
         at_least_one = at_least_one | flag
     ctx.assume(at_least_one)
 
-    for i, lhs in enumerate(flags):
-        for rhs in flags[i + 1:]:
+    for idx, lhs in enumerate(flags):
+        for rhs in flags[idx + 1:]:
             ctx.assume((~lhs) | (~rhs))
 
 
 @dataclass(frozen=True)
-class fp32(FPExpr):
-    """A symbolic IEEE-754 binary32 value and its format operations.
+class bf16(FPExpr):
+    """A symbolic IEEE-754 bfloat16 value and its format operations.
 
     ``value`` is meaningful only for normal, subnormal, and zero values.
     NaN and infinity are represented by classification fields. NaN payload
     and sign are intentionally not part of the observable semantics.
     """
-    
+
     exponent_bits: ClassVar[int] = 8
-    mantissa_bits: ClassVar[int] = 23
+    mantissa_bits: ClassVar[int] = 7
     exponent_bias: ClassVar[int] = 127
 
     value: RealExpr
@@ -50,10 +52,10 @@ class fp32(FPExpr):
     is_zero: BoolExpr
     is_inf: BoolExpr
     is_nan: BoolExpr
-    
+
     @classmethod
-    def fresh(cls, name: str, ctx) -> fp32:
-        """Create an unconstrained, well-formed fp32 value."""
+    def fresh(cls, name: str, ctx) -> bf16:
+        """Create an unconstrained, well-formed bfloat16 value."""
         name = ctx.fresh_name(name)
         sign = ctx.fresh_real(f"{name}_sign")
         exponent = ctx.fresh_real(f"{name}_exponent")
@@ -72,7 +74,7 @@ class fp32(FPExpr):
         two = ctx.two()
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
-        
+
         signed_value = sign_multiplier(ctx, sign)
         normal_value = (
             signed_value
@@ -110,7 +112,7 @@ class fp32(FPExpr):
         ctx.assume(sign.eq(zero) | sign.eq(one))
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
-        
+
         _assume_exclusive_classification(ctx, out)
 
         ctx.assume(_implies(is_norm, exponent >= one))
@@ -121,21 +123,21 @@ class fp32(FPExpr):
         ctx.assume(_implies(is_sub | is_nan, mantissa >= one))
 
         return out
-    
+
     @classmethod
-    def encode(cls, value: RealExpr, ctx) -> fp32:
+    def encode(cls, value: RealExpr, ctx) -> bf16:
         if not isinstance(value, RealExpr):
             raise TypeError(
-                f"fp32.encode value must be RealExpr, got {type(value).__name__}"
+                f"bf16.encode value must be RealExpr, got {type(value).__name__}"
             )
-        
+
         zero = ctx.zero()
         one = ctx.one()
         two = ctx.two()
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bits = ctx.real_val(cls.exponent_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
-        
+
         smallest_normal = two ** (one - exponent_bias)
         greatest_normal = (
             (two - two ** (-mantissa_bits))
@@ -143,13 +145,12 @@ class fp32(FPExpr):
         )
         smallest_subnormal = two ** (one - exponent_bias - mantissa_bits)
         zero_rounding_boundary = smallest_subnormal * (two ** ctx.real_val(-1))
-        
+
         magnitude = abs(value)
         sign = If(value < zero, one, zero)
-        
-        # Under RNE, values at the midpoint between zero and the smallest
-        # subnormal tie to the even encoding (zero). The sign still comes
-        # from the nonzero input, so negative underflow produces -0.
+
+        # Under RNE, a value at the midpoint between zero and the smallest
+        # subnormal ties to the even encoding (zero).
         is_zero = magnitude <= zero_rounding_boundary
         is_sub = (
             (magnitude < smallest_normal)
@@ -162,8 +163,8 @@ class fp32(FPExpr):
         is_inf = magnitude > greatest_normal
         is_nan = ctx.false()
 
-        exponent = ctx.fresh_real("encoded_fp32_exponent")
-        mantissa = ctx.fresh_real("encoded_fp32_mantissa")
+        exponent = ctx.fresh_real("encoded_bf16_exponent")
+        mantissa = ctx.fresh_real("encoded_bf16_mantissa")
         special = ctx.fresh_real("special")
         encoded_value = If(
             is_norm | is_sub,
@@ -209,10 +210,8 @@ class fp32(FPExpr):
         ctx.assume(_implies(is_sub, value.eq(subnormal_value)))
         return out
 
-
-
     @classmethod
-    def nan(cls, ctx) -> fp32:
+    def nan(cls, ctx) -> bf16:
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(0),
@@ -225,9 +224,8 @@ class fp32(FPExpr):
             is_nan=BoolLit(True),
         )
 
-
     @classmethod
-    def inf(cls, ctx) -> fp32:
+    def inf(cls, ctx) -> bf16:
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(0),
@@ -241,7 +239,7 @@ class fp32(FPExpr):
         )
 
     @classmethod
-    def ninf(cls, ctx) -> fp32:
+    def ninf(cls, ctx) -> bf16:
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(1),
@@ -255,9 +253,9 @@ class fp32(FPExpr):
         )
 
     @classmethod
-    def zero(cls, ctx) -> fp32:
+    def zero(cls, ctx) -> bf16:
         return cls(
-            value=RealLit(0),
+            value=ctx.zero(),
             sign=RealLit(0),
             exponent=RealLit(0),
             mantissa=RealLit(0),
@@ -269,9 +267,9 @@ class fp32(FPExpr):
         )
 
     @classmethod
-    def nzero(cls, ctx) -> fp32:
+    def nzero(cls, ctx) -> bf16:
         return cls(
-            value=RealLit(0),
+            value=ctx.zero(),
             sign=RealLit(1),
             exponent=RealLit(0),
             mantissa=RealLit(0),
@@ -293,13 +291,10 @@ class fp32(FPExpr):
         if classification in {"zero", "inf"}:
             return (self.sign,)
         if classification == "nan":
-            # NaN has no observable payload in this model. Keep one trivial
-            # Boolean query so schedules that start with egglog still receive
-            # a non-empty checks list.
             return (BoolLit(True),)
-        raise ValueError(f"Unknown fp32 classification {classification!r}")
+        raise ValueError(f"Unknown bf16 classification {classification!r}")
 
-    def constant_fold(self) -> fp32:
+    def constant_fold(self) -> bf16:
         """Fold each scalar field of this structured expression."""
 
         old_fields = self.decode()
@@ -325,7 +320,13 @@ class fp32(FPExpr):
         return dict(
             zip(
                 ("norm", "sub", "zero", "inf", "nan"),
-                (self.is_norm, self.is_sub, self.is_zero, self.is_inf, self.is_nan),
+                (
+                    self.is_norm,
+                    self.is_sub,
+                    self.is_zero,
+                    self.is_inf,
+                    self.is_nan,
+                ),
             )
         )
 
