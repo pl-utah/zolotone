@@ -212,13 +212,13 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     # Make room for the right shift
     M_p = [uq_resize(M_p[i], 2, 14 + 2**s - 1) for i in range(N)]
     
-    M_p = [uq_rshift(M_p[i], L_shifts[i]) for i in range(N)]
+    M_p = [uq_rshift_jam(M_p[i], L_shifts[i]) for i in range(N)]
     
     # Step 4. Globally shift mantissas by G_shifts[i] amount
     # Make room for the right shift
     M_p = [uq_resize(M_p[i], 2, Wf - 2 + 2**s - 1) for i in range(N)]
     
-    M_p = [uq_rshift(M_p[i], G_shifts[i]) for i in range(N)]
+    M_p = [uq_rshift_jam(M_p[i], G_shifts[i]) for i in range(N)]
     
     with context() as ctx:
         for i in range(N):

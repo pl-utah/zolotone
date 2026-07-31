@@ -325,6 +325,27 @@ class TestConstantFolding(unittest.TestCase):
         self.assertEqual(conventional.val, 388040612)
         self.assertEqual(conventional, optimized)
 
+    def test_dot_products_preserve_sticky_evidence_during_alignment(self):
+        # Exact sum: 1 + 2**-24 + 2**-31. The 2**-31 term is sticky
+        # evidence that makes the FP32 result round up rather than tie to even.
+        a_values = [0x3F80, 0x3980, 0x3800, 0x0000]
+        b_values = [0x3F80, 0x3980, 0x3780, 0x0000]
+        a = [Var(name=f"a_{i}", sign=BFloat16T()) for i in range(4)]
+        b = [Var(name=f"b_{i}", sign=BFloat16T()) for i in range(4)]
+
+        for variable, bits in zip(a, a_values, strict=True):
+            variable.load_val(BFloat16(bits))
+        for variable, bits in zip(b, b_values, strict=True):
+            variable.load_val(BFloat16(bits))
+
+        designs = {
+            "conventional": bf16x8_dot_fp32_conventional(*a, *b),
+            "optimized": bf16x8_dot_fp32_optimized(*a, *b),
+        }
+        for name, design in designs.items():
+            with self.subTest(design=name):
+                self.assertEqual(design.evaluate().val, 0x3F800001)
+
     def test_dot_products_handle_subnormals_and_special_values(self):
         a = [Var(name=f"a_{i}", sign=BFloat16T()) for i in range(4)]
         b = [Var(name=f"b_{i}", sign=BFloat16T()) for i in range(4)]

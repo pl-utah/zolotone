@@ -169,7 +169,7 @@ def bf16x8_dot_fp32_conventional(a0: Node, a1: Node, a2: Node, a3: Node,
     # Step 3. Shift mantissas
     # Make room for the right shift first, accuracy requirement is Wf
     M_p_resized = [uq_resize(M_p[i], 2, Wf - 2) for i in range(N)]
-    M_p_shifted = [uq_rshift(M_p_resized[i], Sh_p[i]) for i in range(N)]
+    M_p_shifted = [uq_rshift_jam(M_p_resized[i], Sh_p[i]) for i in range(N)]
     
     # Step 4. Adjust sign for mantissas using xor operation
     M_p_q = [uq_to_q(M_p_shifted[i]) for i in range(N)]
