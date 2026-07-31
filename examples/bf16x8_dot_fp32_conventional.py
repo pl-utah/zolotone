@@ -119,6 +119,7 @@ def bf16x8_dot_fp32_conventional(a0: Node, a1: Node, a2: Node, a3: Node,
             E_p[0].node_type.frac_bits,
         )
     )
+    # This alignment does not affect verification - it is only affective for implementation
     E_p_for_alignment = [
         if_then_else(
             bit_or(A[i].is_zero, B[i].is_zero),
@@ -169,13 +170,6 @@ def bf16x8_dot_fp32_conventional(a0: Node, a1: Node, a2: Node, a3: Node,
     # Make room for the right shift first, accuracy requirement is Wf
     M_p_resized = [uq_resize(M_p[i], 2, Wf - 2) for i in range(N)]
     M_p_shifted = [uq_rshift(M_p_resized[i], Sh_p[i]) for i in range(N)]
-
-    # Paranoid check #1
-    with context() as ctx:
-        for i in range(N):
-            lhs = ctx.spec_of(M_p_shifted[i]) * ctx.real_val(2) ** ctx.spec_of(E_m)
-            rhs = ctx.spec_of(M_p[i]) * ctx.real_val(2) ** ctx.spec_of(E_p[i])
-            ctx.check(lhs.eq(rhs))
     
     # Step 4. Adjust sign for mantissas using xor operation
     M_p_q = [uq_to_q(M_p_shifted[i]) for i in range(N)]

@@ -149,9 +149,27 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     # Step 1. Exponents add. Each E_p is shifted by bias twice!
     E_p = [uq_add(E_a[i], E_b[i]) for i in range(N)]
 
+    # A zero product has no meaningful exponent and must not control
+    # alignment of the nonzero products.
+    zero_product_exponent = Const(
+        UQ(
+            0,
+            E_p[0].node_type.int_bits,
+            E_p[0].node_type.frac_bits,
+        )
+    )
+    E_p_for_alignment = [
+        if_then_else(
+            bit_or(A[i].is_zero, B[i].is_zero),
+            zero_product_exponent,
+            E_p[i],
+        )
+        for i in range(N)
+    ]
+
     E_lead, E_trail = [0] * N, [0] * N
     for i in range(N):
-        E_trail[i], E_lead[i] = uq_split(E_p[i], s)
+        E_trail[i], E_lead[i] = uq_split(E_p_for_alignment[i], s)
     
     # Step 2. Estimate local shifts
     L_shifts = [_est_local_shift(E_trail[i]) for i in range(N)]
