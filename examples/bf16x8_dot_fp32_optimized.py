@@ -4,9 +4,6 @@ from .CSA import CSA_tree4
 from .common import *
 from .max_exponent import *
 
-from functools import reduce
-from operator import or_, and_
-
 s = 2
 N = 4
 Wf = 30

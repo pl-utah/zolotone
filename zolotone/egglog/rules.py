@@ -208,14 +208,20 @@ def constant_rules():
         Math.Neg(Math.Mul(Math.Mul(two, a), b)),
     )
 
+    neg_conditional = Math.If(Math.Eq(a, one), zero, one)
+    neg_difference = Math.Add(one, Math.Neg(a))
+    neg_zero_conditional = Math.If(Math.Eq(a, zero), one, zero)
+    neg_not_zero_conditional = Math.If(Math.NotEq(a, zero), zero, one)
+    neg_not_one_conditional = Math.If(Math.NotEq(a, one), one, zero)
+
     def sign_multiplier(value):
         return Math.If(Math.Eq(value, one), minus_one, one)
 
     return [
         # Equivalent bit-operator representations share e-classes only when
-        # both real-valued operands are known to be bits. Requiring the
+        # their real-valued operands are known to be bits. Requiring the
         # canonical conditional to exist avoids generating every operator for
-        # every pair of bit-valued expressions.
+        # every bit-valued expression.
         rule(
             eq(bit_result).to(and_conditional),
             eq(a_is_bit).to(MathBool.True_()),
@@ -242,6 +248,15 @@ def constant_rules():
             union(sign_multiplier(bit_result)).with_(
                 Math.Mul(sign_multiplier(a), sign_multiplier(b))
             ),
+        ),
+        rule(
+            eq(bit_result).to(neg_conditional),
+            eq(a_is_bit).to(MathBool.True_()),
+        ).then(
+            union(bit_result).with_(neg_difference),
+            union(bit_result).with_(neg_zero_conditional),
+            union(bit_result).with_(neg_not_zero_conditional),
+            union(bit_result).with_(neg_not_one_conditional),
         ),
         # Reflect a proven object-language equality into egglog's native
         # equality so conditional assumptions can merge their operands.

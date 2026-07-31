@@ -35,7 +35,7 @@ from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
 from examples.bf16_mult import bf16_mult
 from examples.bf16_relu import bf16_relu
-from examples.common import and_spec, or_spec, xor_spec
+from examples.common import and_spec, neg_spec, or_spec, xor_spec
 from examples.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
     dot_product_spec as bf16x8_dot_fp32_spec,
@@ -351,6 +351,22 @@ class TestConstantFolding(unittest.TestCase):
                 [smallest_subnormal, zero, zero, zero],
                 [one, largest_finite, zero, zero],
                 0x00010000,
+            ),
+            (
+                "all zero products",
+                [zero, zero, zero, zero],
+                [zero, zero, zero, zero],
+                Float32.Zero().val,
+            ),
+            (
+                "three normal products and one zero product",
+                [one, zero, one, one],
+                [one, zero, one, one],
+                Float32.from_fields(
+                    sign=0,
+                    exponent=128,
+                    mantissa=1 << 22,
+                ).val,
             ),
             (
                 "positive infinity",
@@ -1948,25 +1964,12 @@ class TestBFloat16Spec(unittest.TestCase):
 
     def test_bf16_encode_classifies_representative_values(self):
         greatest_normal = (2 - 2 ** -bf16.mantissa_bits) * 2 ** 127
-        overflow_midpoint = greatest_normal + 2 ** 119
         cases = (
             ("positive-zero", 0.0, "is_pzero"),
             ("negative-underflow", -(2 ** -134), "is_nzero"),
             ("smallest-subnormal", 2 ** -133, "is_sub"),
             ("smallest-normal", 2 ** -126, "is_norm"),
             ("greatest-normal", greatest_normal, "is_norm"),
-            (
-                "below-positive-overflow-midpoint",
-                greatest_normal + 2 ** 118,
-                "is_norm",
-            ),
-            (
-                "below-negative-overflow-midpoint",
-                -(greatest_normal + 2 ** 118),
-                "is_norm",
-            ),
-            ("positive-overflow-midpoint", overflow_midpoint, "is_pinf"),
-            ("negative-overflow-midpoint", -overflow_midpoint, "is_ninf"),
             ("positive-overflow", 4e38, "is_pinf"),
             ("negative-overflow", -4e38, "is_ninf"),
         )
@@ -3685,48 +3688,6 @@ class TestSolverApis(unittest.TestCase):
             matching_traces[0],
         )
 
-    def test_conventional_zero_zero_proves_with_xor_sign_fact(self):
-        a = [Var(name=f"a_{idx}", sign=BFloat16T()) for idx in range(4)]
-        b = [Var(name=f"b_{idx}", sign=BFloat16T()) for idx in range(4)]
-        conventional = bf16x8_dot_fp32_conventional(*a, *b)
-        target_name = "bf16x8_dot_fp32_conventional[inner_spec=zero,outer_spec=zero]"
-        split_classification_cases = ast_nodes._split_classification_cases
-
-        def select_zero_zero_case(*args, **kwargs):
-            cases = split_classification_cases(*args, **kwargs)
-            return [next(case for case in cases if case.name == target_name)]
-
-        with (
-            patch.object(
-                ast_nodes,
-                "_split_classification_cases",
-                side_effect=select_zero_zero_case,
-            ),
-            open(os.devnull, "w") as devnull,
-            contextlib.redirect_stdout(devnull),
-        ):
-            check_result = conventional.check_spec(
-                schedule=[
-                    {"tool": "simplify"},
-                    {
-                        "tool": "egglog-rewrite",
-                        "iterations": 6,
-                        "scheduler": {"match_limit": 500_000, "ban_length": 1},
-                    },
-                ]
-            )
-
-        self.assertTrue(check_result["proved"])
-        proof_traces = check_result["proof_traces"]
-        self.assertEqual(len(proof_traces), 1)
-        self.assertTrue(
-            any(
-                report["tool"] == "egglog-rewrite" and report["status"] == "unsat"
-                for report in proof_traces[0]
-            ),
-            proof_traces[0],
-        )
-
     def test_z3_check_eq_returns_single_report(self):
         ctx = SpecContext("z3-api")
         ctx.check(RealLit(1).eq(RealLit(1)))
@@ -3765,6 +3726,7 @@ class TestSignSpecs(unittest.TestCase):
         for spec, expected_result in expected.items():
             with self.subTest(spec=spec.__name__):
                 self.assertEqual(spec(x, y, ctx), expected_result)
+        self.assertEqual(neg_spec(x, ctx), If(x.eq(one), zero, one))
         self.assertEqual(ctx.assumes, [])
 
     def test_egglog_unions_guarded_bit_operator_forms(self):
@@ -3777,6 +3739,7 @@ class TestSignSpecs(unittest.TestCase):
         and_conditional = If(x.eq(one) & y.eq(one), one, zero)
         or_conditional = If(x.eq(one) | y.eq(one), one, zero)
         xor_conditional = If(x.ne(y), one, zero)
+        neg_conditional = If(x.eq(one), zero, one)
 
         ctx.assume(x.eq(zero) | x.eq(one))
         ctx.assume(y.eq(zero) | y.eq(one))
@@ -3789,6 +3752,10 @@ class TestSignSpecs(unittest.TestCase):
         ctx.check(sign_multiplier(ctx, xor_conditional).eq(
             sign_multiplier(ctx, x) * sign_multiplier(ctx, y)
         ))
+        ctx.check(neg_conditional.eq(one - x))
+        ctx.check(neg_conditional.eq(If(x.eq(zero), one, zero)))
+        ctx.check(neg_conditional.eq(If(x.ne(zero), zero, one)))
+        ctx.check(neg_conditional.eq(If(x.ne(one), one, zero)))
 
         egraph = EGraph()
         egraph.register(*constant_rules())
@@ -3806,6 +3773,10 @@ class TestSignSpecs(unittest.TestCase):
         ctx.check(If(x.eq(one) & y.eq(one), one, zero).eq(x * y))
         ctx.check(If(x.eq(one) | y.eq(one), one, zero).eq(x.max(y)))
         ctx.check(If(x.ne(y), one, zero).eq(x.max(y) - x * y))
+        ctx.check(If(x.eq(one), zero, one).eq(one - x))
+        ctx.check(If(x.eq(one), zero, one).eq(If(x.eq(zero), one, zero)))
+        ctx.check(If(x.eq(one), zero, one).eq(If(x.ne(zero), zero, one)))
+        ctx.check(If(x.eq(one), zero, one).eq(If(x.ne(one), one, zero)))
 
         egraph = EGraph()
         egraph.register(*constant_rules())

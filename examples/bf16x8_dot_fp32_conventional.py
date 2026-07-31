@@ -2,9 +2,6 @@ from zolotone import *
 from .encode_Float32 import *
 from .common import *
 
-from functools import reduce
-from operator import or_, and_
-
 N = 4
 Wf = 30
 
@@ -112,12 +109,33 @@ def bf16x8_dot_fp32_conventional(a0: Node, a1: Node, a2: Node, a3: Node,
 
     # Step 1. Exponents add. Each E_p is shifted by bias twice!
     E_p = [uq_add(E_a[i], E_b[i]) for i in range(N)]
+
+    # A zero product has no meaningful exponent and must not control
+    # alignment of the nonzero products.
+    zero_product_exponent = Const(
+        UQ(
+            0,
+            E_p[0].node_type.int_bits,
+            E_p[0].node_type.frac_bits,
+        )
+    )
+    E_p_for_alignment = [
+        if_then_else(
+            bit_or(A[i].is_zero, B[i].is_zero),
+            zero_product_exponent,
+            E_p[i],
+        )
+        for i in range(N)
+    ]
     
     # Step 2. Calculate maximum exponent
-    E_m = uq_max(uq_max(E_p[0], E_p[1]), uq_max(E_p[2], E_p[3]))
+    E_m = uq_max(
+        uq_max(E_p_for_alignment[0], E_p_for_alignment[1]),
+        uq_max(E_p_for_alignment[2], E_p_for_alignment[3]),
+    )
     
     # Step 3. Calculate global shifts
-    Sh_p = [uq_sub(E_m, E_p[i]) for i in range(N)]
+    Sh_p = [uq_sub(E_m, E_p_for_alignment[i]) for i in range(N)]
     
     ############ MANTISSAS #############
     

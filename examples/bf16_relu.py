@@ -2,8 +2,8 @@ from zolotone import *
 
 
 def spec_bf16_relu(x: bf16, ctx):
-    negative_case = (~x.is_nan) & x.sign.eq(ctx.real_val(1))
-    nonnegative_case = (~x.is_nan) & x.sign.eq(ctx.real_val(0))
+    negative_case = x.sign.eq(ctx.real_val(1))
+    nonnegative_case = x.sign.eq(ctx.real_val(0))
 
     return Cases(
         case(x.is_nan, bf16.nan(ctx)),

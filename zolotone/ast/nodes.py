@@ -266,8 +266,8 @@ def check_equivalence(
     for case_idx, case_ctx in enumerate(cases):
         labels = _case_labels(case_ctx.name)
         # Debugging statement
-        if not _output_classifications_match(labels, output_names):
-            continue
+        # if not _output_classifications_match(labels, output_names):
+        #    continue
         
         if case_idx == 0:
             header_padding = " " * max(len(case_ctx.name) - 8, 0)

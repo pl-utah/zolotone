@@ -80,14 +80,11 @@ def bit_or(x: Node, y: Node) -> Node:
     return basic_or(x, y, Const(UQ(0, 1, 0)))
 
 def neg_spec(x, ctx):
-    res = ctx.fresh_real('neg_res')
-    ctx.assume(res.eq(ctx.real_val(1) - x))
-    ctx.assume(res.eq(If(x.eq(ctx.real_val(1)), ctx.real_val(0), ctx.real_val(1))))
-    ctx.assume(res.eq(If(x.eq(ctx.real_val(0)), ctx.real_val(1), ctx.real_val(0))))
-    ctx.assume(res.eq(If(x.ne(ctx.real_val(0)), ctx.real_val(0), ctx.real_val(1))))
-    ctx.assume(res.eq(If(x.ne(ctx.real_val(1)), ctx.real_val(1), ctx.real_val(0))))
-    ctx.assume(res.eq(ctx.real_val(0)) | res.eq(ctx.real_val(1)))
-    return res
+    return If(
+        x.eq(ctx.real_val(1)),
+        ctx.real_val(0),
+        ctx.real_val(1),
+    )
 
 @Primitive(name="bit_neg", spec=neg_spec, c_inline=True)
 def bit_neg(x: Node) -> Node:
