@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_REPORT_DIR = Path("report")
+DEFAULT_REPORT_DIR = Path("reports")
 REPORT_FILENAME = "run_designs.json"
 HTML_FILENAME = "index.html"
 CHECK_NAMES = ("determinism", "specification")
@@ -173,7 +173,7 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Design Verification Report</title>
+  <title>Zolotone Report</title>
   <style>
     * {{ box-sizing: border-box; }}
     body {{

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_DESIGN_TIMEOUT_S = 20 * 60
-DEFAULT_REPORT_PATH = Path("report/run_designs.json")
+DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
 REPORT_SCHEMA_VERSION = 1
 CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5
