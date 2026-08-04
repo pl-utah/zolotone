@@ -1,11 +1,17 @@
 import unittest
 import contextlib
+import io
+import json
 import os
 import pickle
 import random
+import signal
+import subprocess
 import struct
 import sys
+import tempfile
 import time
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import dreal
@@ -18,7 +24,11 @@ from zolotone.ast import nodes as ast_nodes
 from zolotone.egglog.rules import constant_rules, load_rules
 from zolotone.smt import dreal_check_eq, z3_check_eq
 from zolotone.solver import engine as solver_engine
-from zolotone.solver.report import build_proof_report
+from zolotone.solver.report import (
+    CaseVerificationResult,
+    CheckResult,
+    build_proof_report,
+)
 from zolotone.rival import (
     RivalAnalysis,
     build_machine,
@@ -43,6 +53,7 @@ from examples.bf16x8_dot_fp32_conventional import (
 from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
 
 from infra.compile_cpp import jit_compile, nonjit_compile
+from infra import run_designs as design_runner
 
 
 def _flat_trace_tool(ctx, timeout_ms):
@@ -79,6 +90,267 @@ def _large_report_tool(ctx, timeout_ms):
         status="unknown",
         supplementary_info=b"x" * 2048,
     )
+
+
+class TestRunDesigns(unittest.TestCase):
+    def test_report_cli_uses_default_and_accepts_override(self):
+        self.assertEqual(
+            design_runner.parse_args([]).report,
+            design_runner.DEFAULT_REPORT_PATH,
+        )
+        self.assertEqual(
+            design_runner.parse_args(["--report", "custom/result.json"]).report,
+            Path("custom/result.json"),
+        )
+
+    def test_curated_registry_builds_every_design(self):
+        expected_names = [
+            "CSA_tree4",
+            "bf16_add",
+            "bf16_mult",
+            "bf16_relu",
+            "bf16_to_fp32",
+            "fp32_to_bf16",
+            "fp32_add",
+            "fp32_mult",
+            "bf16x8_dot_fp32_conventional",
+            "bf16x8_dot_fp32_optimized",
+        ]
+
+        self.assertEqual(
+            [design_case.name for design_case in design_runner.DESIGNS],
+            expected_names,
+        )
+        for design_case in design_runner.DESIGNS:
+            with self.subTest(design=design_case.name):
+                self.assertIsInstance(design_case.build(), Node)
+
+        csa = design_runner._find_design("CSA_tree4").build()
+        self.assertEqual(
+            [arg.node_type for arg in csa.inner_args],
+            [QT(10, 10)] * 4,
+        )
+
+    def test_check_design_runs_determinism_and_spec(self):
+        design = design_runner._build_bf16_relu()
+        design.check_determinism = Mock(
+            return_value=CheckResult(
+                proved=False,
+                requirement_report=None,
+                cases=[],
+            )
+        )
+        design.check_spec = Mock(
+            return_value=CheckResult(
+                proved=True,
+                requirement_report=None,
+                cases=[],
+            )
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "design.json"
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                proved = design_runner.check_design(
+                    design_runner.DesignCase("test_design", lambda: design),
+                    result_path=result_path,
+                )
+            design_report = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(proved)
+        self.assertEqual(design_report["status"], "failed")
+        self.assertEqual(design_report["checks"]["determinism"]["status"], "failed")
+        self.assertEqual(design_report["checks"]["specification"]["status"], "passed")
+        design.check_determinism.assert_called_once_with()
+        design.check_spec.assert_called_once_with()
+        self.assertIn("determinism was not proved", stderr.getvalue())
+
+    def test_failure_and_timeout_do_not_prevent_later_designs_from_running(self):
+        designs = (
+            design_runner.DesignCase("first", Mock()),
+            design_runner.DesignCase("broken", Mock()),
+            design_runner.DesignCase("last", Mock()),
+        )
+        statuses = iter(("passed", "timeout", "failed"))
+        calls = []
+
+        def run(name, timeout_s):
+            calls.append((name, timeout_s))
+            return next(statuses)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.json"
+            with (
+                patch.object(design_runner, "_run_design_subprocess", side_effect=run),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                status = design_runner.run_designs(
+                    designs,
+                    report_path=report_path,
+                )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            calls,
+            [
+                ("first", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+                ("broken", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+                ("last", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+            ],
+        )
+        self.assertIn("Passed 1/3 designs.", stdout.getvalue())
+        self.assertIn(
+            f"[TIMEOUT] broken exceeded {design_runner.DEFAULT_DESIGN_TIMEOUT_S:g} seconds",
+            stderr.getvalue(),
+        )
+        self.assertIn("last (failed)", stderr.getvalue())
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(
+            {name: result["status"] for name, result in report["designs"].items()},
+            {"first": "passed", "broken": "timeout", "last": "failed"},
+        )
+
+    def test_json_report_preserves_case_tool_sequence_and_metrics(self):
+        ctx = SpecContext("demo[arg0=norm]")
+        x = RealVar("x")
+        ctx.assume(x.eq(RealLit(1)))
+        ctx.check((x + RealLit(1)).eq(RealLit(2)))
+        ctx.require(BoolLit(True))
+        simplified = ctx.copy(checks=[])
+
+        simplify_report = build_proof_report(
+            ctx,
+            simplified,
+            tool="simplify",
+            runtime_s=0.25,
+            status="unknown",
+            feasibility_status="feasible",
+        )
+        z3_report = build_proof_report(
+            simplified,
+            simplified,
+            tool="z3",
+            runtime_s=0.5,
+            status="unsat",
+            timeout_ms=1000,
+        )
+        result = CheckResult(
+            proved=True,
+            requirement_report=z3_report,
+            cases=[
+                CaseVerificationResult(
+                    name=ctx.name,
+                    proved=True,
+                    status="unsat",
+                    feasibility_status="feasible",
+                    proof_trace=[simplify_report, z3_report],
+                    side_feasibility_reports=[simplify_report],
+                )
+            ],
+        )
+
+        serialized = result.to_json()
+        case = serialized["cases"][ctx.name]
+
+        self.assertEqual(serialized["tools"][0]["phase"], "requirement_validation")
+        self.assertEqual(
+            [tool["tool"] for tool in case["tools"]],
+            ["simplify", "z3", "simplify"],
+        )
+        self.assertEqual(case["feasibility"], "feasible")
+        self.assertEqual(case["tools"][0]["checks"]["discharged"], 1)
+        self.assertEqual(case["tools"][0]["context_nodes"], {"before": 9, "after": 4})
+        self.assertEqual(case["tools"][1]["metadata"]["timeout_ms"], 1000)
+        self.assertEqual(case["tools"][0]["phase"], "proof")
+        self.assertEqual(case["tools"][2]["phase"], "side_feasibility")
+        self.assertNotIn("old_ctx", json.dumps(serialized))
+
+    def test_timeout_marks_the_active_checkpointed_check(self):
+        designs = (design_runner.DesignCase("slow", Mock()),)
+        fragment = {
+            "name": "slow",
+            "status": "running",
+            "elapsed_s": 1.0,
+            "checks": {
+                "determinism": {"status": "passed", "proved": True},
+                "specification": {"status": "running", "proved": False},
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "custom.json"
+            with patch.object(
+                design_runner,
+                "_run_design_subprocess",
+                return_value=("timeout", fragment, 2.0),
+            ):
+                with (
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    status = design_runner.run_designs(
+                        designs,
+                        timeout_s=1.0,
+                        report_path=report_path,
+                    )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            report["designs"]["slow"]["checks"]["specification"]["status"],
+            "timeout",
+        )
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires prctl")
+    def test_design_process_exits_when_parent_dies(self):
+        helper_code = f"""
+import os
+import subprocess
+import sys
+
+env = os.environ.copy()
+env[{design_runner.PARENT_PID_ENV!r}] = str(os.getpid())
+child = subprocess.Popen(
+    [sys.executable, "-m", "infra.run_designs", "--design", "CSA_tree4"],
+    env=env,
+    start_new_session=True,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+print(child.pid, flush=True)
+os._exit(0)
+"""
+        helper = subprocess.run(
+            [sys.executable, "-c", helper_code],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        child_pid = int(helper.stdout.strip())
+        deadline = time.monotonic() + 5
+
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.killpg(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.fail(f"Design process {child_pid} survived its parent")
 
 
 class TestConstantFolding(unittest.TestCase):
@@ -1464,7 +1736,11 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             ctx=ctx,
         )
 
-        ctx.validate_requirements(timeout_ms=1000)
+        report = ctx.validate_requirements(timeout_ms=1000)
+
+        self.assertEqual(report["tool"], "z3")
+        self.assertEqual(report["status"], "unsat")
+        self.assertGreater(report["context_nodes_before"], 0)
 
     def test_cases_reject_incomplete_coverage(self):
         ctx = SpecContext("incomplete-cases")
@@ -3209,6 +3485,17 @@ class TestSpecificationDeterminism(unittest.TestCase):
 
         self.assertTrue(result["proved"])
         self.assertEqual(collect_counts, {"zero": 1, "one": 1})
+        self.assertEqual(len(result["case_results"]), 1)
+        case_result = result["case_results"][0]
+        self.assertEqual(case_result["feasibility_status"], "not feasible")
+        self.assertEqual(len(case_result["side_feasibility_reports"]), 2)
+        self.assertEqual(
+            [
+                report["feasibility_status"]
+                for report in case_result["side_feasibility_reports"]
+            ],
+            ["feasible", "feasible"],
+        )
 
     def test_combined_infeasibility_with_matching_infeasible_sides_is_proved(self):
         base_ctx = SpecContext("matching_infeasible_sides")
