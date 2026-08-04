@@ -164,6 +164,55 @@ class TestMakeDesignsHtml(unittest.TestCase):
 
         self.assertEqual(html.count('<td class="elapsed">n/a</td>'), 4)
 
+    def test_timeout_renders_wall_time_instead_of_solver_time(self):
+        report = {
+            "designs": {
+                "slow": {
+                    "elapsed_s": 4.0,
+                    "checks": {
+                        "determinism": {
+                            "status": "timeout",
+                            "proved": False,
+                            "elapsed_s": 0.125,
+                            "wall_elapsed_s": 3.5,
+                        },
+                        "specification": {
+                            "status": "passed",
+                            "proved": True,
+                            "elapsed_s": 0.75,
+                            "wall_elapsed_s": 1.0,
+                        },
+                    },
+                }
+            }
+        }
+
+        html = make_designs_html.build_html(report, Path("run_designs.json"))
+
+        self.assertIn('<td class="elapsed">3.500 s (wall)</td>', html)
+        self.assertIn('<td class="elapsed">0.750 s</td>', html)
+        self.assertNotIn('<td class="elapsed">0.125 s</td>', html)
+
+    def test_timeout_with_invalid_wall_time_renders_as_not_available(self):
+        report = {
+            "designs": {
+                "slow": {
+                    "elapsed_s": 1.0,
+                    "checks": {
+                        "determinism": {
+                            "status": "timeout",
+                            "wall_elapsed_s": "invalid",
+                        }
+                    },
+                }
+            }
+        }
+
+        html = make_designs_html.build_html(report, Path("run_designs.json"))
+
+        self.assertIn('<td class="elapsed">n/a</td>', html)
+        self.assertNotIn("n/a (wall)", html)
+
     def test_cli_reads_and_writes_custom_report_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             report_dir = Path(temp_dir)

@@ -107,6 +107,37 @@ class TestRunDesigns(unittest.TestCase):
             design_runner.parse_args(["--report", "custom/result.json"]).report,
             Path("custom/result.json"),
         )
+        worker_args = design_runner.parse_args(
+            ["--design", "bf16_relu", "--check", "specification"]
+        )
+        self.assertEqual(worker_args.design, "bf16_relu")
+        self.assertEqual(worker_args.check, "specification")
+
+    def test_runner_supports_direct_script_execution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(design_runner.RUNNER_PATH),
+                    "--design",
+                    "CSA_tree4",
+                    "--check",
+                    "determinism",
+                    "--result-file",
+                    str(result_path),
+                ],
+                cwd=temp_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(set(result["checks"]), {"determinism"})
 
     def test_curated_registry_builds_every_design(self):
         expected_names = [
@@ -175,18 +206,68 @@ class TestRunDesigns(unittest.TestCase):
         design.check_spec.assert_called_once_with()
         self.assertIn("determinism was not proved", stderr.getvalue())
 
-    def test_failure_and_timeout_do_not_prevent_later_designs_from_running(self):
+    def test_check_design_can_run_only_the_selected_check(self):
+        design = design_runner._build_bf16_relu()
+        design.check_determinism = Mock()
+        design.check_spec = Mock(
+            return_value=CheckResult(
+                proved=True,
+                requirement_report=None,
+                cases=[],
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "design.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                proved = design_runner.check_design(
+                    design_runner.DesignCase("test_design", lambda: design),
+                    check_name="specification",
+                    result_path=result_path,
+                )
+            design_report = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(proved)
+        self.assertEqual(set(design_report["checks"]), {"specification"})
+        design.check_determinism.assert_not_called()
+        design.check_spec.assert_called_once_with()
+
+    def test_checks_get_independent_timeouts_and_later_designs_still_run(self):
         designs = (
             design_runner.DesignCase("first", Mock()),
             design_runner.DesignCase("broken", Mock()),
             design_runner.DesignCase("last", Mock()),
         )
-        statuses = iter(("passed", "timeout", "failed"))
+        statuses = iter(
+            (
+                "passed",
+                "passed",
+                "timeout",
+                "passed",
+                "failed",
+                "failed",
+            )
+        )
         calls = []
 
-        def run(name, timeout_s):
-            calls.append((name, timeout_s))
-            return next(statuses)
+        def run(name, check_name, timeout_s):
+            calls.append((name, check_name, timeout_s))
+            worker_status = next(statuses)
+            check_status = {
+                "passed": "passed",
+                "failed": "failed",
+                "timeout": "running",
+            }[worker_status]
+            fragment = {
+                "checks": {
+                    check_name: {
+                        "status": check_status,
+                        "proved": check_status == "passed",
+                        "elapsed_s": 0.25,
+                    }
+                }
+            }
+            return worker_status, fragment, 0.5
 
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -208,14 +289,18 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                ("first", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
-                ("broken", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
-                ("last", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+                ("first", "determinism", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+                ("first", "specification", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+                ("broken", "determinism", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+                ("broken", "specification", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+                ("last", "determinism", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
+                ("last", "specification", design_runner.DEFAULT_DESIGN_TIMEOUT_S),
             ],
         )
         self.assertIn("Passed 1/3 designs.", stdout.getvalue())
         self.assertIn(
-            f"[TIMEOUT] broken exceeded {design_runner.DEFAULT_DESIGN_TIMEOUT_S:g} seconds",
+            f"[TIMEOUT] broken determinism exceeded "
+            f"{design_runner.DEFAULT_DESIGN_TIMEOUT_S:g} seconds",
             stderr.getvalue(),
         )
         self.assertIn("last (failed)", stderr.getvalue())
@@ -223,6 +308,12 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(
             {name: result["status"] for name, result in report["designs"].items()},
             {"first": "passed", "broken": "timeout", "last": "failed"},
+        )
+        self.assertEqual(
+            report["designs"]["broken"]["checks"]["determinism"][
+                "wall_elapsed_s"
+            ],
+            0.5,
         )
 
     def test_json_report_preserves_case_tool_sequence_and_metrics(self):
@@ -280,41 +371,252 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(case["tools"][2]["phase"], "side_feasibility")
         self.assertNotIn("old_ctx", json.dumps(serialized))
 
-    def test_timeout_marks_the_active_checkpointed_check(self):
-        designs = (design_runner.DesignCase("slow", Mock()),)
-        fragment = {
-            "name": "slow",
-            "status": "running",
-            "elapsed_s": 1.0,
-            "checks": {
-                "determinism": {"status": "passed", "proved": True},
-                "specification": {"status": "running", "proved": False},
-            },
+    def test_specification_runs_after_every_unsuccessful_determinism_outcome(self):
+        scenarios = {
+            "failed": (
+                "failed",
+                {"checks": {"determinism": {"status": "failed", "proved": False}}},
+            ),
+            "error": (
+                "failed",
+                {"checks": {"determinism": {"status": "error", "proved": False}}},
+            ),
+            "timeout": (
+                "timeout",
+                {"checks": {"determinism": {"status": "running", "proved": False}}},
+            ),
+            "build-failure": (
+                "failed",
+                {
+                    "error": {"phase": "build", "type": "ValueError", "message": "bad"},
+                    "checks": {"determinism": {"status": "error", "proved": False}},
+                },
+            ),
         }
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            report_path = Path(temp_dir) / "custom.json"
-            with patch.object(
-                design_runner,
-                "_run_design_subprocess",
-                return_value=("timeout", fragment, 2.0),
-            ):
+        for scenario, determinism_outcome in scenarios.items():
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temp_dir:
+                calls = []
+
+                def run(_name, check_name, _timeout_s):
+                    calls.append(check_name)
+                    if check_name == "determinism":
+                        status, fragment = determinism_outcome
+                        return status, fragment, 1.0
+                    return (
+                        "passed",
+                        {
+                            "checks": {
+                                "specification": {
+                                    "status": "passed",
+                                    "proved": True,
+                                    "elapsed_s": 0.2,
+                                }
+                            }
+                        },
+                        0.3,
+                    )
+
                 with (
+                    patch.object(design_runner, "_run_design_subprocess", side_effect=run),
                     contextlib.redirect_stdout(io.StringIO()),
                     contextlib.redirect_stderr(io.StringIO()),
                 ):
                     status = design_runner.run_designs(
-                        designs,
-                        timeout_s=1.0,
-                        report_path=report_path,
+                        (design_runner.DesignCase("demo", Mock()),),
+                        report_path=Path(temp_dir) / "report.json",
                     )
+
+                self.assertEqual(status, 1)
+                self.assertEqual(calls, ["determinism", "specification"])
+
+    def test_specification_runs_after_worker_startup_failure(self):
+        calls = []
+
+        def run(_name, check_name, _timeout_s):
+            calls.append(check_name)
+            if check_name == "determinism":
+                raise OSError("cannot spawn")
+            return (
+                "passed",
+                {"checks": {"specification": {"status": "passed", "proved": True}}},
+                0.25,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.json"
+            with (
+                patch.object(design_runner, "_run_design_subprocess", side_effect=run),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                status = design_runner.run_designs(
+                    (design_runner.DesignCase("demo", Mock()),),
+                    report_path=report_path,
+                )
             report = json.loads(report_path.read_text(encoding="utf-8"))
 
         self.assertEqual(status, 1)
+        self.assertEqual(calls, ["determinism", "specification"])
+        determinism = report["designs"]["demo"]["checks"]["determinism"]
+        self.assertEqual(determinism["status"], "error")
+        self.assertEqual(determinism["error"]["phase"], "subprocess")
+        self.assertIn("wall_elapsed_s", determinism)
+
+    def test_specification_timeout_and_dual_timeout_make_design_timeout(self):
+        for outcomes in (("passed", "timeout"), ("timeout", "timeout")):
+            with self.subTest(outcomes=outcomes), tempfile.TemporaryDirectory() as temp_dir:
+                worker_statuses = iter(outcomes)
+
+                def run(_name, check_name, _timeout_s):
+                    worker_status = next(worker_statuses)
+                    check_result = {
+                        "status": "passed" if worker_status == "passed" else "running",
+                        "proved": worker_status == "passed",
+                    }
+                    if worker_status == "passed":
+                        check_result["elapsed_s"] = 0.5
+                    return (
+                        worker_status,
+                        {"checks": {check_name: check_result}},
+                        2.0,
+                    )
+
+                with (
+                    patch.object(design_runner, "_run_design_subprocess", side_effect=run),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    status = design_runner.run_designs(
+                        (design_runner.DesignCase("slow", Mock()),),
+                        timeout_s=1.0,
+                        report_path=Path(temp_dir) / "report.json",
+                    )
+                report = json.loads(
+                    (Path(temp_dir) / "report.json").read_text(encoding="utf-8")
+                )
+
+                self.assertEqual(status, 1)
+                self.assertEqual(report["designs"]["slow"]["status"], "timeout")
+                self.assertEqual(
+                    report["designs"]["slow"]["checks"]["specification"],
+                    {"status": "timeout", "proved": False, "wall_elapsed_s": 2.0},
+                )
+
+    def test_interruption_stops_before_specification(self):
+        calls = []
+
+        def run(_name, check_name, _timeout_s):
+            calls.append(check_name)
+            return "interrupted", None, 0.1
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.json"
+            with (
+                patch.object(design_runner, "_run_design_subprocess", side_effect=run),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                design_runner.run_designs(
+                    (design_runner.DesignCase("demo", Mock()),),
+                    report_path=report_path,
+                )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(calls, ["determinism"])
+        self.assertEqual(report["status"], "interrupted")
         self.assertEqual(
-            report["designs"]["slow"]["checks"]["specification"]["status"],
-            "timeout",
+            report["designs"]["demo"]["checks"]["determinism"]["status"],
+            "interrupted",
         )
+
+    def test_design_elapsed_is_parent_observed_total(self):
+        wall_times = iter((1.0, 2.0))
+
+        def run(_name, check_name, _timeout_s):
+            return (
+                "passed",
+                {
+                    "checks": {
+                        check_name: {
+                            "status": "passed",
+                            "proved": True,
+                            "elapsed_s": 0.25,
+                        }
+                    }
+                },
+                next(wall_times),
+            )
+
+        perf_counter_values = iter((10.0, 10.1, 10.1, 12.0, 12.1, 12.1, 15.0, 15.5))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.json"
+            with (
+                patch.object(design_runner, "_run_design_subprocess", side_effect=run),
+                patch.object(
+                    design_runner.time,
+                    "perf_counter",
+                    side_effect=perf_counter_values,
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = design_runner.run_designs(
+                    (design_runner.DesignCase("demo", Mock()),),
+                    report_path=report_path,
+                )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(status, 0)
+        result = report["designs"]["demo"]
+        self.assertEqual(result["elapsed_s"], 5.5)
+        self.assertEqual(
+            result["checks"]["determinism"]["wall_elapsed_s"],
+            1.0,
+        )
+        self.assertEqual(
+            result["checks"]["specification"]["wall_elapsed_s"],
+            2.0,
+        )
+
+    def test_worker_interrupt_terminates_active_process_group(self):
+        process = Mock(pid=1234)
+        process.wait.side_effect = KeyboardInterrupt
+
+        with (
+            patch.object(design_runner.subprocess, "Popen", return_value=process) as popen,
+            patch.object(design_runner, "_terminate_process_group") as terminate,
+        ):
+            status, _result, _elapsed_s = design_runner._run_design_subprocess(
+                "CSA_tree4",
+                "specification",
+                17.0,
+            )
+
+        self.assertEqual(status, "interrupted")
+        terminate.assert_called_once_with(process)
+        command = popen.call_args.args[0]
+        self.assertIn("--check", command)
+        self.assertEqual(command[command.index("--check") + 1], "specification")
+        process.wait.assert_called_once_with(timeout=17.0)
+
+    def test_worker_timeout_terminates_active_process_group(self):
+        process = Mock(pid=1234)
+        process.wait.side_effect = subprocess.TimeoutExpired("worker", 17.0)
+
+        with (
+            patch.object(design_runner.subprocess, "Popen", return_value=process),
+            patch.object(design_runner, "_terminate_process_group") as terminate,
+        ):
+            status, _result, _elapsed_s = design_runner._run_design_subprocess(
+                "CSA_tree4",
+                "determinism",
+                17.0,
+            )
+
+        self.assertEqual(status, "timeout")
+        terminate.assert_called_once_with(process)
+        process.wait.assert_called_once_with(timeout=17.0)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "requires prctl")
     def test_design_process_exits_when_parent_dies(self):

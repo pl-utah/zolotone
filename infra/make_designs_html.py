@@ -15,6 +15,10 @@ from typing import Any
 DEFAULT_REPORT_DIR = Path("report")
 REPORT_FILENAME = "run_designs.json"
 HTML_FILENAME = "index.html"
+CHECK_NAMES = ("determinism", "specification")
+EMPTY_TABLE_ROW = (
+    '<tr><td class="empty" colspan="6">No designs in this report.</td></tr>'
+)
 
 STATUS_LABELS = {
     "passed": "PASSED",
@@ -67,7 +71,7 @@ def _validate_report(report: Any) -> dict[str, Any]:
                 "invalid report structure: "
                 f"checks for design {name!r} must be an object"
             )
-        for check_name in ("determinism", "specification"):
+        for check_name in CHECK_NAMES:
             if check_name in checks and not isinstance(checks[check_name], dict):
                 raise ReportError(
                     "invalid report structure: "
@@ -104,6 +108,18 @@ def _format_elapsed(value: Any) -> str:
     return f"{elapsed:.3f} s"
 
 
+def _format_check_elapsed(check: Any) -> str:
+    if not isinstance(check, dict):
+        return "n/a"
+
+    timed_out = check.get("status") == "timeout"
+    elapsed_key = "wall_elapsed_s" if timed_out else "elapsed_s"
+    elapsed = _format_elapsed(check.get(elapsed_key))
+    if timed_out and elapsed != "n/a":
+        return f"{elapsed} (wall)"
+    return elapsed
+
+
 def _status_badge(check: Any) -> str:
     if not isinstance(check, dict) or "status" not in check:
         status = "not-run"
@@ -119,39 +135,38 @@ def _status_badge(check: Any) -> str:
     return f'<span class="badge badge-{status}">{escape(label)}</span>'
 
 
-def _display_metadata(value: Any) -> str:
-    return "n/a" if value is None else str(value)
+def _elapsed_cell(elapsed: str) -> str:
+    return f'<td class="elapsed">{escape(elapsed)}</td>'
+
+
+def _render_check_cells(check: Any) -> str:
+    status_cell = f"<td>{_status_badge(check)}</td>"
+    elapsed_cell = _elapsed_cell(_format_check_elapsed(check))
+    return status_cell + elapsed_cell
+
+
+def _render_design_row(name: str, result: dict[str, Any]) -> str:
+    checks = result.get("checks", {})
+    cells = (
+        f'<th scope="row">{escape(name)}</th>',
+        _elapsed_cell(_format_elapsed(result.get("elapsed_s"))),
+        _render_check_cells(checks.get("determinism")),
+        _render_check_cells(checks.get("specification")),
+    )
+    return f"<tr>{''.join(cells)}</tr>"
+
+
+def _display_text(value: Any) -> str:
+    return escape("n/a" if value is None else str(value))
 
 
 def build_html(report: dict[str, Any], source_path: Path) -> str:
     report = _validate_report(report)
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    designs = report["designs"]
-    rows = []
-    for name, result in designs.items():
-        checks = result.get("checks", {})
-        determinism = checks.get("determinism")
-        specification = checks.get("specification")
-        rows.append(
-            "<tr>"
-            f'<th scope="row">{escape(name)}</th>'
-            f'<td class="elapsed">{escape(_format_elapsed(result.get("elapsed_s")))}</td>'
-            f'<td>{_status_badge(determinism)}</td>'
-            f'<td class="elapsed">{escape(_format_elapsed(determinism.get("elapsed_s") if determinism else None))}</td>'
-            f'<td>{_status_badge(specification)}</td>'
-            f'<td class="elapsed">{escape(_format_elapsed(specification.get("elapsed_s") if specification else None))}</td>'
-            "</tr>"
-        )
-
-    if not rows:
-        rows.append(
-            '<tr><td class="empty" colspan="6">No designs in this report.</td></tr>'
-        )
-
-    source = escape(str(source_path))
-    started_at = escape(_display_metadata(report.get("started_at")))
-    finished_at = escape(_display_metadata(report.get("finished_at")))
-    generated = escape(generated_at)
+    rows = "".join(
+        _render_design_row(name, result)
+        for name, result in report["designs"].items()
+    ) or EMPTY_TABLE_ROW
 
     return f"""<!doctype html>
 <html lang="en">
@@ -191,10 +206,10 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
   <main>
     <h1>Design Verification Report</h1>
     <p class="metadata">
-      Source: {source}<br>
-      Report started: {started_at}<br>
-      Report finished: {finished_at}<br>
-      Generated at: {generated}
+      Source: {_display_text(source_path)}<br>
+      Report started: {_display_text(report.get("started_at"))}<br>
+      Report finished: {_display_text(report.get("finished_at"))}<br>
+      Generated at: {_display_text(generated_at)}
     </p>
     <div class="table-wrap">
       <table>
@@ -209,7 +224,7 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
           </tr>
         </thead>
         <tbody>
-          {''.join(rows)}
+          {rows}
         </tbody>
       </table>
     </div>

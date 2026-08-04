@@ -19,10 +19,13 @@ from typing import Any
 DEFAULT_DESIGN_TIMEOUT_S = 20 * 60
 DEFAULT_REPORT_PATH = Path("report/run_designs.json")
 REPORT_SCHEMA_VERSION = 1
+CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5
 CHILD_PROCESS_TERMINATION_GRACE_S = 0.25
 PARENT_PID_ENV = "ZOLOTONE_RUN_DESIGNS_PARENT_PID"
 PR_SET_PDEATHSIG = 1
+RUNNER_PATH = Path(__file__).resolve()
+PROJECT_ROOT = RUNNER_PATH.parent.parent
 
 def _terminate_own_process_group(signum, _frame) -> None:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -56,6 +59,10 @@ def _arm_parent_death_signal() -> None:
 
 # Arm child cleanup before importing the substantially larger design modules.
 _arm_parent_death_signal()
+
+# Direct execution adds infra/, rather than the repository root, to sys.path.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 from examples.CSA import CSA_tree4
@@ -209,8 +216,12 @@ def _checkpoint(path: Path | None, result: dict[str, Any]) -> None:
 def check_design(
     design_case: DesignCase,
     *,
+    check_name: str | None = None,
     result_path: Path | None = None,
 ) -> bool:
+    if check_name is not None and check_name not in CHECK_NAMES:
+        raise ValueError(f"Unknown check: {check_name}")
+
     started_at = time.perf_counter()
     design_result = _initial_design_result(design_case.name)
     _checkpoint(result_path, design_result)
@@ -222,11 +233,18 @@ def check_design(
                 f"builder returned {type(design).__name__}, expected Node"
             )
     except Exception as exc:
+        error = {"phase": "build", **_error_details(exc)}
         design_result.update(
             status="failed",
             elapsed_s=time.perf_counter() - started_at,
-            error={"phase": "build", **_error_details(exc)},
+            error=error,
         )
+        if check_name is not None:
+            design_result["checks"][check_name] = {
+                "status": "error",
+                "proved": False,
+                "error": error,
+            }
         _checkpoint(result_path, design_result)
         print(f"[ERROR] Could not build {design_case.name}", file=sys.stderr)
         traceback.print_exc()
@@ -234,13 +252,18 @@ def check_design(
 
     print(f"Built {design_case.name}: {design.node_type}", flush=True)
     proved = True
-    checks = (
-        ("determinism", design.check_determinism),
-        ("specification", design.check_spec),
-    )
-    for check_name, check in checks:
-        print(f"Checking {design_case.name} {check_name}...", flush=True)
-        design_result["checks"][check_name] = {
+    checks = {
+        "determinism": design.check_determinism,
+        "specification": design.check_spec,
+    }
+    selected_checks = CHECK_NAMES if check_name is None else (check_name,)
+    for selected_check_name in selected_checks:
+        check = checks[selected_check_name]
+        print(
+            f"Checking {design_case.name} {selected_check_name}...",
+            flush=True,
+        )
+        design_result["checks"][selected_check_name] = {
             "status": "running",
             "proved": False,
         }
@@ -250,29 +273,32 @@ def check_design(
             result = check()
             if not isinstance(result, CheckResult):
                 raise TypeError(
-                    f"{check_name} check returned {type(result).__name__}, "
+                    f"{selected_check_name} check returned "
+                    f"{type(result).__name__}, "
                     "expected CheckResult"
                 )
             serialized_result = result.to_json()
         except Exception as exc:
             proved = False
-            design_result["checks"][check_name] = {
+            design_result["checks"][selected_check_name] = {
                 "status": "error",
                 "proved": False,
                 "error": _error_details(exc),
             }
             print(
-                f"[ERROR] {design_case.name} {check_name} check raised an exception",
+                f"[ERROR] {design_case.name} {selected_check_name} check "
+                "raised an exception",
                 file=sys.stderr,
             )
             traceback.print_exc()
         else:
             check_proved = result.get("proved") is True
             proved = proved and check_proved
-            design_result["checks"][check_name] = serialized_result
+            design_result["checks"][selected_check_name] = serialized_result
             if not check_proved:
                 print(
-                    f"[FAIL] {design_case.name} {check_name} was not proved",
+                    f"[FAIL] {design_case.name} {selected_check_name} "
+                    "was not proved",
                     file=sys.stderr,
                 )
 
@@ -319,6 +345,7 @@ def _read_design_result(path: Path) -> dict[str, Any] | None:
 
 def _run_design_subprocess(
     name: str,
+    check_name: str,
     timeout_s: float,
 ) -> tuple[str, dict[str, Any] | None, float]:
     child_env = os.environ.copy()
@@ -329,10 +356,11 @@ def _run_design_subprocess(
         process = subprocess.Popen(
             [
                 sys.executable,
-                "-m",
-                "infra.run_designs",
+                str(RUNNER_PATH),
                 "--design",
                 name,
+                "--check",
+                check_name,
                 "--result-file",
                 str(result_path),
             ],
@@ -352,10 +380,60 @@ def _run_design_subprocess(
         return status, _read_design_result(result_path), elapsed_s
 
 
-def _mark_active_check(design_result: dict[str, Any], status: str) -> None:
-    for check_result in design_result.get("checks", {}).values():
-        if check_result.get("status") == "running":
-            check_result["status"] = status
+def _check_result_from_worker(
+    check_name: str,
+    worker_status: str,
+    worker_result: dict[str, Any] | None,
+    wall_elapsed_s: float,
+    *,
+    worker_error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    check_result = None
+    if worker_result is not None:
+        checks = worker_result.get("checks")
+        if isinstance(checks, dict) and isinstance(checks.get(check_name), dict):
+            check_result = dict(checks[check_name])
+
+    if worker_status in {"timeout", "interrupted"}:
+        if check_result is None:
+            check_result = {}
+        check_result.update(status=worker_status, proved=False)
+    elif check_result is None or check_result.get("status") == "running":
+        error = worker_error
+        if error is None and worker_result is not None:
+            candidate = worker_result.get("error")
+            if isinstance(candidate, dict):
+                error = candidate
+        if error is None:
+            error = {
+                "phase": "worker",
+                "type": "WorkerResultError",
+                "message": (
+                    f"{check_name} worker exited with status {worker_status!r} "
+                    "without a completed check result"
+                ),
+            }
+        check_result = {
+            "status": "error",
+            "proved": False,
+            "error": error,
+        }
+
+    check_result["wall_elapsed_s"] = wall_elapsed_s
+    return check_result
+
+
+def _design_status(checks: dict[str, Any]) -> str:
+    statuses = [checks.get(name, {}).get("status") for name in CHECK_NAMES]
+    if "timeout" in statuses:
+        return "timeout"
+    if all(
+        checks.get(name, {}).get("status") == "passed"
+        and checks.get(name, {}).get("proved") is True
+        for name in CHECK_NAMES
+    ):
+        return "passed"
+    return "failed"
 
 
 def _new_report(timeout_s: float) -> dict[str, Any]:
@@ -385,43 +463,86 @@ def run_designs(
 
     for design_case in designs:
         total += 1
-        print(
-            f"[RUN] {design_case.name} "
-            f"(timeout: {timeout_s:g} seconds)",
-            flush=True,
-        )
-        call_started_at = time.perf_counter()
-        try:
-            outcome = _run_design_subprocess(design_case.name, timeout_s)
-            if isinstance(outcome, str):
-                status = outcome
-                design_result = None
-                elapsed_s = time.perf_counter() - call_started_at
-            else:
-                status, design_result, elapsed_s = outcome
-        except Exception as exc:
-            status = "failed"
-            elapsed_s = time.perf_counter() - call_started_at
-            design_result = _initial_design_result(design_case.name)
-            design_result["error"] = {
-                "phase": "subprocess",
-                **_error_details(exc),
-            }
+        design_started_at = time.perf_counter()
+        design_result = _initial_design_result(design_case.name)
+        report["designs"][design_case.name] = design_result
+
+        for check_name in CHECK_NAMES:
             print(
-                f"[ERROR] Could not start {design_case.name}",
-                file=sys.stderr,
+                f"[RUN] {design_case.name} {check_name} "
+                f"(timeout: {timeout_s:g} seconds)",
                 flush=True,
             )
-            traceback.print_exc()
+            design_result["checks"][check_name] = {
+                "status": "running",
+                "proved": False,
+            }
+            design_result["elapsed_s"] = time.perf_counter() - design_started_at
+            _atomic_write_json(report_path, report)
 
-        if design_result is None:
-            design_result = _initial_design_result(design_case.name)
-        design_result["name"] = design_case.name
+            check_started_at = time.perf_counter()
+            try:
+                worker_status, worker_result, wall_elapsed_s = (
+                    _run_design_subprocess(
+                        design_case.name,
+                        check_name,
+                        timeout_s,
+                    )
+                )
+                check_result = _check_result_from_worker(
+                    check_name,
+                    worker_status,
+                    worker_result,
+                    wall_elapsed_s,
+                )
+            except KeyboardInterrupt:
+                worker_status = "interrupted"
+                wall_elapsed_s = time.perf_counter() - check_started_at
+                check_result = _check_result_from_worker(
+                    check_name,
+                    worker_status,
+                    None,
+                    wall_elapsed_s,
+                )
+            except Exception as exc:
+                worker_status = "failed"
+                wall_elapsed_s = time.perf_counter() - check_started_at
+                error = {"phase": "subprocess", **_error_details(exc)}
+                check_result = _check_result_from_worker(
+                    check_name,
+                    worker_status,
+                    None,
+                    wall_elapsed_s,
+                    worker_error=error,
+                )
+                print(
+                    f"[ERROR] Could not start {design_case.name} {check_name}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                traceback.print_exc()
+
+            design_result["checks"][check_name] = check_result
+            design_result["elapsed_s"] = time.perf_counter() - design_started_at
+            _atomic_write_json(report_path, report)
+
+            if worker_status == "timeout":
+                print(
+                    f"[TIMEOUT] {design_case.name} {check_name} exceeded "
+                    f"{timeout_s:g} seconds",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif worker_status == "interrupted":
+                design_result["status"] = "interrupted"
+                report["status"] = "interrupted"
+                report["finished_at"] = _utc_timestamp()
+                _atomic_write_json(report_path, report)
+                raise KeyboardInterrupt
+
+        status = _design_status(design_result["checks"])
         design_result["status"] = status
-        design_result["elapsed_s"] = elapsed_s
-        if status in {"timeout", "interrupted"}:
-            _mark_active_check(design_result, status)
-        report["designs"][design_case.name] = design_result
+        design_result["elapsed_s"] = time.perf_counter() - design_started_at
         _atomic_write_json(report_path, report)
 
         if status == "passed":
@@ -429,16 +550,7 @@ def run_designs(
             print(f"[PASS] {design_case.name}", flush=True)
         elif status == "timeout":
             failed[design_case.name] = status
-            print(
-                f"[TIMEOUT] {design_case.name} exceeded {timeout_s:g} seconds",
-                file=sys.stderr,
-                flush=True,
-            )
-        elif status == "interrupted":
-            report["status"] = "interrupted"
-            report["finished_at"] = _utc_timestamp()
-            _atomic_write_json(report_path, report)
-            raise KeyboardInterrupt
+            print(f"[FAIL] {design_case.name} (timeout)", file=sys.stderr, flush=True)
         else:
             failed[design_case.name] = status
             print(f"[FAIL] {design_case.name}", file=sys.stderr, flush=True)
@@ -472,11 +584,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--check",
+        choices=CHECK_NAMES,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--result-file",
         type=Path,
         help=argparse.SUPPRESS,
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.check is not None and args.design is None:
+        parser.error("--check requires --design")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -484,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.design is not None:
         return 0 if check_design(
             _find_design(args.design),
+            check_name=args.check,
             result_path=args.result_file,
         ) else 1
     return run_designs(report_path=args.report)
