@@ -21,7 +21,12 @@ from egglog import EGraph
 
 from zolotone import *
 from zolotone.ast import nodes as ast_nodes
-from zolotone.egglog.rules import constant_rules, load_rules
+from zolotone.egglog.rules import (
+    check_rules,
+    constant_rules,
+    load_rules,
+    rewrite_rules,
+)
 from zolotone.smt import dreal_check_eq, z3_check_eq
 from zolotone.solver import engine as solver_engine
 from zolotone.solver.report import (
@@ -351,6 +356,19 @@ os._exit(0)
             except ProcessLookupError:
                 pass
             self.fail(f"Design process {child_pid} survived its parent")
+
+
+class TestEgglogRewriteRules(unittest.TestCase):
+    def test_rewrite_rules_are_sound(self):
+        results = check_rules(rewrite_rules(), z3_timeout_ms=10000)
+        invalid_rules = {
+            name: report
+            for name, report in results.items()
+            if report["z3_status"] != "unsat"
+            and report["dreal_status"] != "unsat"
+        }
+
+        self.assertEqual(invalid_rules, {})
 
 
 class TestConstantFolding(unittest.TestCase):
