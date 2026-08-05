@@ -309,6 +309,7 @@ def uq_split(x: Node, idx: int) -> Node:
         hi = ctx.fresh_real("hi")
         
         two = ctx.two()
+        zero = ctx.zero()
         
         # x = hi * 2^lo_int_bits + lo * 2^-hi_frac_bits
         ctx.assume(
@@ -316,6 +317,13 @@ def uq_split(x: Node, idx: int) -> Node:
                 (hi * two ** ctx.real_val(lo_int_bits))
                 + (lo * two ** (-ctx.real_val(hi_frac_bits)))
             )
+        )
+        # Preserve the exact zero behavior explicitly. Although lo and hi are
+        # unsigned, the simplifier does not always derive both equalities from
+        # the decomposition equation when x has simplified to zero.
+        ctx.assume(
+            (~x.eq(zero))
+            | (lo.eq(zero) & hi.eq(zero))
         )
         return (lo, hi)
     
