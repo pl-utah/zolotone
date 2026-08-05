@@ -150,10 +150,8 @@ _download_ac_int:
 install: _python-deps _install-dreal _install-rival _download_ac_int
 
 unit-tests:
-	@echo "Running infra/test_make_designs_html.py..."
-	@$(VENV_PYTHON) -m unittest infra.test_make_designs_html
-	@echo "Running infra/unittests2.py..."
-	@$(VENV_PYTHON) -m infra.unittests2
+	@echo "Running infra/unittests.py..."
+	@$(VENV_PYTHON) -m infra.unittests
 	@echo "Complete"
 
 # Bazelisk is a non-sudo version of Bazel used for nightly.
@@ -163,9 +161,7 @@ _bazelisk:
 	chmod +x "$$HOME/.local/bin/bazel"
 
 nightly: clean _bazelisk install
-	@echo "Running design checks..."
-	@status=0; \
-		$(VENV_PYTHON) infra/run_designs.py --report "$(DESIGNS_REPORT)" || status=$$?; \
-		$(VENV_PYTHON) infra/make_designs_html.py --report-dir "$(REPORTS_DIR)" || exit $$?; \
-		echo "Reports written to $(REPORTS_DIR)"; \
-		exit $$status
+	@echo "Running design checks..."; \
+	$(VENV_PYTHON) infra/run_designs.py --report "$(DESIGNS_REPORT)"; \
+	$(VENV_PYTHON) infra/make_designs_html.py --report-dir "$(REPORTS_DIR)"; \
+	echo "Reports written to $(REPORTS_DIR)"; \

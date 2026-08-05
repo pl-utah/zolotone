@@ -6,7 +6,12 @@ from ..types.runtime import RuntimeType
 from ..types.static import StaticType
 from ..utils import make_fixed_arguments
 from ..solver.engine import check_equivalence as _solver_check_equivalence
-from ..solver.report import CaseVerificationResult, CheckResult, ProofReport
+from ..solver.report import (
+    CaseVerificationResult,
+    CheckResult,
+    ProofReport,
+    VerificationObserver,
+)
 from .node import Node
 from .proofs import SpecRecorder, record_specs
 from ..spec import FPExpr, SpecContext, special_encoding
@@ -272,6 +277,7 @@ def check_equivalence(
     base_ctx: SpecContext,
     inputs: list[tp.Any],
     schedule: list[str | dict[str, tp.Any]] | None = None,
+    observer: VerificationObserver | None = None,
 ):
     if first.name == second.name:
         raise ValueError("Equivalent specification sides must have distinct names")
@@ -312,6 +318,12 @@ def check_equivalence(
     for case_ctx in cases:
         labels = _case_labels(case_ctx.name)
         status, proof_trace = _solver_check_equivalence(case_ctx, schedule=schedule)
+        if observer is not None:
+            observer.proof_trace_completed(
+                case_name=case_ctx.name,
+                status=status,
+                proof_trace=proof_trace,
+            )
         combined_feasibility = proof_trace[0].get("feasibility_status", "unknown")
         side_feasibility_reports = []
 
@@ -326,18 +338,17 @@ def check_equivalence(
             case_proved = status == "unsat"
 
         proved = proved and case_proved
-        case_results.append(
-            CaseVerificationResult(
-                name=case_ctx.name,
-                proved=case_proved,
-                status=status,
-                feasibility_status=combined_feasibility,
-                proof_trace=proof_trace,
-                side_feasibility_reports=side_feasibility_reports,
-            )
+        case_result = CaseVerificationResult(
+            name=case_ctx.name,
+            proved=case_proved,
+            status=status,
+            feasibility_status=combined_feasibility,
+            proof_trace=proof_trace,
+            side_feasibility_reports=side_feasibility_reports,
         )
-        if not proved:
-            break
+        case_results.append(case_result)
+        if observer is not None:
+            observer.case_completed(case_result)
 
     return CheckResult(
         proved=proved,
@@ -349,6 +360,7 @@ def check_equivalence(
 def _check_determinism(
     node: "composite | primitive",
     schedule: list[str | dict[str, tp.Any]] | None = None,
+    observer: VerificationObserver | None = None,
 ):
     base_ctx = SpecContext(f"{node.name}_determinism")
     inputs = [base_ctx.spec_of(arg) for arg in node.inner_args]
@@ -366,6 +378,7 @@ def _check_determinism(
         base_ctx=base_ctx,
         inputs=inputs,
         schedule=schedule,
+        observer=observer,
     )
 
     print(f"{node.name} specification {'is' if result['proved'] else 'is not'} deterministic")
@@ -439,6 +452,7 @@ class composite(Node):
     def check_spec(
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
+        observer: VerificationObserver | None = None,
     ):
         base_ctx = self.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in self.inner_args]
@@ -465,6 +479,7 @@ class composite(Node):
             base_ctx=base_ctx,
             inputs=inputs,
             schedule=schedule,
+            observer=observer,
         )
         
         print(f"{self.ctx.name} {'has' if result['proved'] else 'has not'} been proved")
@@ -474,8 +489,13 @@ class composite(Node):
     def check_determinism(
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
+        observer: VerificationObserver | None = None,
     ):
-        return _check_determinism(self, schedule=schedule)
+        return _check_determinism(
+            self,
+            schedule=schedule,
+            observer=observer,
+        )
     
     def _validate_components(self, composite_name: str) -> None:
         visited: set[Node] = set()
@@ -600,8 +620,13 @@ class primitive(Node):
     def check_determinism(
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
+        observer: VerificationObserver | None = None,
     ):
-        return _check_determinism(self, schedule=schedule)
+        return _check_determinism(
+            self,
+            schedule=schedule,
+            observer=observer,
+        )
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):
         connector = "└── " if is_last else "├── "

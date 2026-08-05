@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 
 ProofStatus = Literal["sat", "unsat", "unknown"]
@@ -84,6 +84,20 @@ class CaseVerificationResult(dict[str, Any]):
             "elapsed_s": sum(tool["elapsed_s"] for tool in tools),
             "tools": tools,
         }
+
+
+class VerificationObserver(Protocol):
+    """Receives verification artifacts only after they have completed."""
+
+    def proof_trace_completed(
+        self,
+        *,
+        case_name: str,
+        status: ProofStatus,
+        proof_trace: list[ProofReport],
+    ) -> None: ...
+
+    def case_completed(self, result: CaseVerificationResult) -> None: ...
 
 
 class CheckResult(dict[str, Any]):

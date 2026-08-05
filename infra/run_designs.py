@@ -16,9 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DESIGN_TIMEOUT_S = 20 * 60
+DEFAULT_DESIGN_TIMEOUT_S = 5 * 60
 DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
 REPORT_SCHEMA_VERSION = 1
+REPORT_FILE_MODE = 0o644
 CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5
 CHILD_PROCESS_TERMINATION_GRACE_S = 0.25
@@ -76,7 +77,12 @@ from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
 from examples.fp32_to_bf16 import fp32_to_bf16
 from zolotone import BFloat16T, Float32T, Node, QT, Var
-from zolotone.solver import CheckResult
+from zolotone.solver import (
+    CaseVerificationResult,
+    CheckResult,
+    ProofReport,
+    VerificationObserver,
+)
 
 
 @dataclass(frozen=True)
@@ -186,6 +192,7 @@ def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
             temporary_path = Path(temporary_file.name)
             json.dump(value, temporary_file, indent=2, sort_keys=True)
             temporary_file.write("\n")
+        os.chmod(temporary_path, REPORT_FILE_MODE)
         os.replace(temporary_path, path)
     finally:
         if temporary_path is not None:
@@ -213,11 +220,63 @@ def _checkpoint(path: Path | None, result: dict[str, Any]) -> None:
         _atomic_write_json(path, result)
 
 
+class JsonlVerificationObserver(VerificationObserver):
+    """Durably records only proof traces and cases that have finished."""
+
+    def __init__(self, path: Path, check_name: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._check_name = check_name
+        self._handle = path.open("a", encoding="utf-8", buffering=1)
+
+    def _write(self, event: dict[str, Any]) -> None:
+        event["check"] = self._check_name
+        self._handle.write(json.dumps(event, sort_keys=True) + "\n")
+        self._handle.flush()
+
+    def proof_trace_completed(
+        self,
+        *,
+        case_name: str,
+        status: str,
+        proof_trace: list[ProofReport],
+    ) -> None:
+        self._write(
+            {
+                "type": "proof_trace",
+                "case_name": case_name,
+                "status": status,
+                "tools": [
+                    report.to_json(phase="proof")
+                    for report in proof_trace
+                ],
+            }
+        )
+
+    def case_completed(self, result: CaseVerificationResult) -> None:
+        self._write(
+            {
+                "type": "case",
+                "case_name": result["name"],
+                "status": result["status"],
+                "proved": bool(result["proved"]),
+                "feasibility": result["feasibility_status"] or "unknown",
+                "side_feasibility_tools": [
+                    report.to_json(phase="side_feasibility")
+                    for report in result["side_feasibility_reports"]
+                ],
+            }
+        )
+
+    def close(self) -> None:
+        self._handle.close()
+
+
 def check_design(
     design_case: DesignCase,
     *,
     check_name: str | None = None,
     result_path: Path | None = None,
+    progress_path: Path | None = None,
 ) -> bool:
     if check_name is not None and check_name not in CHECK_NAMES:
         raise ValueError(f"Unknown check: {check_name}")
@@ -259,6 +318,11 @@ def check_design(
     selected_checks = CHECK_NAMES if check_name is None else (check_name,)
     for selected_check_name in selected_checks:
         check = checks[selected_check_name]
+        observer = (
+            JsonlVerificationObserver(progress_path, selected_check_name)
+            if progress_path is not None
+            else None
+        )
         print(
             f"Checking {design_case.name} {selected_check_name}...",
             flush=True,
@@ -270,7 +334,7 @@ def check_design(
         design_result["elapsed_s"] = time.perf_counter() - started_at
         _checkpoint(result_path, design_result)
         try:
-            result = check()
+            result = check(observer=observer) if observer is not None else check()
             if not isinstance(result, CheckResult):
                 raise TypeError(
                     f"{selected_check_name} check returned "
@@ -301,6 +365,9 @@ def check_design(
                     "was not proved",
                     file=sys.stderr,
                 )
+        finally:
+            if observer is not None:
+                observer.close()
 
         design_result["elapsed_s"] = time.perf_counter() - started_at
         _checkpoint(result_path, design_result)
@@ -343,6 +410,104 @@ def _read_design_result(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _read_finished_results(path: Path, check_name: str) -> dict[str, Any]:
+    cases: dict[str, dict[str, Any]] = {}
+    completed_cases: set[str] = set()
+    completed_proof_traces = 0
+
+    try:
+        progress_file = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    with progress_file:
+        for line in progress_file:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("check") != check_name:
+                continue
+
+            case_name = event.get("case_name")
+            if not isinstance(case_name, str):
+                continue
+
+            if event.get("type") == "proof_trace":
+                tools = event.get("tools")
+                if not isinstance(tools, list):
+                    continue
+                completed_proof_traces += 1
+                cases[case_name] = {
+                    "status": event.get("status", "unknown"),
+                    "feasibility": (
+                        tools[-1].get("feasibility", "unknown")
+                        if tools and isinstance(tools[-1], dict)
+                        else "unknown"
+                    ),
+                    "proved": None,
+                    "elapsed_s": sum(
+                        tool.get("elapsed_s", 0.0)
+                        for tool in tools
+                        if isinstance(tool, dict)
+                        and isinstance(tool.get("elapsed_s", 0.0), (int, float))
+                    ),
+                    "tools": tools,
+                    "complete": False,
+                }
+            elif event.get("type") == "case":
+                side_tools = event.get("side_feasibility_tools", [])
+                if not isinstance(side_tools, list):
+                    continue
+                proof_tools = cases.get(case_name, {}).get("tools", [])
+                tools = [*proof_tools, *side_tools]
+                cases[case_name] = {
+                    "status": event.get("status", "unknown"),
+                    "feasibility": event.get("feasibility", "unknown"),
+                    "proved": event.get("proved") is True,
+                    "elapsed_s": sum(
+                        tool.get("elapsed_s", 0.0)
+                        for tool in tools
+                        if isinstance(tool, dict)
+                        and isinstance(tool.get("elapsed_s", 0.0), (int, float))
+                    ),
+                    "tools": tools,
+                }
+                completed_cases.add(case_name)
+
+    if not cases:
+        return {}
+    return {
+        "cases": cases,
+        "finished": {
+            "cases": len(completed_cases),
+            "proof_traces": completed_proof_traces,
+        },
+    }
+
+
+def _merge_finished_results(
+    worker_result: dict[str, Any] | None,
+    check_name: str,
+    finished_results: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not finished_results:
+        return worker_result
+    if worker_result is None:
+        worker_result = _initial_design_result("")
+
+    checks = worker_result.setdefault("checks", {})
+    check_result = checks.setdefault(
+        check_name,
+        {"status": "running", "proved": False},
+    )
+    finished_cases = finished_results.get("cases", {})
+    existing_cases = check_result.get("cases", {})
+    check_result["cases"] = {**finished_cases, **existing_cases}
+    check_result["finished"] = finished_results["finished"]
+    return worker_result
+
+
 def _run_design_subprocess(
     name: str,
     check_name: str,
@@ -352,6 +517,7 @@ def _run_design_subprocess(
     child_env[PARENT_PID_ENV] = str(os.getpid())
     with tempfile.TemporaryDirectory(prefix="zolotone-run-design-") as temp_dir:
         result_path = Path(temp_dir) / "result.json"
+        progress_path = Path(temp_dir) / "progress.jsonl"
         started_at = time.perf_counter()
         process = subprocess.Popen(
             [
@@ -363,6 +529,8 @@ def _run_design_subprocess(
                 check_name,
                 "--result-file",
                 str(result_path),
+                "--progress-file",
+                str(progress_path),
             ],
             env=child_env,
             start_new_session=True,
@@ -377,7 +545,12 @@ def _run_design_subprocess(
             _terminate_process_group(process)
             status = "interrupted"
         elapsed_s = time.perf_counter() - started_at
-        return status, _read_design_result(result_path), elapsed_s
+        worker_result = _merge_finished_results(
+            _read_design_result(result_path),
+            check_name,
+            _read_finished_results(progress_path, check_name),
+        )
+        return status, worker_result, elapsed_s
 
 
 def _check_result_from_worker(
@@ -399,6 +572,8 @@ def _check_result_from_worker(
             check_result = {}
         check_result.update(status=worker_status, proved=False)
     elif check_result is None or check_result.get("status") == "running":
+        finished = check_result.get("finished") if check_result else None
+        cases = check_result.get("cases") if check_result else None
         error = worker_error
         if error is None and worker_result is not None:
             candidate = worker_result.get("error")
@@ -418,6 +593,10 @@ def _check_result_from_worker(
             "proved": False,
             "error": error,
         }
+        if isinstance(cases, dict):
+            check_result["cases"] = cases
+        if isinstance(finished, dict):
+            check_result["finished"] = finished
 
     check_result["wall_elapsed_s"] = wall_elapsed_s
     return check_result
@@ -593,6 +772,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--progress-file",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args(argv)
     if args.check is not None and args.design is None:
         parser.error("--check requires --design")
@@ -606,9 +790,10 @@ def main(argv: list[str] | None = None) -> int:
             _find_design(args.design),
             check_name=args.check,
             result_path=args.result_file,
+            progress_path=args.progress_file,
         ) else 1
     return run_designs(report_path=args.report)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+   main()

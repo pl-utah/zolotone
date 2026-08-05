@@ -58,6 +58,7 @@ from examples.bf16x8_dot_fp32_conventional import (
 from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
 
 from infra.compile_cpp import jit_compile, nonjit_compile
+from infra import make_designs_html
 from infra import run_designs as design_runner
 
 
@@ -97,7 +98,306 @@ def _large_report_tool(ctx, timeout_ms):
     )
 
 
+class TestMakeDesignsHtml(unittest.TestCase):
+    def test_atomic_write_creates_readable_html(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            html_path = Path(temp_dir) / "index.html"
+            make_designs_html._atomic_write(html_path, "<html></html>")
+
+            self.assertEqual(
+                html_path.stat().st_mode & 0o777,
+                make_designs_html.REPORT_FILE_MODE,
+            )
+
+    def test_renders_expandable_case_tables_for_each_design(self):
+        report = {
+            "started_at": "2026-08-04T01:02:03Z <start>",
+            "designs": {
+                "first <design>": {
+                    "elapsed_s": 1.25,
+                    "checks": {
+                        "determinism": {
+                            "status": "passed",
+                            "proved": True,
+                            "elapsed_s": 0.25,
+                            "cases": {
+                                "det <case>": {
+                                    "status": "unsat",
+                                    "feasibility": "feasible & checked",
+                                    "proved": True,
+                                    "elapsed_s": 0.1254,
+                                }
+                            },
+                        },
+                        "specification": {
+                            "status": "failed",
+                            "proved": False,
+                            "elapsed_s": 0.75,
+                            "cases": {
+                                "spec & case": {
+                                    "status": "sat",
+                                    "feasibility": "unknown",
+                                    "proved": False,
+                                    "elapsed_s": 0.5,
+                                }
+                            },
+                        },
+                    },
+                },
+                "second": {"elapsed_s": 0.5, "checks": {}},
+            },
+        }
+
+        html = make_designs_html.build_html(
+            report,
+            Path("reports/<source>.json"),
+        )
+
+        self.assertIn(
+            'class="design-toggle" aria-expanded="false" '
+            'aria-controls="design-details-0">first &lt;design&gt;</button>',
+            html,
+        )
+        self.assertIn(
+            'id="design-details-0" class="design-details" hidden',
+            html,
+        )
+        self.assertIn('aria-controls="design-details-1">second</button>', html)
+        self.assertIn('id="design-details-1"', html)
+        for heading in (
+            "Case name",
+            "Status",
+            "Feasibility",
+            "Proved?",
+            "Time spent",
+        ):
+            self.assertIn(f'<th scope="col">{heading}</th>', html)
+        self.assertIn("<h2>Determinism cases</h2>", html)
+        self.assertIn("<h2>Specification cases</h2>", html)
+        self.assertIn('<th scope="row">det &lt;case&gt;</th>', html)
+        self.assertIn('<span class="badge badge-unsat">UNSAT</span>', html)
+        self.assertIn("feasible &amp; checked", html)
+        self.assertIn('<span class="badge badge-passed">YES</span>', html)
+        self.assertIn('<td class="elapsed">0.125 s</td>', html)
+        self.assertIn('<th scope="row">spec &amp; case</th>', html)
+        self.assertIn('<span class="badge badge-sat">SAT</span>', html)
+        self.assertIn('<span class="badge badge-failed">NO</span>', html)
+        self.assertIn("reports/&lt;source&gt;.json", html)
+
+        determinism_position = html.index("det &lt;case&gt;")
+        specification_position = html.index("spec &amp; case")
+        self.assertLess(determinism_position, specification_position)
+
+    def test_disclosures_toggle_independently(self):
+        html = make_designs_html.build_html(
+            {"designs": {"first": {"checks": {}}, "second": {"checks": {}}}},
+            Path("reports/run_designs.json"),
+        )
+
+        self.assertEqual(html.count('<button type="button" class="design-toggle"'), 2)
+        self.assertIn(
+            'document.querySelectorAll(".design-toggle").forEach((button)',
+            html,
+        )
+        self.assertIn(
+            'button.setAttribute("aria-expanded", String(!expanded))',
+            html,
+        )
+        self.assertIn("details.hidden = expanded", html)
+        self.assertNotIn("querySelectorAll(\".design-details\")", html)
+
+    def test_missing_and_empty_checks_render_case_empty_states(self):
+        report = {
+            "designs": {
+                "slow": {
+                    "elapsed_s": 2.0,
+                    "checks": {
+                        "determinism": {
+                            "status": "timeout",
+                            "proved": False,
+                            "wall_elapsed_s": 1.5,
+                        }
+                    },
+                }
+            }
+        }
+
+        html = make_designs_html.build_html(
+            report,
+            Path("reports/run_designs.json"),
+        )
+
+        self.assertEqual(html.count("No cases reported."), 2)
+        self.assertIn('<td class="elapsed">1.500 s (wall)</td>', html)
+        self.assertIn("<h2>Determinism cases</h2>", html)
+        self.assertIn("<h2>Specification cases</h2>", html)
+
+    def test_invalid_case_structures_are_rejected(self):
+        invalid_cases = (
+            [],
+            {"case": []},
+            {1: {}},
+        )
+
+        for cases in invalid_cases:
+            with self.subTest(cases=cases), self.assertRaises(
+                make_designs_html.ReportError
+            ):
+                make_designs_html.build_html(
+                    {
+                        "designs": {
+                            "demo": {
+                                "checks": {
+                                    "determinism": {"cases": cases},
+                                }
+                            }
+                        }
+                    },
+                    Path("reports/run_designs.json"),
+                )
+
+    def test_timeout_displays_preserved_finished_results(self):
+        report = {
+            "designs": {
+                "partial": {
+                    "checks": {
+                        "determinism": {
+                            "status": "timeout",
+                            "proved": False,
+                            "finished": {"cases": 1, "proof_traces": 2},
+                            "cases": {
+                                "complete": {
+                                    "status": "unsat",
+                                    "feasibility": "feasible",
+                                    "proved": True,
+                                    "elapsed_s": 0.25,
+                                },
+                                "trace-only": {
+                                    "status": "unknown",
+                                    "feasibility": "unknown",
+                                    "proved": None,
+                                    "elapsed_s": 0.5,
+                                    "complete": False,
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        }
+
+        html = make_designs_html.build_html(
+            report,
+            Path("reports/run_designs.json"),
+        )
+
+        self.assertIn(
+            "Preserved 1 completed cases and 2 completed proof traces.",
+            html,
+        )
+        self.assertIn("trace only</span>", html)
+        self.assertIn('<span class="badge badge-not-run">n/a</span>', html)
+
+
 class TestRunDesigns(unittest.TestCase):
+    def test_atomic_write_creates_readable_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "run_designs.json"
+            design_runner._atomic_write_json(report_path, {"designs": {}})
+
+            self.assertEqual(
+                report_path.stat().st_mode & 0o777,
+                design_runner.REPORT_FILE_MODE,
+            )
+
+    def test_finished_result_journal_recovers_complete_and_partial_cases(self):
+        trace_event = {
+            "type": "proof_trace",
+            "check": "determinism",
+            "case_name": "complete-case",
+            "status": "unsat",
+            "tools": [
+                {
+                    "phase": "proof",
+                    "tool": "simplify",
+                    "status": "unsat",
+                    "feasibility": "feasible",
+                    "elapsed_s": 0.25,
+                }
+            ],
+        }
+        case_event = {
+            "type": "case",
+            "check": "determinism",
+            "case_name": "complete-case",
+            "status": "unsat",
+            "proved": True,
+            "feasibility": "feasible",
+            "side_feasibility_tools": [],
+        }
+        partial_trace_event = {
+            "type": "proof_trace",
+            "check": "determinism",
+            "case_name": "trace-only",
+            "status": "unknown",
+            "tools": [
+                {
+                    "phase": "proof",
+                    "tool": "z3",
+                    "status": "unknown",
+                    "feasibility": "unknown",
+                    "elapsed_s": 0.5,
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            progress_path = Path(temp_dir) / "progress.jsonl"
+            with progress_path.open("w", encoding="utf-8") as progress_file:
+                for event in (trace_event, case_event, partial_trace_event):
+                    progress_file.write(json.dumps(event) + "\n")
+                progress_file.write('{"type":"proof_trace"')
+
+            finished = design_runner._read_finished_results(
+                progress_path,
+                "determinism",
+            )
+
+        self.assertEqual(
+            finished["finished"],
+            {"cases": 1, "proof_traces": 2},
+        )
+        complete = finished["cases"]["complete-case"]
+        self.assertTrue(complete["proved"])
+        self.assertEqual(complete["elapsed_s"], 0.25)
+        partial = finished["cases"]["trace-only"]
+        self.assertIsNone(partial["proved"])
+        self.assertFalse(partial["complete"])
+
+    def test_check_design_journals_only_finished_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            progress_path = Path(temp_dir) / "progress.jsonl"
+            with contextlib.redirect_stdout(io.StringIO()):
+                proved = design_runner.check_design(
+                    design_runner._find_design("CSA_tree4"),
+                    check_name="determinism",
+                    progress_path=progress_path,
+                )
+            events = [
+                json.loads(line)
+                for line in progress_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertTrue(proved)
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["proof_trace", "case"],
+        )
+        self.assertEqual(
+            {event["check"] for event in events},
+            {"determinism"},
+        )
+
     def test_report_cli_uses_default_and_accepts_override(self):
         self.assertEqual(
             design_runner.parse_args([]).report,
