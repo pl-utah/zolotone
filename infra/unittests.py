@@ -2393,7 +2393,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             subnormal_extra_bits=5,
         )
 
-        self.assertEqual(default_mantissa.node_type, UQT(1, 13))
+        self.assertEqual(default_mantissa.node_type, UQT(1, 6))
         self.assertEqual(custom_mantissa.node_type, UQT(1, 8))
         self.assertEqual(default_mantissa.evaluate().to_val(), 1.5)
         self.assertEqual(custom_mantissa.evaluate().to_val(), 1.5)

@@ -25,8 +25,8 @@ def fp16_to_fp32(x: Node) -> Node:
         add_implicit_bit(mantissa_fraction),
         uq_resize(mantissa_fraction, 1, Float16.mantissa_bits),
     )
-    # The shared encoder's subnormal staging adds ten fractional guard bits.
-    # Widen first so an exact binary16 significand still fills FP32's field.
+    # Widen the exact ten-bit FP16 significand to FP32's 23-bit precision.
+    # The encoder's additional bits are reserved for G/R/S rounding state.
     significand = uq_resize(significand, 1, Float32.mantissa_bits)
 
     subnormal_exponent = Const(

@@ -25,6 +25,9 @@ def bf16_to_fp16(x: Node) -> Node:
         add_implicit_bit(mantissa_fraction),
         uq_resize(mantissa_fraction, 1, BFloat16.mantissa_bits),
     )
+    # Widen the exact seven-bit BF16 significand to FP16's ten-bit precision.
+    # The encoder's additional bits are reserved for G/R/S rounding state.
+    significand = uq_resize(significand, 1, Float16.mantissa_bits)
 
     subnormal_exponent = Const(
         UQ(1, X.exponent.node_type.int_bits, X.exponent.node_type.frac_bits)

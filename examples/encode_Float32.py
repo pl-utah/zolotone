@@ -210,7 +210,7 @@ def shift_if_subnormal_spec(m, e, ctx):
 def shift_if_subnormal(
     normalized_m_uq: Node,
     normalized_e_q: Node,
-    subnormal_extra_bits: int = 10,
+    subnormal_extra_bits: int = 3,
 ):
     if not isinstance(subnormal_extra_bits, int):
         raise TypeError("subnormal_extra_bits must be an int")
@@ -296,7 +296,11 @@ def fp32_encode(s_uq: Node, e_q: Node, m_uq: Node) -> Primitive:
     encode_exact_zero = uq_is_zero(m_uq)
 
     normalized_m_uq, normalized_e_q = normalize_to_1_xxx(m_uq, e_q)
-    shifted_m_uq, shifted_e_uq = shift_if_subnormal(normalized_m_uq, normalized_e_q)
+    shifted_m_uq, shifted_e_uq = shift_if_subnormal(
+        normalized_m_uq,
+        normalized_e_q,
+        subnormal_extra_bits=3,
+    )
     shifted_dropped_bit_m_uq = drop_implicit_bit(shifted_m_uq)
     
     m_rounded_uq, e_rounded_uq = round_mantissa(shifted_dropped_bit_m_uq, shifted_e_uq)

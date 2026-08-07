@@ -61,6 +61,7 @@ def bf16_encode(s_uq: Node, e_q: Node, m_uq: Node) -> Node:
     shifted_m_uq, shifted_e_uq = shift_if_subnormal(
         normalized_m_uq,
         normalized_e_q,
+        subnormal_extra_bits=3,
     )
     shifted_dropped_bit_m_uq = drop_implicit_bit(shifted_m_uq)
 
