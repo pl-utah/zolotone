@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import signal
@@ -9,58 +8,19 @@ import subprocess
 import sys
 import tempfile
 import time
-import traceback
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DESIGN_TIMEOUT_S = 10 * 60
+DEFAULT_DESIGN_TIMEOUT_S = 5 # 10 * 60
 DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
-REPORT_SCHEMA_VERSION = 1
 REPORT_FILE_MODE = 0o644
 CHECK_NAMES = ("determinism", "specification")
-COMPLETED_CHECK_STATUSES = frozenset({"passed", "failed", "error"})
 PROCESS_TERMINATION_GRACE_S = 5
-CHILD_PROCESS_TERMINATION_GRACE_S = 0.25
-PARENT_PID_ENV = "ZOLOTONE_RUN_DESIGNS_PARENT_PID"
-PR_SET_PDEATHSIG = 1
 RUNNER_PATH = Path(__file__).resolve()
 PROJECT_ROOT = RUNNER_PATH.parent.parent
-
-def _terminate_own_process_group(signum, _frame) -> None:
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    try:
-        os.killpg(os.getpgrp(), signal.SIGTERM)
-    except ProcessLookupError:
-        os._exit(128 + signum)
-
-    time.sleep(CHILD_PROCESS_TERMINATION_GRACE_S)
-    os.killpg(os.getpgrp(), signal.SIGKILL)
-
-
-def _arm_parent_death_signal() -> None:
-    raw_parent_pid = os.environ.pop(PARENT_PID_ENV, None)
-    if raw_parent_pid is None:
-        return
-    expected_parent_pid = int(raw_parent_pid)
-    if not sys.platform.startswith("linux"):
-        return
-
-    signal.signal(signal.SIGTERM, _terminate_own_process_group)
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
-        errno = ctypes.get_errno()
-        raise OSError(errno, os.strerror(errno))
-
-    # The parent may have exited between spawning this process and prctl().
-    if os.getppid() != expected_parent_pid:
-        _terminate_own_process_group(signal.SIGTERM, None)
-
-
-# Arm child cleanup before importing the substantially larger design modules.
-_arm_parent_death_signal()
 
 # Direct execution adds infra/, rather than the repository root, to sys.path.
 if __package__ in {None, ""}:
@@ -80,7 +40,6 @@ from examples.fp32_to_bf16 import fp32_to_bf16
 from zolotone import BFloat16T, Float32T, Node, QT, Var
 from zolotone.solver import (
     CaseVerificationResult,
-    CheckResult,
     VerificationObserver,
 )
 
@@ -199,13 +158,6 @@ def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
-def _error_details(exc: BaseException) -> dict[str, str]:
-    return {
-        "type": type(exc).__name__,
-        "message": str(exc),
-    }
-
-
 def _new_design_result(name: str) -> dict[str, Any]:
     return {
         "name": name,
@@ -216,23 +168,14 @@ def _new_design_result(name: str) -> dict[str, Any]:
 class CompletedCaseJournal(VerificationObserver):
     """Durably records cases after all work for the case has finished."""
 
-    def __init__(self, path: Path, check_name: str) -> None:
+    def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._check_name = check_name
         self._handle = path.open("a", encoding="utf-8", buffering=1)
 
-    def _write(self, event: dict[str, Any]) -> None:
-        event["check"] = self._check_name
+    def case_completed(self, result: CaseVerificationResult) -> None:
+        event = {"case_name": result["name"], "result": result.to_json()}
         self._handle.write(json.dumps(event, sort_keys=True) + "\n")
         self._handle.flush()
-
-    def case_completed(self, result: CaseVerificationResult) -> None:
-        self._write(
-            {
-                "case_name": result["name"],
-                "result": result.to_json(),
-            }
-        )
 
     def close(self) -> None:
         self._handle.close()
@@ -245,36 +188,9 @@ def check_design(
     result_path: Path | None = None,
     completed_cases_path: Path | None = None,
 ) -> bool:
-    if check_name is not None and check_name not in CHECK_NAMES:
-        raise ValueError(f"Unknown check: {check_name}")
-
     started_at = time.perf_counter()
     design_result = _new_design_result(design_case.name)
-
-    try:
-        design = design_case.build()
-        if not isinstance(design, Node):
-            raise TypeError(
-                f"builder returned {type(design).__name__}, expected Node"
-            )
-    except Exception as exc:
-        error = {"phase": "build", **_error_details(exc)}
-        design_result.update(
-            status="failed",
-            elapsed_s=time.perf_counter() - started_at,
-            error=error,
-        )
-        if check_name is not None:
-            design_result["checks"][check_name] = {
-                "status": "error",
-                "proved": False,
-                "error": error,
-            }
-        if result_path is not None:
-            _atomic_write_json(result_path, design_result)
-        print(f"[ERROR] Could not build {design_case.name}", file=sys.stderr)
-        traceback.print_exc()
-        return False
+    design = design_case.build()
 
     print(f"Built {design_case.name}: {design.node_type}", flush=True)
     proved = True
@@ -286,7 +202,7 @@ def check_design(
     for selected_check_name in selected_checks:
         check = checks[selected_check_name]
         observer = (
-            CompletedCaseJournal(completed_cases_path, selected_check_name)
+            CompletedCaseJournal(completed_cases_path)
             if completed_cases_path is not None
             else None
         )
@@ -296,39 +212,17 @@ def check_design(
         )
         try:
             result = check(observer=observer) if observer is not None else check()
-            if not isinstance(result, CheckResult):
-                raise TypeError(
-                    f"{selected_check_name} check returned "
-                    f"{type(result).__name__}, "
-                    "expected CheckResult"
-                )
-            serialized_result = result.to_json()
-        except Exception as exc:
-            proved = False
-            design_result["checks"][selected_check_name] = {
-                "status": "error",
-                "proved": False,
-                "error": _error_details(exc),
-            }
-            print(
-                f"[ERROR] {design_case.name} {selected_check_name} check "
-                "raised an exception",
-                file=sys.stderr,
-            )
-            traceback.print_exc()
-        else:
-            check_proved = result.get("proved") is True
-            proved = proved and check_proved
-            design_result["checks"][selected_check_name] = serialized_result
-            if not check_proved:
-                print(
-                    f"[FAIL] {design_case.name} {selected_check_name} "
-                    "was not proved",
-                    file=sys.stderr,
-                )
         finally:
             if observer is not None:
                 observer.close()
+        check_proved = result["proved"]
+        proved = proved and check_proved
+        design_result["checks"][selected_check_name] = result.to_json()
+        if not check_proved:
+            print(
+                f"[FAIL] {design_case.name} {selected_check_name} was not proved",
+                file=sys.stderr,
+            )
 
     design_result.update(
         status="passed" if proved else "failed",
@@ -362,36 +256,24 @@ def _terminate_process_group(process: subprocess.Popen) -> None:
 
 
 def _read_design_result(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    if not path.exists():
         return None
-    return value if isinstance(value, dict) else None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _read_completed_cases(path: Path, check_name: str) -> dict[str, Any]:
+def _read_completed_cases(path: Path) -> dict[str, Any]:
     cases: dict[str, dict[str, Any]] = {}
 
-    try:
-        journal = path.open("r", encoding="utf-8", errors="replace")
-    except OSError:
+    if not path.exists():
         return {}
 
-    with journal:
+    with path.open("r", encoding="utf-8") as journal:
         for line in journal:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(event, dict) or event.get("check") != check_name:
-                continue
-
-            case_name = event.get("case_name")
-            if not isinstance(case_name, str):
-                continue
-            result = event.get("result")
-            if isinstance(result, dict):
-                cases[case_name] = result
+            cases[event["case_name"]] = event["result"]
 
     return cases
 
@@ -404,10 +286,9 @@ def _merge_completed_cases(
     if not completed_cases:
         return worker_result
     if worker_result is None:
-        worker_result = _new_design_result("")
+        return {"checks": {check_name: {"cases": completed_cases}}}
 
-    checks = worker_result.setdefault("checks", {})
-    check_result = checks.setdefault(check_name, {})
+    check_result = worker_result["checks"][check_name]
     existing_cases = check_result.get("cases", {})
     check_result["cases"] = {**completed_cases, **existing_cases}
     return worker_result
@@ -418,8 +299,6 @@ def _run_design_subprocess(
     check_name: str,
     timeout_s: float,
 ) -> tuple[str, dict[str, Any] | None, float]:
-    child_env = os.environ.copy()
-    child_env[PARENT_PID_ENV] = str(os.getpid())
     with tempfile.TemporaryDirectory(prefix="zolotone-run-design-") as temp_dir:
         result_path = Path(temp_dir) / "result.json"
         completed_cases_path = Path(temp_dir) / "completed_cases.jsonl"
@@ -437,7 +316,6 @@ def _run_design_subprocess(
                 "--completed-cases-file",
                 str(completed_cases_path),
             ],
-            env=child_env,
             start_new_session=True,
         )
         try:
@@ -453,7 +331,7 @@ def _run_design_subprocess(
         worker_result = _merge_completed_cases(
             _read_design_result(result_path),
             check_name,
-            _read_completed_cases(completed_cases_path, check_name),
+            _read_completed_cases(completed_cases_path),
         )
         return status, worker_result, elapsed_s
 
@@ -463,57 +341,39 @@ def _check_result_from_worker(
     worker_status: str,
     worker_result: dict[str, Any] | None,
     wall_elapsed_s: float,
-    *,
-    worker_error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    check_result = None
-    if worker_result is not None:
-        checks = worker_result.get("checks")
-        if isinstance(checks, dict) and isinstance(checks.get(check_name), dict):
-            check_result = dict(checks[check_name])
+    check_result = (
+        dict(worker_result["checks"][check_name])
+        if worker_result is not None
+        else {}
+    )
 
     if worker_status in {"timeout", "interrupted"}:
-        if check_result is None:
-            check_result = {}
         check_result.update(status=worker_status, proved=False)
-    elif (
-        check_result is None
-        or check_result.get("status") not in COMPLETED_CHECK_STATUSES
-    ):
-        cases = check_result.get("cases") if check_result else None
-        error = worker_error
-        if error is None and worker_result is not None:
-            candidate = worker_result.get("error")
-            if isinstance(candidate, dict):
-                error = candidate
-        if error is None:
-            error = {
+    elif worker_result is None:
+        check_result = {
+            "status": "error",
+            "proved": False,
+            "error": {
                 "phase": "worker",
                 "type": "WorkerResultError",
                 "message": (
                     f"{check_name} worker exited with status {worker_status!r} "
                     "without a completed check result"
                 ),
-            }
-        check_result = {
-            "status": "error",
-            "proved": False,
-            "error": error,
+            },
         }
-        if isinstance(cases, dict):
-            check_result["cases"] = cases
 
     check_result["wall_elapsed_s"] = wall_elapsed_s
     return check_result
 
 
 def _design_status(checks: dict[str, Any]) -> str:
-    statuses = [checks.get(name, {}).get("status") for name in CHECK_NAMES]
+    statuses = [checks[name]["status"] for name in CHECK_NAMES]
     if "timeout" in statuses:
         return "timeout"
     if all(
-        checks.get(name, {}).get("status") == "passed"
-        and checks.get(name, {}).get("proved") is True
+        checks[name]["status"] == "passed" and checks[name]["proved"]
         for name in CHECK_NAMES
     ):
         return "passed"
@@ -522,7 +382,6 @@ def _design_status(checks: dict[str, Any]) -> str:
 
 def _new_report(timeout_s: float) -> dict[str, Any]:
     return {
-        "schema_version": REPORT_SCHEMA_VERSION,
         "started_at": _utc_timestamp(),
         "finished_at": None,
         "timeout_s": float(timeout_s),
@@ -555,47 +414,19 @@ def run_designs(
                 f"(timeout: {timeout_s:g} seconds)",
                 flush=True,
             )
-            check_started_at = time.perf_counter()
-            try:
-                worker_status, worker_result, wall_elapsed_s = (
-                    _run_design_subprocess(
-                        design_case.name,
-                        check_name,
-                        timeout_s,
-                    )
-                )
-                check_result = _check_result_from_worker(
+            worker_status, worker_result, wall_elapsed_s = (
+                _run_design_subprocess(
+                    design_case.name,
                     check_name,
-                    worker_status,
-                    worker_result,
-                    wall_elapsed_s,
+                    timeout_s,
                 )
-            except KeyboardInterrupt:
-                worker_status = "interrupted"
-                wall_elapsed_s = time.perf_counter() - check_started_at
-                check_result = _check_result_from_worker(
-                    check_name,
-                    worker_status,
-                    None,
-                    wall_elapsed_s,
-                )
-            except Exception as exc:
-                worker_status = "failed"
-                wall_elapsed_s = time.perf_counter() - check_started_at
-                error = {"phase": "subprocess", **_error_details(exc)}
-                check_result = _check_result_from_worker(
-                    check_name,
-                    worker_status,
-                    None,
-                    wall_elapsed_s,
-                    worker_error=error,
-                )
-                print(
-                    f"[ERROR] Could not start {design_case.name} {check_name}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                traceback.print_exc()
+            )
+            check_result = _check_result_from_worker(
+                check_name,
+                worker_status,
+                worker_result,
+                wall_elapsed_s,
+            )
 
             design_result["checks"][check_name] = check_result
 
@@ -676,10 +507,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help=argparse.SUPPRESS,
     )
-    args = parser.parse_args(argv)
-    if args.check is not None and args.design is None:
-        parser.error("--check requires --design")
-    return args
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
-import sys
 import tempfile
 from datetime import datetime, timezone
 from html import escape
@@ -28,11 +26,6 @@ STATUS_LABELS = {
     "timeout": "TIMEOUT",
     "interrupted": "INTERRUPTED",
 }
-CASE_STATUSES = frozenset({"sat", "unsat", "unknown"})
-
-
-class ReportError(ValueError):
-    """A report cannot be loaded or does not have the expected structure."""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -51,85 +44,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _validate_report(report: Any) -> dict[str, Any]:
-    if not isinstance(report, dict):
-        raise ReportError(
-            "invalid report structure: top-level value must be an object"
-        )
-
-    designs = report.get("designs")
-    if not isinstance(designs, dict):
-        raise ReportError("invalid report structure: 'designs' must be an object")
-
-    for name, result in designs.items():
-        if not isinstance(name, str) or not isinstance(result, dict):
-            raise ReportError(
-                "invalid report structure: each design must map a name to an object"
-            )
-        checks = result.get("checks", {})
-        if not isinstance(checks, dict):
-            raise ReportError(
-                "invalid report structure: "
-                f"checks for design {name!r} must be an object"
-            )
-        for check_name in CHECK_NAMES:
-            if check_name not in checks:
-                continue
-            check = checks[check_name]
-            if not isinstance(check, dict):
-                raise ReportError(
-                    "invalid report structure: "
-                    f"{check_name} check for design {name!r} must be an object"
-                )
-            cases = check.get("cases", {})
-            if not isinstance(cases, dict):
-                raise ReportError(
-                    "invalid report structure: "
-                    f"cases for {check_name} check of design {name!r} "
-                    "must be an object"
-                )
-            if any(
-                not isinstance(case_name, str) or not isinstance(case, dict)
-                for case_name, case in cases.items()
-            ):
-                raise ReportError(
-                    "invalid report structure: each case for "
-                    f"{check_name} check of design {name!r} must map a name "
-                    "to an object"
-                )
-
-    return report
-
-
 def load_report(path: Path) -> dict[str, Any]:
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            report = json.load(handle)
-    except FileNotFoundError as exc:
-        raise ReportError(f"report file not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise ReportError(
-            f"malformed JSON in {path}: line {exc.lineno}, column {exc.colno}"
-        ) from exc
-    except OSError as exc:
-        raise ReportError(f"could not read report {path}: {exc}") from exc
-    return _validate_report(report)
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def _format_elapsed(value: Any) -> str:
-    if value is None or isinstance(value, bool):
+def _format_elapsed(value: float | None) -> str:
+    if value is None:
         return "n/a"
-    try:
-        elapsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return "n/a"
-    if not math.isfinite(elapsed) or elapsed < 0:
-        return "n/a"
-    return f"{elapsed:.3f} s"
+    return f"{value:.3f} s"
 
 
-def _format_check_elapsed(check: Any) -> str:
-    if not isinstance(check, dict):
+def _format_check_elapsed(check: dict[str, Any] | None) -> str:
+    if check is None:
         return "n/a"
 
     timed_out = check.get("status") == "timeout"
@@ -140,39 +67,26 @@ def _format_check_elapsed(check: Any) -> str:
     return elapsed
 
 
-def _status_badge(check: Any) -> str:
-    if not isinstance(check, dict) or "status" not in check:
+def _status_badge(check: dict[str, Any] | None) -> str:
+    if check is None:
         status = "not-run"
         label = "NOT RUN"
     else:
-        raw_status = check["status"]
-        if isinstance(raw_status, str) and raw_status in STATUS_LABELS:
-            status = raw_status
-            label = STATUS_LABELS[raw_status]
-        else:
-            status = "unknown"
-            label = "UNKNOWN" if raw_status is None else str(raw_status).upper()
-    return f'<span class="badge badge-{status}">{escape(label)}</span>'
+        status = check["status"]
+        label = STATUS_LABELS[status]
+    return f'<span class="badge badge-{status}">{label}</span>'
 
 
 def _case_status_badge(case: dict[str, Any]) -> str:
-    raw_status = case.get("status")
-    status = (
-        raw_status
-        if isinstance(raw_status, str) and raw_status in CASE_STATUSES
-        else "unknown"
-    )
-    label = "UNKNOWN" if raw_status is None else str(raw_status).upper()
-    return f'<span class="badge badge-{status}">{escape(label)}</span>'
+    status = case["status"]
+    return f'<span class="badge badge-{status}">{status.upper()}</span>'
 
 
-def _proved_badge(value: Any) -> str:
-    if value is True:
+def _proved_badge(value: bool) -> str:
+    if value:
         status, label = "passed", "YES"
-    elif value is False:
-        status, label = "failed", "NO"
     else:
-        status, label = "not-run", "n/a"
+        status, label = "failed", "NO"
     return f'<span class="badge badge-{status}">{label}</span>'
 
 
@@ -180,7 +94,7 @@ def _elapsed_cell(elapsed: str) -> str:
     return f'<td class="elapsed">{escape(elapsed)}</td>'
 
 
-def _render_check_cells(check: Any) -> str:
+def _render_check_cells(check: dict[str, Any] | None) -> str:
     status_cell = f"<td>{_status_badge(check)}</td>"
     elapsed_cell = _elapsed_cell(_format_check_elapsed(check))
     return status_cell + elapsed_cell
@@ -191,15 +105,18 @@ def _render_case_row(name: str, case: dict[str, Any]) -> str:
     cells = (
         f'<th scope="row">{case_name}</th>',
         f"<td>{_case_status_badge(case)}</td>",
-        f'<td>{_display_text(case.get("feasibility"))}</td>',
-        f"<td>{_proved_badge(case.get('proved'))}</td>",
-        _elapsed_cell(_format_elapsed(case.get("elapsed_s"))),
+        f'<td>{escape(case["feasibility"])}</td>',
+        f"<td>{_proved_badge(case['proved'])}</td>",
+        _elapsed_cell(_format_elapsed(case["elapsed_s"])),
     )
     return f"<tr>{''.join(cells)}</tr>"
 
 
-def _render_cases_table(check_name: str, check: Any) -> str:
-    cases = check.get("cases", {}) if isinstance(check, dict) else {}
+def _render_cases_table(
+    check_name: str,
+    check: dict[str, Any] | None,
+) -> str:
+    cases = {} if check is None else check.get("cases", {})
     rows = "".join(
         _render_case_row(case_name, case)
         for case_name, case in cases.items()
@@ -263,7 +180,6 @@ def _display_text(value: Any) -> str:
 
 
 def build_html(report: dict[str, Any], source_path: Path) -> str:
-    report = _validate_report(report)
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     rows = "".join(
         _render_design_rows(name, result, index)
@@ -361,7 +277,6 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
         const details = document.getElementById(
           button.getAttribute("aria-controls")
         );
-        if (!details) return;
         const expanded = button.getAttribute("aria-expanded") === "true";
         button.setAttribute("aria-expanded", String(!expanded));
         details.hidden = expanded;
@@ -397,16 +312,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     report_path = args.report_dir / REPORT_FILENAME
     html_path = args.report_dir / HTML_FILENAME
-    try:
-        report = load_report(report_path)
-        html = build_html(report, report_path)
-        _atomic_write(html_path, html)
-    except ReportError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except OSError as exc:
-        print(f"error: could not write {html_path}: {exc}", file=sys.stderr)
-        return 1
+    report = load_report(report_path)
+    html = build_html(report, report_path)
+    _atomic_write(html_path, html)
 
     print(f"Generated {html_path}")
     return 0

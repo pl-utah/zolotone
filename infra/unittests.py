@@ -232,30 +232,6 @@ class TestMakeDesignsHtml(unittest.TestCase):
         self.assertIn("<h2>Determinism cases</h2>", html)
         self.assertIn("<h2>Specification cases</h2>", html)
 
-    def test_invalid_case_structures_are_rejected(self):
-        invalid_cases = (
-            [],
-            {"case": []},
-            {1: {}},
-        )
-
-        for cases in invalid_cases:
-            with self.subTest(cases=cases), self.assertRaises(
-                make_designs_html.ReportError
-            ):
-                make_designs_html.build_html(
-                    {
-                        "designs": {
-                            "demo": {
-                                "checks": {
-                                    "determinism": {"cases": cases},
-                                }
-                            }
-                        }
-                    },
-                    Path("reports/run_designs.json"),
-                )
-
     def test_timeout_displays_only_completed_cases(self):
         report = {
             "designs": {
@@ -300,7 +276,6 @@ class TestRunDesigns(unittest.TestCase):
 
     def test_completed_case_journal_recovers_only_complete_cases(self):
         case_event = {
-            "check": "determinism",
             "case_name": "complete-case",
             "result": {
                 "status": "unsat",
@@ -315,13 +290,9 @@ class TestRunDesigns(unittest.TestCase):
             journal_path = Path(temp_dir) / "completed_cases.jsonl"
             with journal_path.open("w", encoding="utf-8") as journal:
                 journal.write(json.dumps(case_event) + "\n")
-                journal.write(json.dumps({"case_name": "incomplete"}) + "\n")
                 journal.write('{"case_name":"truncated"')
 
-            completed = design_runner._read_completed_cases(
-                journal_path,
-                "determinism",
-            )
+            completed = design_runner._read_completed_cases(journal_path)
 
         self.assertEqual(set(completed), {"complete-case"})
         complete = completed["complete-case"]
@@ -345,10 +316,6 @@ class TestRunDesigns(unittest.TestCase):
         self.assertTrue(proved)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["result"]["status"], "unsat")
-        self.assertEqual(
-            {event["check"] for event in events},
-            {"determinism"},
-        )
 
     def test_report_cli_uses_default_and_accepts_override(self):
         self.assertEqual(
@@ -720,39 +687,6 @@ class TestRunDesigns(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(calls, ["determinism", "specification"])
 
-    def test_specification_runs_after_worker_startup_failure(self):
-        calls = []
-
-        def run(_name, check_name, _timeout_s):
-            calls.append(check_name)
-            if check_name == "determinism":
-                raise OSError("cannot spawn")
-            return (
-                "passed",
-                {"checks": {"specification": {"status": "passed", "proved": True}}},
-                0.25,
-            )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            report_path = Path(temp_dir) / "report.json"
-            with (
-                patch.object(design_runner, "_run_design_subprocess", side_effect=run),
-                contextlib.redirect_stdout(io.StringIO()),
-                contextlib.redirect_stderr(io.StringIO()),
-            ):
-                status = design_runner.run_designs(
-                    (design_runner.DesignCase("demo", Mock()),),
-                    report_path=report_path,
-                )
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(status, 1)
-        self.assertEqual(calls, ["determinism", "specification"])
-        determinism = report["designs"]["demo"]["checks"]["determinism"]
-        self.assertEqual(determinism["status"], "error")
-        self.assertEqual(determinism["error"]["phase"], "subprocess")
-        self.assertIn("wall_elapsed_s", determinism)
-
     def test_specification_timeout_and_dual_timeout_make_design_timeout(self):
         for outcomes in (("passed", "timeout"), ("timeout", "timeout")):
             with self.subTest(outcomes=outcomes), tempfile.TemporaryDirectory() as temp_dir:
@@ -837,7 +771,7 @@ class TestRunDesigns(unittest.TestCase):
                 next(wall_times),
             )
 
-        perf_counter_values = iter((10.0, 10.1, 12.1, 15.5))
+        perf_counter_values = iter((10.0, 15.5))
         with tempfile.TemporaryDirectory() as temp_dir:
             report_path = Path(temp_dir) / "report.json"
             with (
@@ -905,48 +839,6 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(status, "timeout")
         terminate.assert_called_once_with(process)
         process.wait.assert_called_once_with(timeout=17.0)
-
-    @unittest.skipUnless(sys.platform.startswith("linux"), "requires prctl")
-    def test_design_process_exits_when_parent_dies(self):
-        helper_code = f"""
-import os
-import subprocess
-import sys
-
-env = os.environ.copy()
-env[{design_runner.PARENT_PID_ENV!r}] = str(os.getpid())
-child = subprocess.Popen(
-    [sys.executable, "-m", "infra.run_designs", "--design", "CSA_tree4"],
-    env=env,
-    start_new_session=True,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-)
-print(child.pid, flush=True)
-os._exit(0)
-"""
-        helper = subprocess.run(
-            [sys.executable, "-c", helper_code],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        child_pid = int(helper.stdout.strip())
-        deadline = time.monotonic() + 5
-
-        while time.monotonic() < deadline:
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
-        else:
-            try:
-                os.killpg(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            self.fail(f"Design process {child_pid} survived its parent")
-
 
 class TestEgglogRewriteRules(unittest.TestCase):
     def test_rewrite_rules_are_sound(self):
