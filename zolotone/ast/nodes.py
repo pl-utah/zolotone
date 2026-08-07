@@ -318,12 +318,6 @@ def check_equivalence(
     for case_ctx in cases:
         labels = _case_labels(case_ctx.name)
         status, proof_trace = _solver_check_equivalence(case_ctx, schedule=schedule)
-        if observer is not None:
-            observer.proof_trace_completed(
-                case_name=case_ctx.name,
-                status=status,
-                proof_trace=proof_trace,
-            )
         combined_feasibility = proof_trace[0].get("feasibility_status", "unknown")
         side_feasibility_reports = []
 

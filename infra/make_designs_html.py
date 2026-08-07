@@ -27,7 +27,6 @@ STATUS_LABELS = {
     "error": "ERROR",
     "timeout": "TIMEOUT",
     "interrupted": "INTERRUPTED",
-    "running": "RUNNING",
 }
 CASE_STATUSES = frozenset({"sat", "unsat", "unknown"})
 
@@ -189,8 +188,6 @@ def _render_check_cells(check: Any) -> str:
 
 def _render_case_row(name: str, case: dict[str, Any]) -> str:
     case_name = escape(name)
-    if case.get("complete") is False:
-        case_name += ' <span class="partial-label">trace only</span>'
     cells = (
         f'<th scope="row">{case_name}</th>',
         f"<td>{_case_status_badge(case)}</td>",
@@ -211,26 +208,9 @@ def _render_cases_table(check_name: str, check: Any) -> str:
         rows = '<tr><td class="empty" colspan="5">No cases reported.</td></tr>'
 
     heading = check_name.capitalize()
-    finished_summary = ""
-    if isinstance(check, dict) and check.get("status") in {
-        "timeout",
-        "error",
-        "interrupted",
-    }:
-        finished = check.get("finished")
-        if isinstance(finished, dict):
-            completed_cases = finished.get("cases", 0)
-            completed_traces = finished.get("proof_traces", 0)
-            finished_summary = (
-                '<p class="finished-summary">Preserved '
-                f"{_display_text(completed_cases)} completed cases and "
-                f"{_display_text(completed_traces)} completed proof traces."
-                "</p>"
-            )
     return f"""
               <section class="case-section">
                 <h2>{heading} cases</h2>
-                {finished_summary}
                 <div class="case-table-wrap">
                   <table class="case-table">
                     <thead>
@@ -320,7 +300,6 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
     .badge-passed {{ color: #16733c; }}
     .badge-failed, .badge-error {{ color: #b42318; }}
     .badge-timeout, .badge-interrupted {{ color: #8a6100; }}
-    .badge-running {{ color: #175ea8; }}
     .badge-unsat {{ color: #16733c; }}
     .badge-sat {{ color: #b42318; }}
     .badge-not-run, .badge-unknown, .empty {{ color: #666; }}
@@ -344,8 +323,6 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
     .design-details[hidden] {{ display: none; }}
     .design-details > td {{ padding: 1rem; background: #f8f9fa; }}
     .case-section + .case-section {{ margin-top: 1rem; }}
-    .finished-summary {{ margin: 0 0 .6rem; color: #555; }}
-    .partial-label {{ color: #8a6100; font-size: .85em; font-weight: 400; }}
     .case-table-wrap {{ overflow-x: auto; }}
     .case-table {{ min-width: 640px; background: #fff; }}
     .case-table th, .case-table td {{ padding: .45rem .6rem; }}

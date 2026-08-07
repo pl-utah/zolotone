@@ -256,7 +256,7 @@ class TestMakeDesignsHtml(unittest.TestCase):
                     Path("reports/run_designs.json"),
                 )
 
-    def test_timeout_displays_preserved_finished_results(self):
+    def test_timeout_displays_only_completed_cases(self):
         report = {
             "designs": {
                 "partial": {
@@ -264,20 +264,12 @@ class TestMakeDesignsHtml(unittest.TestCase):
                         "determinism": {
                             "status": "timeout",
                             "proved": False,
-                            "finished": {"cases": 1, "proof_traces": 2},
                             "cases": {
                                 "complete": {
                                     "status": "unsat",
                                     "feasibility": "feasible",
                                     "proved": True,
                                     "elapsed_s": 0.25,
-                                },
-                                "trace-only": {
-                                    "status": "unknown",
-                                    "feasibility": "unknown",
-                                    "proved": None,
-                                    "elapsed_s": 0.5,
-                                    "complete": False,
                                 },
                             },
                         }
@@ -291,12 +283,8 @@ class TestMakeDesignsHtml(unittest.TestCase):
             Path("reports/run_designs.json"),
         )
 
-        self.assertIn(
-            "Preserved 1 completed cases and 2 completed proof traces.",
-            html,
-        )
-        self.assertIn("trace only</span>", html)
-        self.assertIn('<span class="badge badge-not-run">n/a</span>', html)
+        self.assertIn('<th scope="row">complete</th>', html)
+        self.assertNotIn("trace only", html)
 
 
 class TestRunDesigns(unittest.TestCase):
@@ -310,89 +298,53 @@ class TestRunDesigns(unittest.TestCase):
                 design_runner.REPORT_FILE_MODE,
             )
 
-    def test_finished_result_journal_recovers_complete_and_partial_cases(self):
-        trace_event = {
-            "type": "proof_trace",
-            "check": "determinism",
-            "case_name": "complete-case",
-            "status": "unsat",
-            "tools": [
-                {
-                    "phase": "proof",
-                    "tool": "simplify",
-                    "status": "unsat",
-                    "feasibility": "feasible",
-                    "elapsed_s": 0.25,
-                }
-            ],
-        }
+    def test_completed_case_journal_recovers_only_complete_cases(self):
         case_event = {
-            "type": "case",
             "check": "determinism",
             "case_name": "complete-case",
-            "status": "unsat",
-            "proved": True,
-            "feasibility": "feasible",
-            "side_feasibility_tools": [],
-        }
-        partial_trace_event = {
-            "type": "proof_trace",
-            "check": "determinism",
-            "case_name": "trace-only",
-            "status": "unknown",
-            "tools": [
-                {
-                    "phase": "proof",
-                    "tool": "z3",
-                    "status": "unknown",
-                    "feasibility": "unknown",
-                    "elapsed_s": 0.5,
-                }
-            ],
+            "result": {
+                "status": "unsat",
+                "proved": True,
+                "feasibility": "feasible",
+                "elapsed_s": 0.25,
+                "tools": [],
+            },
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            progress_path = Path(temp_dir) / "progress.jsonl"
-            with progress_path.open("w", encoding="utf-8") as progress_file:
-                for event in (trace_event, case_event, partial_trace_event):
-                    progress_file.write(json.dumps(event) + "\n")
-                progress_file.write('{"type":"proof_trace"')
+            journal_path = Path(temp_dir) / "completed_cases.jsonl"
+            with journal_path.open("w", encoding="utf-8") as journal:
+                journal.write(json.dumps(case_event) + "\n")
+                journal.write(json.dumps({"case_name": "incomplete"}) + "\n")
+                journal.write('{"case_name":"truncated"')
 
-            finished = design_runner._read_finished_results(
-                progress_path,
+            completed = design_runner._read_completed_cases(
+                journal_path,
                 "determinism",
             )
 
-        self.assertEqual(
-            finished["finished"],
-            {"cases": 1, "proof_traces": 2},
-        )
-        complete = finished["cases"]["complete-case"]
+        self.assertEqual(set(completed), {"complete-case"})
+        complete = completed["complete-case"]
         self.assertTrue(complete["proved"])
         self.assertEqual(complete["elapsed_s"], 0.25)
-        partial = finished["cases"]["trace-only"]
-        self.assertIsNone(partial["proved"])
-        self.assertFalse(partial["complete"])
 
-    def test_check_design_journals_only_finished_artifacts(self):
+    def test_check_design_journals_only_completed_cases(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            progress_path = Path(temp_dir) / "progress.jsonl"
+            journal_path = Path(temp_dir) / "completed_cases.jsonl"
             with contextlib.redirect_stdout(io.StringIO()):
                 proved = design_runner.check_design(
                     design_runner._find_design("CSA_tree4"),
                     check_name="determinism",
-                    progress_path=progress_path,
+                    completed_cases_path=journal_path,
                 )
             events = [
                 json.loads(line)
-                for line in progress_path.read_text(encoding="utf-8").splitlines()
+                for line in journal_path.read_text(encoding="utf-8").splitlines()
             ]
 
         self.assertTrue(proved)
-        self.assertEqual(
-            [event["type"] for event in events],
-            ["proof_trace", "case"],
-        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["result"]["status"], "unsat")
         self.assertEqual(
             {event["check"] for event in events},
             {"determinism"},
@@ -556,17 +508,18 @@ class TestRunDesigns(unittest.TestCase):
             check_status = {
                 "passed": "passed",
                 "failed": "failed",
-                "timeout": "running",
+                "timeout": None,
             }[worker_status]
             fragment = {
                 "checks": {
                     check_name: {
-                        "status": check_status,
                         "proved": check_status == "passed",
                         "elapsed_s": 0.25,
                     }
                 }
             }
+            if check_status is not None:
+                fragment["checks"][check_name]["status"] = check_status
             return worker_status, fragment, 0.5
 
         stdout = io.StringIO()
@@ -615,6 +568,43 @@ class TestRunDesigns(unittest.TestCase):
             ],
             0.5,
         )
+
+    def test_report_publishes_design_only_after_all_checks_complete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.json"
+            observed_designs = []
+
+            def run(_name, check_name, _timeout_s):
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                observed_designs.append(dict(report["designs"]))
+                return (
+                    "passed",
+                    {
+                        "checks": {
+                            check_name: {
+                                "status": "passed",
+                                "proved": True,
+                                "elapsed_s": 0.1,
+                            }
+                        }
+                    },
+                    0.2,
+                )
+
+            with (
+                patch.object(design_runner, "_run_design_subprocess", side_effect=run),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = design_runner.run_designs(
+                    (design_runner.DesignCase("demo", Mock()),),
+                    report_path=report_path,
+                )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(observed_designs, [{}, {}])
+        self.assertEqual(report["designs"]["demo"]["status"], "passed")
+        self.assertNotIn("running", json.dumps(report))
 
     def test_json_report_preserves_case_tool_sequence_and_metrics(self):
         ctx = SpecContext("demo[arg0=norm]")
@@ -683,7 +673,7 @@ class TestRunDesigns(unittest.TestCase):
             ),
             "timeout": (
                 "timeout",
-                {"checks": {"determinism": {"status": "running", "proved": False}}},
+                {"checks": {"determinism": {}}},
             ),
             "build-failure": (
                 "failed",
@@ -770,11 +760,9 @@ class TestRunDesigns(unittest.TestCase):
 
                 def run(_name, check_name, _timeout_s):
                     worker_status = next(worker_statuses)
-                    check_result = {
-                        "status": "passed" if worker_status == "passed" else "running",
-                        "proved": worker_status == "passed",
-                    }
+                    check_result = {"proved": worker_status == "passed"}
                     if worker_status == "passed":
+                        check_result["status"] = "passed"
                         check_result["elapsed_s"] = 0.5
                     return (
                         worker_status,
@@ -849,7 +837,7 @@ class TestRunDesigns(unittest.TestCase):
                 next(wall_times),
             )
 
-        perf_counter_values = iter((10.0, 10.1, 10.1, 12.0, 12.1, 12.1, 15.0, 15.5))
+        perf_counter_values = iter((10.0, 10.1, 12.1, 15.5))
         with tempfile.TemporaryDirectory() as temp_dir:
             report_path = Path(temp_dir) / "report.json"
             with (

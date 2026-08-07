@@ -87,15 +87,7 @@ class CaseVerificationResult(dict[str, Any]):
 
 
 class VerificationObserver(Protocol):
-    """Receives verification artifacts only after they have completed."""
-
-    def proof_trace_completed(
-        self,
-        *,
-        case_name: str,
-        status: ProofStatus,
-        proof_trace: list[ProofReport],
-    ) -> None: ...
+    """Receives verification cases after they have completed."""
 
     def case_completed(self, result: CaseVerificationResult) -> None: ...
 
