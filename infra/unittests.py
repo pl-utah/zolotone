@@ -1953,6 +1953,59 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             },
         )
 
+    def test_fp_expr_builds_shared_exclusive_classification_assumptions(self):
+        flags = tuple(
+            BoolVar(name)
+            for name in ("norm", "sub", "zero", "inf", "nan")
+        )
+        value = fp32(
+            value=RealVar("value"),
+            sign=RealVar("sign"),
+            exponent=RealVar("exponent"),
+            mantissa=RealVar("mantissa"),
+            is_norm=flags[0],
+            is_sub=flags[1],
+            is_zero=flags[2],
+            is_inf=flags[3],
+            is_nan=flags[4],
+        )
+        ctx = SpecContext("shared-fp-classification")
+
+        value._assume_exclusive_classification(ctx)
+
+        at_least_one = flags[0]
+        for flag in flags[1:]:
+            at_least_one = at_least_one | flag
+        pairwise_exclusions = [
+            (~lhs) | (~rhs)
+            for idx, lhs in enumerate(flags)
+            for rhs in flags[idx + 1:]
+        ]
+        self.assertEqual(ctx.assumes, [at_least_one, *pairwise_exclusions])
+
+    def test_fp_expr_constant_fold_is_shared_by_all_formats(self):
+        self.assertIs(fp16.constant_fold, FPExpr.constant_fold)
+        self.assertIs(bf16.constant_fold, FPExpr.constant_fold)
+        self.assertIs(fp32.constant_fold, FPExpr.constant_fold)
+
+        value = fp16(
+            value=RealLit(1) + RealLit(2),
+            sign=RealLit(0),
+            exponent=RealLit(15),
+            mantissa=RealLit(0),
+            is_norm=BoolLit(True),
+            is_sub=BoolLit(False),
+            is_zero=BoolLit(False),
+            is_inf=BoolLit(False),
+            is_nan=BoolLit(False),
+        )
+
+        folded = value.constant_fold()
+
+        self.assertIsInstance(folded, fp16)
+        self.assertEqual(folded.value, RealLit(3))
+        self.assertIs(folded.constant_fold(), folded)
+
     def test_fp_expr_requires_a_declared_value_field(self):
         with self.assertRaisesRegex(TypeError, "must declare a value"):
             class MissingValueFP(FPExpr):
@@ -2657,6 +2710,198 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         for split_ctx in cases:
             labels = ast_nodes._case_labels(split_ctx.name)
             self.assertEqual(set(labels), {"output"})
+
+
+class TestFloat16Spec(unittest.TestCase):
+    def test_float16_runtime_layout_values_and_specials(self):
+        self.assertEqual(Float16.mantissa_bits, 10)
+        self.assertEqual(Float16.exponent_bits, 5)
+        self.assertEqual(Float16.exponent_bias, 15)
+        self.assertEqual(Float16.Zero().val, 0x0000)
+        self.assertEqual(Float16.nZero().val, 0x8000)
+        self.assertEqual(Float16.Inf().val, 0x7C00)
+        self.assertEqual(Float16.nInf().val, 0xFC00)
+        self.assertEqual(Float16.NaN().val, 0x7E00)
+        self.assertEqual(Float16.NaN(1).val, 0x7C01)
+
+        largest_negative = Float16.from_fields(
+            sign=1,
+            exponent=30,
+            mantissa=1023,
+        )
+        self.assertEqual(largest_negative.val, 0xFBFF)
+        self.assertEqual(largest_negative.sign, 1)
+        self.assertEqual(largest_negative.exponent, 30)
+        self.assertEqual(largest_negative.mantissa, 1023)
+        self.assertEqual(largest_negative.copy(), largest_negative)
+        self.assertEqual(largest_negative.static_type(), Float16T())
+
+        self.assertEqual(Float16(0x0001).to_val(), 2 ** -24)
+        self.assertEqual(Float16(0x03FF).to_val(), 1023 * (2 ** -24))
+        self.assertEqual(Float16(0x0400).to_val(), 2 ** -14)
+        self.assertEqual(Float16(0x3C00).to_val(), 1.0)
+        self.assertEqual(Float16(0x7BFF).to_val(), 65504.0)
+        self.assertTrue(math.isinf(Float16.Inf().to_val()))
+        self.assertTrue(math.isnan(Float16.NaN().to_val()))
+        self.assertLess(math.copysign(1.0, Float16.nZero().to_val()), 0)
+
+    def test_float16_runtime_rejects_invalid_encodings(self):
+        with self.assertRaisesRegex(TypeError, "packed bits as int"):
+            Float16(1.0)
+        with self.assertRaisesRegex(ValueError, "packed bits must fit"):
+            Float16(1 << 16)
+        with self.assertRaisesRegex(ValueError, "sign must be 0 or 1"):
+            Float16.from_fields(2, 0, 0)
+        with self.assertRaisesRegex(ValueError, "exponent out of range"):
+            Float16.from_fields(0, 32, 0)
+        with self.assertRaisesRegex(ValueError, "mantissa out of range"):
+            Float16.from_fields(0, 0, 1024)
+        with self.assertRaisesRegex(TypeError, "NaN payload must be int"):
+            Float16.NaN("quiet")
+        with self.assertRaisesRegex(ValueError, "non-zero"):
+            Float16.NaN(0)
+
+    def test_fp16_format_and_explicit_classifications(self):
+        self.assertEqual(fp16.exponent_bits, 5)
+        self.assertEqual(fp16.mantissa_bits, 10)
+        self.assertEqual(fp16.exponent_bias, 15)
+
+        ctx = SpecContext("explicit-fp16-values")
+        cases = (
+            (fp16.nan(ctx), "is_nan"),
+            (fp16.inf(ctx), "is_pinf"),
+            (fp16.ninf(ctx), "is_ninf"),
+            (fp16.zero(ctx), "is_pzero"),
+            (fp16.nzero(ctx), "is_nzero"),
+        )
+        special_names = set()
+        for value, predicate in cases:
+            with self.subTest(predicate=predicate):
+                self.assertEqual(
+                    getattr(value, predicate).constant_fold(),
+                    BoolLit(True),
+                )
+                if predicate in {"is_nan", "is_pinf", "is_ninf"}:
+                    self.assertIsInstance(value.value, RealVar)
+                    special_names.add(value.value.name)
+                else:
+                    self.assertEqual(value.value, RealLit(0))
+        self.assertEqual(len(special_names), 3)
+
+    def test_float16_runtime_and_static_types_produce_structured_specs(self):
+        runtime_cases = (
+            (Float16.Zero(), "is_pzero"),
+            (Float16.nZero(), "is_nzero"),
+            (Float16(0x0001), "is_sub"),
+            (Float16(0x3C00), "is_norm"),
+            (Float16.Inf(), "is_pinf"),
+            (Float16.nInf(), "is_ninf"),
+            (Float16.NaN(), "is_nan"),
+        )
+        for runtime_value, predicate in runtime_cases:
+            with self.subTest(bits=runtime_value.val):
+                ctx = SpecContext("runtime-fp16")
+                value = runtime_value.to_spec(ctx)
+                self.assertIsInstance(value, fp16)
+                self.assertEqual(
+                    getattr(value, predicate).constant_fold(),
+                    BoolLit(True),
+                )
+
+        ctx = SpecContext("static-fp16")
+        self.assertIsInstance(Float16T().to_spec("input", ctx), fp16)
+        rng = random.Random(1)
+        self.assertIsInstance(Float16T().random_runtime_value(rng), Float16)
+
+    def test_fp16_encode_classifies_representative_boundaries(self):
+        cases = (
+            ("positive-zero", 0.0, "is_pzero"),
+            ("negative-underflow", -(2 ** -26), "is_nzero"),
+            ("smallest-subnormal", 2 ** -24, "is_sub"),
+            ("smallest-normal", 2 ** -14, "is_norm"),
+            ("greatest-normal", 65504.0, "is_norm"),
+            ("positive-overflow", 70000.0, "is_pinf"),
+            ("negative-overflow", -70000.0, "is_ninf"),
+        )
+
+        for name, real_value, predicate in cases:
+            with self.subTest(value=name):
+                ctx = SpecContext(f"fp16-encode-{name}")
+                encoded = fp16.encode(RealLit(real_value), ctx)
+                ctx.check(getattr(encoded, predicate))
+
+                report = simplify_ctx(ctx)
+                if report["status"] == "unknown":
+                    report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+
+                self.assertEqual(report["status"], "unsat", report)
+
+        with self.assertRaisesRegex(TypeError, "fp16.encode value must be RealExpr"):
+            fp16.encode(1.0, SpecContext("invalid-fp16-encode"))
+
+    def test_fp16_decode_names_and_classifies_fields(self):
+        cases = (
+            (Float16.Zero(), (0, 0, 0, 0, 0, 1, 0, 0)),
+            (Float16.nZero(), (1, 0, 0, 0, 0, 1, 0, 0)),
+            (Float16(0x0001), (0, 0, 1, 0, 1, 0, 0, 0)),
+            (Float16(0x3C00), (0, 15, 0, 1, 0, 0, 0, 0)),
+            (Float16.Inf(), (0, 31, 0, 0, 0, 0, 1, 0)),
+            (Float16.NaN(), (0, 31, 512, 0, 0, 0, 0, 1)),
+        )
+
+        for runtime_value, expected in cases:
+            with self.subTest(bits=runtime_value.val):
+                decoded = fp16_decode(Const(runtime_value))
+                self.assertEqual(
+                    tuple(field.evaluate().val for field in decoded),
+                    expected,
+                )
+                self.assertIs(decoded.sign, decoded[0])
+                self.assertIs(decoded.is_nan, decoded[7])
+
+    def test_fp16_pack_round_trips_in_python_and_cpp(self):
+        def identity_spec(x, ctx):
+            del ctx
+            return x
+
+        @Composite(name="fp16_pack_decode_roundtrip", spec=identity_spec)
+        def fp16_pack_decode_roundtrip(x):
+            decoded = fp16_decode(x)
+            return fp16_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var(name="value", sign=Float16T())
+        design = fp16_pack_decode_roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        cases = (0x0000, 0x8000, 0x0001, 0x03FF, 0x0400, 0x3C00, 0x7BFF, 0x7C00, 0x7E00, 0xFFFF)
+        try:
+            for bits in cases:
+                with self.subTest(bits=bits):
+                    value.load_val(Float16(bits))
+                    self.assertEqual(design.evaluate().val, bits)
+                    self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+
+    def test_fp16_observables_match_other_ieee_formats(self):
+        value = fp16(
+            value=RealVar("value"),
+            sign=RealVar("sign"),
+            exponent=RealVar("exponent"),
+            mantissa=RealVar("mantissa"),
+            is_norm=BoolVar("is_norm"),
+            is_sub=BoolVar("is_sub"),
+            is_zero=BoolVar("is_zero"),
+            is_inf=BoolVar("is_inf"),
+            is_nan=BoolVar("is_nan"),
+        )
+
+        self.assertEqual(value.observables_for_classification("norm"), (value.value,))
+        self.assertEqual(value.observables_for_classification("sub"), (value.value,))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("inf"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
+        with self.assertRaisesRegex(ValueError, "Unknown fp16 classification"):
+            value.observables_for_classification("finite")
 
 
 class TestBFloat16Spec(unittest.TestCase):

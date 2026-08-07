@@ -1,6 +1,6 @@
 ### Type notation
 - `Q<I,F>`: signed fixed-point with `I` integer and `F` fractional bits; `UQ<I,F>` unsigned.
-- `BFloat16`, `Float32`: IEEE754 formats.
+- `Float16`, `BFloat16`, `Float32`: IEEE754 formats.
 - `T`: arbitrary bitvector type, `Any`: unconstrained node chosen by caller.
 - `x`: tuple: explicit output node supplied by caller (shape must match the result).
 - `n<int>, s<int> etc.`: literal integers passed as Python args, not nodes.
@@ -88,6 +88,12 @@
 | `_bf16_exponent` | Op | `BFloat16 -> UQ<8,0>` | Extract exponent bits. |
 | `_bf16_sign` | Op | `BFloat16 -> UQ<1,0>` | Extract sign bit. |
 | `bf16_decode` | Primitive | `BFloat16 -> (UQ<1,0> x UQ<7,0> x UQ<8,0>)` | Split BF16 into sign/mantissa/exponent. |
+
+## FP16 helpers (`zolotone/components/Float16.py`)
+| Name | Kind | Type | Purpose/Notes |
+| --- | --- | --- | --- |
+| `fp16_pack` | Primitive | `UQ<1,0> -> UQ<5,0> -> UQ<10,0> -> Float16` | Assemble binary16 from sign, exponent, and mantissa fields. |
+| `fp16_decode` | Primitive | `Float16 -> DecodedFP16` | Split binary16 into fields and zero/normal/subnormal/infinity/NaN flags. |
 
 ## Float helpers (`zolotone/numtypes/Float.py`)
 | Name | Kind | Type | Purpose/Notes |

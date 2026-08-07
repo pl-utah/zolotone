@@ -6,6 +6,7 @@ from .components.Bool import *
 from .components.Q import *
 from .components.UQ import *
 from .components.Float import *
+from .components.Float16 import *
 from .components.BFloat16 import *
 from .codegen import *
 from .utils import *

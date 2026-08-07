@@ -155,7 +155,15 @@ def bf16_pack_spec(s, e, m, ctx):
         * two ** (-ctx.real_val(BFloat16.mantissa_bits))
         * two ** (one - ctx.real_val(BFloat16.exponent_bias))
     )
-    value = If(is_norm, normal_value, If(is_sub, subnormal_value, zero))
+     value = If(
+        is_norm,
+        normal_value,
+        If(
+            is_sub,
+            subnormal_value,
+            If(is_zero, zero, ctx.fresh_real("special")),
+        ),
+    )
 
     return bf16(
         value=value,

@@ -141,7 +141,15 @@ def fp32_pack_spec(s, e, m, ctx):
         * two ** (-ctx.real_val(Float32.mantissa_bits))
         * two ** (one - ctx.real_val(Float32.exponent_bias))
     )
-    value = If(is_norm, normal_value, If(is_sub, subnormal_value, If(is_zero, zero, ctx.fresh_real("special"))))
+     value = If(
+        is_norm,
+        normal_value,
+        If(
+            is_sub,
+            subnormal_value,
+            If(is_zero, zero, ctx.fresh_real("special")),
+        ),
+    )
 
     return fp32(
         value=value,

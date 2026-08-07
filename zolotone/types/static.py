@@ -200,6 +200,42 @@ class Float32T(StaticType):
         return Float32(rng.getrandbits(self.total_bits()))
 
 
+class Float16T(StaticType):
+    def __init__(self):
+        super().__init__()
+        self.sign_bits = 1
+        self.mantissa_bits = 10
+        self.exponent_bits = 5
+
+    def total_bits(self):
+        return 16
+
+    def __repr__(self):
+        return "Float<16>"
+
+    def __str__(self):
+        return "Float<16>"
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Float16T)
+            and self.sign_bits == other.sign_bits
+            and self.mantissa_bits == other.mantissa_bits
+            and self.exponent_bits == other.exponent_bits
+        )
+
+    def _clone_impl(self) -> "Float16T":
+        return Float16T()
+
+    def to_spec(self, name, ctx):
+        from ..spec.custom_specs.fp16 import fp16
+        return fp16.fresh(name, ctx)
+
+    def random_runtime_value(self, rng: random.Random):
+        from .runtime import Float16
+        return Float16(rng.getrandbits(self.total_bits()))
+
+
 class BFloat16T(StaticType):
     def __init__(self):
         super().__init__()

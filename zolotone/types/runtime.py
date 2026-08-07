@@ -1,7 +1,7 @@
 import random
 import time
 
-from .static import BFloat16T, BoolT, Float32T, QT, TupleT, UQT
+from .static import BFloat16T, BoolT, Float16T, Float32T, QT, TupleT, UQT
 
 
 class RuntimeType:
@@ -436,6 +436,149 @@ class Float32(RuntimeType):
             isinstance(other, Float32)
             and self.val == other.val
         )
+
+
+class Float16(RuntimeType):
+    """IEEE-754 binary16 format: 1 sign, 5 exponent, 10 mantissa bits."""
+
+    mantissa_bits = 10
+    exponent_bits = 5
+    exponent_bias = 15
+    inf_code = 31
+    sub_code = 0
+    nan_code = 31
+    zero_code = 0
+
+    def __init__(self, val: int):
+        if not isinstance(val, int):
+            raise TypeError(
+                f"Float16 expects packed bits as int, got {type(val).__name__}"
+            )
+        if not (0 <= val < (1 << self.total_bits())):
+            raise ValueError(
+                f"Float16 packed bits must fit in {self.total_bits()} bits, got {val}"
+            )
+        self.val = val
+
+    @classmethod
+    def from_fields(cls, sign: int, exponent: int, mantissa: int):
+        if sign not in (0, 1):
+            raise ValueError(f"Float16 sign must be 0 or 1, got {sign}")
+        if not (0 <= mantissa < (1 << cls.mantissa_bits)):
+            raise ValueError(f"Float16 mantissa out of range: {mantissa}")
+        if not (0 <= exponent < (1 << cls.exponent_bits)):
+            raise ValueError(f"Float16 exponent out of range: {exponent}")
+        return cls(
+            (sign << (cls.exponent_bits + cls.mantissa_bits))
+            | (exponent << cls.mantissa_bits)
+            | mantissa
+        )
+
+    @property
+    def sign(self):
+        return (self.val >> (self.exponent_bits + self.mantissa_bits)) & 1
+
+    @property
+    def exponent(self):
+        return (self.val >> self.mantissa_bits) & ((1 << self.exponent_bits) - 1)
+
+    @property
+    def mantissa(self):
+        return self.val & ((1 << self.mantissa_bits) - 1)
+
+    @property
+    def significand(self):
+        return self.mantissa
+
+    def __str__(self):
+        return f"Float16({str(self.to_val())})"
+
+    def to_val(self):
+        """Convert the packed binary16 value to a Python float."""
+
+        if self.exponent == self.inf_code and self.mantissa == 0:
+            return float("-inf") if self.sign else float("inf")
+        if self.exponent == self.nan_code and self.mantissa != 0:
+            return float("nan")
+        if self.exponent == 0:
+            fraction = self.mantissa / (2 ** self.mantissa_bits)
+            exponent = 1 - self.exponent_bias
+            return float((-1) ** self.sign * fraction * (2 ** exponent))
+
+        fraction = 1.0 + self.mantissa / (2 ** self.mantissa_bits)
+        exponent = self.exponent - self.exponent_bias
+        return float((-1) ** self.sign * fraction * (2 ** exponent))
+
+    def to_spec(self, ctx):
+        from ..spec.custom_specs.fp16 import fp16
+
+        if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 0:
+            return fp16.inf(ctx)
+        if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 1:
+            return fp16.ninf(ctx)
+        if self.exponent == self.nan_code and self.mantissa != 0:
+            return fp16.nan(ctx)
+        if self.exponent == 0 and self.mantissa == 0 and self.sign == 1:
+            return fp16.nzero(ctx)
+        if self.exponent == 0 and self.mantissa == 0 and self.sign == 0:
+            return fp16.zero(ctx)
+
+        return fp16(
+            value=ctx.real_val(self.to_val()),
+            sign=ctx.real_val(self.sign),
+            exponent=ctx.real_val(self.exponent),
+            mantissa=ctx.real_val(self.mantissa),
+            is_norm=ctx.bool_val(self.exponent != 0),
+            is_sub=ctx.bool_val(self.exponent == 0),
+            is_zero=ctx.bool_val(False),
+            is_inf=ctx.bool_val(False),
+            is_nan=ctx.bool_val(False),
+        )
+
+    def static_type(self):
+        return Float16T()
+
+    @classmethod
+    def nInf(cls):
+        return cls.from_fields(sign=1, exponent=cls.inf_code, mantissa=0)
+
+    @classmethod
+    def Inf(cls):
+        return cls.from_fields(sign=0, exponent=cls.inf_code, mantissa=0)
+
+    @classmethod
+    def nZero(cls):
+        return cls.from_fields(sign=1, exponent=cls.zero_code, mantissa=0)
+
+    @classmethod
+    def Zero(cls):
+        return cls.from_fields(sign=0, exponent=cls.zero_code, mantissa=0)
+
+    @classmethod
+    def NaN(cls, payload: int | None = None):
+        if payload is None:
+            payload = 1 << (cls.mantissa_bits - 1)
+        if not isinstance(payload, int):
+            raise TypeError(
+                f"Float16 NaN payload must be int, got {type(payload).__name__}"
+            )
+        if not (1 <= payload < (1 << cls.mantissa_bits)):
+            raise ValueError(
+                f"Float16 NaN payload must fit in {cls.mantissa_bits} mantissa "
+                f"bits and be non-zero, got {payload}"
+            )
+        return cls.from_fields(sign=0, exponent=cls.nan_code, mantissa=payload)
+
+    def copy(self, val=None):
+        if val is None:
+            val = self.val
+        return Float16(val)
+
+    def total_bits(self):
+        return 16
+
+    def __eq__(self, other):
+        return isinstance(other, Float16) and self.val == other.val
 
 
 class BFloat16(RuntimeType):
