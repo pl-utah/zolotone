@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import tempfile
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -13,7 +11,6 @@ from typing import Any
 DEFAULT_REPORT_DIR = Path("reports")
 REPORT_FILENAME = "run_designs.json"
 HTML_FILENAME = "index.html"
-REPORT_FILE_MODE = 0o644
 CHECK_NAMES = ("determinism", "specification")
 EMPTY_TABLE_ROW = (
     '<tr><td class="empty" colspan="6">No designs in this report.</td></tr>'
@@ -44,27 +41,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def load_report(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
 def _format_elapsed(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:.3f} s"
-
-
-def _format_check_elapsed(check: dict[str, Any] | None) -> str:
-    if check is None:
-        return "n/a"
-
-    timed_out = check.get("status") == "timeout"
-    elapsed_key = "wall_elapsed_s" if timed_out else "elapsed_s"
-    elapsed = _format_elapsed(check.get(elapsed_key))
-    if timed_out and elapsed != "n/a":
-        return f"{elapsed} (wall)"
-    return elapsed
 
 
 def _status_badge(check: dict[str, Any] | None) -> str:
@@ -96,7 +76,8 @@ def _elapsed_cell(elapsed: str) -> str:
 
 def _render_check_cells(check: dict[str, Any] | None) -> str:
     status_cell = f"<td>{_status_badge(check)}</td>"
-    elapsed_cell = _elapsed_cell(_format_check_elapsed(check))
+    elapsed = None if check is None else check["elapsed_s"]
+    elapsed_cell = _elapsed_cell(_format_elapsed(elapsed))
     return status_cell + elapsed_cell
 
 
@@ -150,7 +131,7 @@ def _render_design_rows(
     result: dict[str, Any],
     index: int,
 ) -> str:
-    checks = result.get("checks", {})
+    checks = result["checks"]
     details_id = f"design-details-{index}"
     design_button = (
         '<button type="button" class="design-toggle" '
@@ -159,7 +140,7 @@ def _render_design_rows(
     )
     cells = (
         f'<th scope="row">{design_button}</th>',
-        _elapsed_cell(_format_elapsed(result.get("elapsed_s"))),
+        _elapsed_cell(_format_elapsed(result["elapsed_s"])),
         _render_check_cells(checks.get("determinism")),
         _render_check_cells(checks.get("specification")),
     )
@@ -173,10 +154,6 @@ def _render_design_rows(
         f'<td colspan="6">{detail_tables}</td></tr>'
     )
     return summary_row + detail_row
-
-
-def _display_text(value: Any) -> str:
-    return escape("n/a" if value is None else str(value))
 
 
 def build_html(report: dict[str, Any], source_path: Path) -> str:
@@ -248,10 +225,10 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
   <main>
     <h1>Design Verification Report</h1>
     <p class="metadata">
-      Source: {_display_text(source_path)}<br>
-      Report started: {_display_text(report.get("started_at"))}<br>
-      Report finished: {_display_text(report.get("finished_at"))}<br>
-      Generated at: {_display_text(generated_at)}
+      Source: {escape(str(source_path))}<br>
+      Report started: {escape(report["started_at"])}<br>
+      Report finished: {escape(report["finished_at"])}<br>
+      Generated at: {generated_at}
     </p>
     <div class="table-wrap">
       <table>
@@ -260,9 +237,9 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
             <th scope="col">Design</th>
             <th scope="col">Total time</th>
             <th scope="col">Determinism status</th>
-            <th scope="col">Solver time spent</th>
+            <th scope="col">Time spent</th>
             <th scope="col">Specification status</th>
-            <th scope="col">Solver time spent</th>
+            <th scope="col">Time spent</th>
           </tr>
         </thead>
         <tbody>
@@ -288,33 +265,13 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
 """
 
 
-def _atomic_write(path: Path, contents: str) -> None:
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            temporary_file.write(contents)
-        os.chmod(temporary_path, REPORT_FILE_MODE)
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-
-
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     report_path = args.report_dir / REPORT_FILENAME
     html_path = args.report_dir / HTML_FILENAME
-    report = load_report(report_path)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
     html = build_html(report, report_path)
-    _atomic_write(html_path, html)
+    html_path.write_text(html, encoding="utf-8")
 
     print(f"Generated {html_path}")
     return 0

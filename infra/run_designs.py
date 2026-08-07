@@ -14,9 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DESIGN_TIMEOUT_S = 5 # 10 * 60
+DEFAULT_DESIGN_TIMEOUT_S = 10 * 60
 DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
-REPORT_FILE_MODE = 0o644
 CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5
 RUNNER_PATH = Path(__file__).resolve()
@@ -38,10 +37,7 @@ from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
 from examples.fp32_to_bf16 import fp32_to_bf16
 from zolotone import BFloat16T, Float32T, Node, QT, Var
-from zolotone.solver import (
-    CaseVerificationResult,
-    VerificationObserver,
-)
+from zolotone.solver import CaseVerificationResult
 
 
 @dataclass(frozen=True)
@@ -125,47 +121,23 @@ DESIGNS = (
 
 
 def _find_design(name: str) -> DesignCase:
-    for design_case in DESIGNS:
-        if design_case.name == name:
-            return design_case
-    raise ValueError(f"Unknown design: {name}")
+    return next(design for design in DESIGNS if design.name == name)
 
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+def _write_json(path: Path, value: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            json.dump(value, temporary_file, indent=2, sort_keys=True)
-            temporary_file.write("\n")
-        os.chmod(temporary_path, REPORT_FILE_MODE)
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
-def _new_design_result(name: str) -> dict[str, Any]:
-    return {
-        "name": name,
-        "checks": {},
-    }
-
-
-class CompletedCaseJournal(VerificationObserver):
+class CompletedCaseJournal:
     """Durably records cases after all work for the case has finished."""
 
     def __init__(self, path: Path) -> None:
@@ -184,52 +156,40 @@ class CompletedCaseJournal(VerificationObserver):
 def check_design(
     design_case: DesignCase,
     *,
-    check_name: str | None = None,
-    result_path: Path | None = None,
-    completed_cases_path: Path | None = None,
+    check_name: str,
+    result_path: Path,
+    completed_cases_path: Path,
 ) -> bool:
     started_at = time.perf_counter()
-    design_result = _new_design_result(design_case.name)
     design = design_case.build()
 
     print(f"Built {design_case.name}: {design.node_type}", flush=True)
-    proved = True
     checks = {
         "determinism": design.check_determinism,
         "specification": design.check_spec,
     }
-    selected_checks = CHECK_NAMES if check_name is None else (check_name,)
-    for selected_check_name in selected_checks:
-        check = checks[selected_check_name]
-        observer = (
-            CompletedCaseJournal(completed_cases_path)
-            if completed_cases_path is not None
-            else None
-        )
-        print(
-            f"Checking {design_case.name} {selected_check_name}...",
-            flush=True,
-        )
-        try:
-            result = check(observer=observer) if observer is not None else check()
-        finally:
-            if observer is not None:
-                observer.close()
-        check_proved = result["proved"]
-        proved = proved and check_proved
-        design_result["checks"][selected_check_name] = result.to_json()
-        if not check_proved:
-            print(
-                f"[FAIL] {design_case.name} {selected_check_name} was not proved",
-                file=sys.stderr,
-            )
+    observer = CompletedCaseJournal(completed_cases_path)
+    print(f"Checking {design_case.name} {check_name}...", flush=True)
+    try:
+        result = checks[check_name](observer=observer)
+    finally:
+        observer.close()
 
-    design_result.update(
-        status="passed" if proved else "failed",
-        elapsed_s=time.perf_counter() - started_at,
+    proved = result["proved"]
+    _write_json(
+        result_path,
+        {
+            "name": design_case.name,
+            "status": "passed" if proved else "failed",
+            "elapsed_s": time.perf_counter() - started_at,
+            "checks": {check_name: result.to_json()},
+        },
     )
-    if result_path is not None:
-        _atomic_write_json(result_path, design_result)
+    if not proved:
+        print(
+            f"[FAIL] {design_case.name} {check_name} was not proved",
+            file=sys.stderr,
+        )
     return proved
 
 
@@ -255,12 +215,6 @@ def _terminate_process_group(process: subprocess.Popen) -> None:
     process.wait()
 
 
-def _read_design_result(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
 def _read_completed_cases(path: Path) -> dict[str, Any]:
     cases: dict[str, dict[str, Any]] = {}
 
@@ -278,27 +232,11 @@ def _read_completed_cases(path: Path) -> dict[str, Any]:
     return cases
 
 
-def _merge_completed_cases(
-    worker_result: dict[str, Any] | None,
-    check_name: str,
-    completed_cases: dict[str, Any],
-) -> dict[str, Any] | None:
-    if not completed_cases:
-        return worker_result
-    if worker_result is None:
-        return {"checks": {check_name: {"cases": completed_cases}}}
-
-    check_result = worker_result["checks"][check_name]
-    existing_cases = check_result.get("cases", {})
-    check_result["cases"] = {**completed_cases, **existing_cases}
-    return worker_result
-
-
 def _run_design_subprocess(
     name: str,
     check_name: str,
     timeout_s: float,
-) -> tuple[str, dict[str, Any] | None, float]:
+) -> tuple[str, dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix="zolotone-run-design-") as temp_dir:
         result_path = Path(temp_dir) / "result.json"
         completed_cases_path = Path(temp_dir) / "completed_cases.jsonl"
@@ -328,44 +266,19 @@ def _run_design_subprocess(
             _terminate_process_group(process)
             status = "interrupted"
         elapsed_s = time.perf_counter() - started_at
-        worker_result = _merge_completed_cases(
-            _read_design_result(result_path),
-            check_name,
-            _read_completed_cases(completed_cases_path),
-        )
-        return status, worker_result, elapsed_s
-
-
-def _check_result_from_worker(
-    check_name: str,
-    worker_status: str,
-    worker_result: dict[str, Any] | None,
-    wall_elapsed_s: float,
-) -> dict[str, Any]:
-    check_result = (
-        dict(worker_result["checks"][check_name])
-        if worker_result is not None
-        else {}
-    )
-
-    if worker_status in {"timeout", "interrupted"}:
-        check_result.update(status=worker_status, proved=False)
-    elif worker_result is None:
-        check_result = {
-            "status": "error",
-            "proved": False,
-            "error": {
-                "phase": "worker",
-                "type": "WorkerResultError",
-                "message": (
-                    f"{check_name} worker exited with status {worker_status!r} "
-                    "without a completed check result"
-                ),
-            },
-        }
-
-    check_result["wall_elapsed_s"] = wall_elapsed_s
-    return check_result
+        if result_path.exists():
+            design_result = json.loads(result_path.read_text(encoding="utf-8"))
+            check_result = design_result["checks"][check_name]
+        else:
+            check_result = {
+                "status": "error",
+                "proved": False,
+                "cases": _read_completed_cases(completed_cases_path),
+            }
+        if status in {"timeout", "interrupted"}:
+            check_result.update(status=status, proved=False)
+        check_result["elapsed_s"] = elapsed_s
+        return status, check_result
 
 
 def _design_status(checks: dict[str, Any]) -> str:
@@ -380,15 +293,6 @@ def _design_status(checks: dict[str, Any]) -> str:
     return "failed"
 
 
-def _new_report(timeout_s: float) -> dict[str, Any]:
-    return {
-        "started_at": _utc_timestamp(),
-        "finished_at": None,
-        "timeout_s": float(timeout_s),
-        "designs": {},
-    }
-
-
 def run_designs(
     designs: Iterable[DesignCase] = DESIGNS,
     *,
@@ -396,8 +300,13 @@ def run_designs(
     report_path: Path = DEFAULT_REPORT_PATH,
 ) -> int:
     report_path = Path(report_path)
-    report = _new_report(timeout_s)
-    _atomic_write_json(report_path, report)
+    report = {
+        "started_at": _utc_timestamp(),
+        "finished_at": None,
+        "timeout_s": float(timeout_s),
+        "designs": {},
+    }
+    _write_json(report_path, report)
 
     total = 0
     succeeded = 0
@@ -406,7 +315,7 @@ def run_designs(
     for design_case in designs:
         total += 1
         design_started_at = time.perf_counter()
-        design_result = _new_design_result(design_case.name)
+        design_result = {"name": design_case.name, "checks": {}}
 
         for check_name in CHECK_NAMES:
             print(
@@ -414,20 +323,11 @@ def run_designs(
                 f"(timeout: {timeout_s:g} seconds)",
                 flush=True,
             )
-            worker_status, worker_result, wall_elapsed_s = (
-                _run_design_subprocess(
-                    design_case.name,
-                    check_name,
-                    timeout_s,
-                )
-            )
-            check_result = _check_result_from_worker(
+            worker_status, check_result = _run_design_subprocess(
+                design_case.name,
                 check_name,
-                worker_status,
-                worker_result,
-                wall_elapsed_s,
+                timeout_s,
             )
-
             design_result["checks"][check_name] = check_result
 
             if worker_status == "timeout":
@@ -445,14 +345,14 @@ def run_designs(
                 report["designs"][design_case.name] = design_result
                 report["status"] = "interrupted"
                 report["finished_at"] = _utc_timestamp()
-                _atomic_write_json(report_path, report)
+                _write_json(report_path, report)
                 raise KeyboardInterrupt
 
         status = _design_status(design_result["checks"])
         design_result["status"] = status
         design_result["elapsed_s"] = time.perf_counter() - design_started_at
         report["designs"][design_case.name] = design_result
-        _atomic_write_json(report_path, report)
+        _write_json(report_path, report)
 
         if status == "passed":
             succeeded += 1
@@ -466,7 +366,7 @@ def run_designs(
 
     report["status"] = "failed" if failed else "passed"
     report["finished_at"] = _utc_timestamp()
-    _atomic_write_json(report_path, report)
+    _write_json(report_path, report)
 
     print(f"Passed {succeeded}/{total} designs.")
     print(f"JSON report: {report_path}")
