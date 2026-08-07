@@ -207,46 +207,57 @@ def shift_if_subnormal_spec(m, e, ctx):
     ctx.assume((m * ctx.two() ** e).eq(m_ * ctx.two() ** e_))
     return m_, e_
 
-@Primitive(name="shift_if_subnormal", spec=shift_if_subnormal_spec)
-def shift_if_subnormal(normalized_m_uq: Node, normalized_e_q: Node):
-    # Classifying exponent and shifting mantissa
-    ####################################################
-    # Constants
-    subnormal_extra_bits = 10  # Customizable
-    int_bits = normalized_m_uq.node_type.int_bits
-    frac_bits = normalized_m_uq.node_type.frac_bits + subnormal_extra_bits
-    ####################################################
-    # Classify exponent
-    e_sign_uq = q_sign_bit(normalized_e_q)
-    e_is_zero = q_is_zero(normalized_e_q)
-    is_subnormal = basic_or(e_is_zero, e_sign_uq, Const(UQ(0, 1, 0)))
-    ####################################################
-    # Clamp exponent
-    e_magnitude_uq = q_to_uq(q_abs(normalized_e_q))
-    classified_e_uq = basic_mux_2_1(
-        sel=is_subnormal,
-        in0=e_magnitude_uq,
-        in1=Const(UQ(0, 1, 0)),
-        out=e_magnitude_uq.copy(),
-    )
-    ####################################################
-    # Shift mantissa
-    shift_if_subnormal = uq_add(Const(UQ(1, 1, 0)), e_magnitude_uq)
-    shift_amount = basic_mux_2_1(
-        sel=is_subnormal,
-        in0=Const(UQ(0, 1, 0)),
-        in1=shift_if_subnormal,
-        out=shift_if_subnormal.copy(),
-    )
-    
-    classified_m_uq = basic_lshift(
-        x=normalized_m_uq,
-        amount=Const(UQ.from_int(subnormal_extra_bits)),
-        out=Const(UQ(0, int_bits, frac_bits)),
-    )
-    classified_m_uq = uq_rshift_jam(classified_m_uq, shift_amount)
-    
-    return make_Tuple(classified_m_uq, classified_e_uq)
+def shift_if_subnormal(
+    normalized_m_uq: Node,
+    normalized_e_q: Node,
+    subnormal_extra_bits: int = 10,
+):
+    if not isinstance(subnormal_extra_bits, int):
+        raise TypeError("subnormal_extra_bits must be an int")
+    if subnormal_extra_bits < 0:
+        raise ValueError("subnormal_extra_bits must be non-negative")
+
+    @Primitive(name="shift_if_subnormal", spec=shift_if_subnormal_spec)
+    def impl(normalized_m_uq: Node, normalized_e_q: Node):
+        # Classifying exponent and shifting mantissa
+        ####################################################
+        # Constants
+        int_bits = normalized_m_uq.node_type.int_bits
+        frac_bits = normalized_m_uq.node_type.frac_bits + subnormal_extra_bits
+        ####################################################
+        # Classify exponent
+        e_sign_uq = q_sign_bit(normalized_e_q)
+        e_is_zero = q_is_zero(normalized_e_q)
+        is_subnormal = basic_or(e_is_zero, e_sign_uq, Const(UQ(0, 1, 0)))
+        ####################################################
+        # Clamp exponent
+        e_magnitude_uq = q_to_uq(q_abs(normalized_e_q))
+        classified_e_uq = basic_mux_2_1(
+            sel=is_subnormal,
+            in0=e_magnitude_uq,
+            in1=Const(UQ(0, 1, 0)),
+            out=e_magnitude_uq.copy(),
+        )
+        ####################################################
+        # Shift mantissa
+        subnormal_shift = uq_add(Const(UQ(1, 1, 0)), e_magnitude_uq)
+        shift_amount = basic_mux_2_1(
+            sel=is_subnormal,
+            in0=Const(UQ(0, 1, 0)),
+            in1=subnormal_shift,
+            out=subnormal_shift.copy(),
+        )
+
+        classified_m_uq = basic_lshift(
+            x=normalized_m_uq,
+            amount=Const(UQ.from_int(subnormal_extra_bits)),
+            out=Const(UQ(0, int_bits, frac_bits)),
+        )
+        classified_m_uq = uq_rshift_jam(classified_m_uq, shift_amount)
+
+        return make_Tuple(classified_m_uq, classified_e_uq)
+
+    return impl(normalized_m_uq, normalized_e_q)
 
 
 def fp32_encodings_spec(m, e, ctx):

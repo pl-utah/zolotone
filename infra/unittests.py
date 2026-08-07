@@ -50,6 +50,10 @@ from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
 from examples.bf16_mult import bf16_mult
 from examples.bf16_relu import bf16_relu
+from examples.bf16_to_fp16 import bf16_to_fp16
+from examples.fp16_to_bf16 import fp16_to_bf16
+from examples.fp16_to_fp32 import fp16_to_fp32
+from examples.fp32_to_fp16 import fp32_to_fp16
 from examples.common import and_spec, neg_spec, or_spec, xor_spec
 from examples.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
@@ -363,8 +367,12 @@ class TestRunDesigns(unittest.TestCase):
             "bf16_add",
             "bf16_mult",
             "bf16_relu",
+            "bf16_to_fp16",
             "bf16_to_fp32",
+            "fp16_to_bf16",
+            "fp16_to_fp32",
             "fp32_to_bf16",
+            "fp32_to_fp16",
             "fp32_add",
             "fp32_mult",
             "bf16x8_dot_fp32_conventional",
@@ -2372,6 +2380,29 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 )
                 self.assertEqual(design.evaluate(), expected)
 
+    def test_shift_if_subnormal_accepts_configurable_extra_bits(self):
+        from examples.encode_Float32 import shift_if_subnormal
+
+        mantissa = Const(UQ.from_float(1.5, 1, 3))
+        exponent = Const(Q.from_int(1))
+
+        default_mantissa, _ = shift_if_subnormal(mantissa, exponent)
+        custom_mantissa, _ = shift_if_subnormal(
+            mantissa,
+            exponent,
+            subnormal_extra_bits=5,
+        )
+
+        self.assertEqual(default_mantissa.node_type, UQT(1, 13))
+        self.assertEqual(custom_mantissa.node_type, UQT(1, 8))
+        self.assertEqual(default_mantissa.evaluate().to_val(), 1.5)
+        self.assertEqual(custom_mantissa.evaluate().to_val(), 1.5)
+
+        with self.assertRaisesRegex(TypeError, "must be an int"):
+            shift_if_subnormal(mantissa, exponent, subnormal_extra_bits=1.5)
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            shift_if_subnormal(mantissa, exponent, subnormal_extra_bits=-1)
+
     def test_fp32_multiplier_spec_zero_handling(self):
         from examples.fp32_mult import spec_fp32_mult
 
@@ -3034,6 +3065,93 @@ class TestBFloat16Spec(unittest.TestCase):
         self.assertNotIsInstance(encoded.is_norm, BoolVar)
         self.assertIsInstance(encoded.exponent, RealVar)
         self.assertIsInstance(encoded.mantissa, RealVar)
+
+
+class TestFloatFormatConversions(unittest.TestCase):
+    def _assert_python_and_cpp(self, conversion, runtime_type, cases):
+        source = Var(name="source", sign=runtime_type(0).static_type())
+        design = conversion(source)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for name, source_bits, expected_bits in cases:
+                with self.subTest(conversion=conversion.__name__, name=name):
+                    source.load_val(runtime_type(source_bits))
+                    self.assertEqual(design.evaluate().val, expected_bits)
+                    self.assertEqual(compiled(source_bits), expected_bits)
+        finally:
+            tempdir.cleanup()
+
+    def test_fp16_to_fp32_is_exact(self):
+        self._assert_python_and_cpp(
+            fp16_to_fp32,
+            Float16,
+            (
+                ("positive-zero", 0x0000, 0x00000000),
+                ("negative-zero", 0x8000, 0x80000000),
+                ("smallest-subnormal", 0x0001, 0x33800000),
+                ("largest-subnormal", 0x03FF, 0x387FC000),
+                ("one", 0x3C00, 0x3F800000),
+                ("largest-finite", 0x7BFF, 0x477FE000),
+                ("positive-infinity", 0x7C00, 0x7F800000),
+                ("negative-infinity", 0xFC00, 0xFF800000),
+                ("nan", 0x7E00, 0x7FC00000),
+            ),
+        )
+
+    def test_fp32_to_fp16_rounds_and_classifies(self):
+        self._assert_python_and_cpp(
+            fp32_to_fp16,
+            Float32,
+            (
+                ("positive-zero", 0x00000000, 0x0000),
+                ("negative-zero", 0x80000000, 0x8000),
+                ("half-minimum-tie", 0x33000000, 0x0000),
+                ("smallest-subnormal", 0x33800000, 0x0001),
+                ("smallest-normal", 0x38800000, 0x0400),
+                ("tie-to-even-down", 0x3F801000, 0x3C00),
+                ("tie-to-even-up", 0x3F803000, 0x3C02),
+                ("largest-finite", 0x477FE000, 0x7BFF),
+                ("overflow", 0x47800000, 0x7C00),
+                ("positive-infinity", 0x7F800000, 0x7C00),
+                ("negative-infinity", 0xFF800000, 0xFC00),
+                ("nan", 0x7FC00000, 0x7E00),
+            ),
+        )
+
+    def test_fp16_to_bf16_rounds_to_nearest_even(self):
+        self._assert_python_and_cpp(
+            fp16_to_bf16,
+            Float16,
+            (
+                ("positive-zero", 0x0000, 0x0000),
+                ("negative-zero", 0x8000, 0x8000),
+                ("smallest-subnormal", 0x0001, 0x3380),
+                ("tie-to-even-down", 0x3C04, 0x3F80),
+                ("tie-to-even-up", 0x3C0C, 0x3F82),
+                ("largest-finite", 0x7BFF, 0x4780),
+                ("positive-infinity", 0x7C00, 0x7F80),
+                ("negative-infinity", 0xFC00, 0xFF80),
+                ("nan", 0x7E00, 0x7FC0),
+            ),
+        )
+
+    def test_bf16_to_fp16_handles_range_changes(self):
+        self._assert_python_and_cpp(
+            bf16_to_fp16,
+            BFloat16,
+            (
+                ("positive-zero", 0x0000, 0x0000),
+                ("negative-zero", 0x8000, 0x8000),
+                ("smallest-fp16-subnormal", 0x3380, 0x0001),
+                ("smallest-fp16-normal", 0x3880, 0x0400),
+                ("one", 0x3F80, 0x3C00),
+                ("largest-in-range", 0x477F, 0x7BF8),
+                ("overflow", 0x4780, 0x7C00),
+                ("positive-infinity", 0x7F80, 0x7C00),
+                ("negative-infinity", 0xFF80, 0xFC00),
+                ("nan", 0x7FC0, 0x7E00),
+            ),
+        )
 
 
 class TestBFloat16Add(unittest.TestCase):
