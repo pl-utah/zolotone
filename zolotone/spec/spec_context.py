@@ -3,7 +3,7 @@ from __future__ import annotations
 from .spec_ast import *
 from ..egglog import *
 from egglog import rewrite, vars_
-from ..solver.report import build_proof_report
+from ..solver.report import ProofReport, build_proof_report
 from ..rival import rival_feasibility_check, rival_trim_context
 
 import dreal
@@ -49,17 +49,17 @@ class SpecContext:
             )
         self.requirements.append(condition)
     
-    def validate_requirements(self, timeout_ms: int = 10000) -> None:
+    def validate_requirements(self, timeout_ms: int = 10000) -> ProofReport | None:
         """Reject a specification unless all requirements are proved."""
         if not self.requirements:
-            return
+            return None
         
         from ..smt import z3_check_eq
         
         validation_ctx = self.copy(checks=list(self.requirements))
         report = z3_check_eq(validation_ctx, timeout_ms=timeout_ms)
         if report["status"] == "unsat":
-            return
+            return report
         
         detail = report.get("supplementary_info")
         message = (

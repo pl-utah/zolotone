@@ -3,16 +3,24 @@ from __future__ import annotations
 from typing import Any
 
 from .report import (
+    CaseVerificationResult,
+    CheckResult,
     ProofReport,
+    VerificationObserver,
     build_proof_report,
+    count_context_nodes,
     merge_rule_application_counts,
     validate_proof_status,
 )
 
 __all__ = [
+    "CaseVerificationResult",
+    "CheckResult",
     "ProofReport",
+    "VerificationObserver",
     "build_proof_report",
     "check_equivalence",
+    "count_context_nodes",
     "merge_rule_application_counts",
     "validate_proof_status",
 ]

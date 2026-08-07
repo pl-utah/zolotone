@@ -4,9 +4,8 @@ VENV_PYTHON := $(VENV_DIR)/bin/python3.11
 VENV_PIP := $(VENV_PYTHON) -m pip
 
 REPORTS_DIR ?= reports
-NIGHTLY_NUM_POINTS ?= 1000
-UNITTESTS_NUM_POINTS ?= 100
-SEED ?= $(shell date "+%Y%j")
+DESIGNS_REPORT := $(REPORTS_DIR)/run_designs.json
+DESIGNS_HTML := $(REPORTS_DIR)/index.html
 
 DREAL_REPO ?= https://github.com/dreal/dreal4
 
@@ -17,7 +16,9 @@ RUSTUP_HOME ?= $(HOME)/.rustup
 RUST_PATH := $(CARGO_HOME)/bin:$(PATH)
 RUST_MIN_VERSION ?= 1.85.0
 
-.PHONY: nightly install install-prereqs _check-python unit-tests _venv _install-prereqs _python-deps _install-dreal _install-rust _install-rival _bazelisk clean _download_ac_int
+.PHONY: nightly install install-prereqs unit-tests clean
+.PHONY: _check-python _venv _python-deps _install-dreal
+.PHONY: _install-rust _install-rival _download_ac_int _bazelisk
 
 _check-python:
 	@echo "Checking Python installation"
@@ -81,7 +82,7 @@ install-prereqs:
 	fi
 
 clean:
-	rm -rf $(REPORTS_DIR)/*
+	rm -f "$(DESIGNS_REPORT)" "$(DESIGNS_HTML)"
 
 _python-deps: _venv
 	@echo "Installing Python dependencies into $(VENV_DIR)"
@@ -149,21 +150,18 @@ _download_ac_int:
 install: _python-deps _install-dreal _install-rival _download_ac_int
 
 unit-tests:
-	@echo "Running infra/unittests2.py..."
-	@$(VENV_PYTHON) -m infra.unittests2
+	@echo "Running infra/unittests.py..."
+	@$(VENV_PYTHON) -m infra.unittests
 	@echo "Complete"
 
-# Bazelisk is a non-sudo version of Bazel used for nightly
+# Bazelisk is a non-sudo version of Bazel used for nightly.
 _bazelisk:
 	mkdir -p "$$HOME/.local/bin"; \
 	curl -L $(BAZELISK_URL) -o "$$HOME/.local/bin/bazel"; \
-	chmod +x "$$HOME/.local/bin/bazel"; \
+	chmod +x "$$HOME/.local/bin/bazel"
 
-# This runs without sudo, assuming that dependency packages are installed already
 nightly: clean _bazelisk install
-	@echo "Running infra/nightly.sh with seed $(SEED)..."
-	@PYTHON=$(VENV_PYTHON) \
-		bash infra/nightly.sh --report-dir "$(REPORTS_DIR)" --seed "$(SEED)" --num-points "$(NIGHTLY_NUM_POINTS)"
-	@echo "Generating $(REPORTS_DIR)/index.html from report.json..."
-	@$(VENV_PYTHON) -m infra.make_html --report-dir "$(REPORTS_DIR)"
-	@echo "Complete"
+	@echo "Running design checks..."; \
+	$(VENV_PYTHON) infra/run_designs.py --report "$(DESIGNS_REPORT)"; \
+	$(VENV_PYTHON) infra/make_designs_html.py --report-dir "$(REPORTS_DIR)"; \
+	echo "Reports written to $(REPORTS_DIR)"; \

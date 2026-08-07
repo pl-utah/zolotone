@@ -402,9 +402,7 @@ def check_rules(rules, z3_timeout_ms: int = 10000):
 
 def load_rules(egraph: EGraph, simplify=False) -> None:
     rewrites = rewrite_rules()
-    
-    res = check_rules(rewrites)
-    
+
     if simplify:
         rules = lower_rules(rewrites) + constant_rules()
     else:

@@ -6,6 +6,12 @@ from ..types.runtime import RuntimeType
 from ..types.static import StaticType
 from ..utils import make_fixed_arguments
 from ..solver.engine import check_equivalence as _solver_check_equivalence
+from ..solver.report import (
+    CaseVerificationResult,
+    CheckResult,
+    ProofReport,
+    VerificationObserver,
+)
 from .node import Node
 from .proofs import SpecRecorder, record_specs
 from ..spec import FPExpr, SpecContext, special_encoding
@@ -239,8 +245,8 @@ def _side_feasibilities_match(
     outputs: tuple[tp.Any, tp.Any],
     inputs: list[tp.Any],
     labels: dict[str, str],
-) -> bool:
-    statuses = [
+) -> tuple[bool, list[ProofReport]]:
+    reports = [
         simplify_ctx(
             _classify_collected_spec(
                 side_ctx,
@@ -249,16 +255,20 @@ def _side_feasibilities_match(
                 case_labels=labels,
                 output_name="output",
             )
-        ).get("feasibility_status", "unknown")
+        )
         for side_ctx, output in zip(
             side_contexts,
             outputs,
             strict=True,
         )
     ]
+    statuses = [
+        report.get("feasibility_status", "unknown")
+        for report in reports
+    ]
     if any(status not in {"feasible", "not feasible"} for status in statuses):
-        return False
-    return statuses[0] == statuses[1]
+        return False, reports
+    return statuses[0] == statuses[1], reports
 
 
 def check_equivalence(
@@ -267,6 +277,7 @@ def check_equivalence(
     base_ctx: SpecContext,
     inputs: list[tp.Any],
     schedule: list[str | dict[str, tp.Any]] | None = None,
+    observer: VerificationObserver | None = None,
 ):
     if first.name == second.name:
         raise ValueError("Equivalent specification sides must have distinct names")
@@ -292,7 +303,7 @@ def check_equivalence(
     )
     combined_ctx._sym_counter = second_ctx._sym_counter
 
-    combined_ctx.validate_requirements()
+    requirement_report = combined_ctx.validate_requirements()
 
     cases = _split_classification_cases(
         combined_ctx,
@@ -301,19 +312,17 @@ def check_equivalence(
         second_output,
     )
 
-    full_trace = []
+    case_results: list[CaseVerificationResult] = []
     proved = True
 
-    for case_idx, case_ctx in enumerate(cases):
+    for case_ctx in cases:
         labels = _case_labels(case_ctx.name)
-        if case_idx == 0:
-            header_padding = " " * max(len(case_ctx.name) - 8, 0)
-            print("case name", header_padding, f"\t| correct?\t| status\t| tool")
         status, proof_trace = _solver_check_equivalence(case_ctx, schedule=schedule)
         combined_feasibility = proof_trace[0].get("feasibility_status", "unknown")
+        side_feasibility_reports = []
 
         if combined_feasibility == "not feasible":
-            case_proved = _side_feasibilities_match(
+            case_proved, side_feasibility_reports = _side_feasibilities_match(
                 (first_ctx, second_ctx),
                 (first_output, second_output),
                 inputs=inputs,
@@ -323,21 +332,29 @@ def check_equivalence(
             case_proved = status == "unsat"
 
         proved = proved and case_proved
-        result = "correct" if case_proved else "wrong"
-        print(case_ctx.name, "\t|", result, "\t|", status, "\t|", proof_trace[-1]['tool'])
-        full_trace.append(proof_trace)
-        if not proved:
-            break
+        case_result = CaseVerificationResult(
+            name=case_ctx.name,
+            proved=case_proved,
+            status=status,
+            feasibility_status=combined_feasibility,
+            proof_trace=proof_trace,
+            side_feasibility_reports=side_feasibility_reports,
+        )
+        case_results.append(case_result)
+        if observer is not None:
+            observer.case_completed(case_result)
 
-    return {
-        "proved": proved,
-        "proof_traces": full_trace,
-    }
+    return CheckResult(
+        proved=proved,
+        requirement_report=requirement_report,
+        cases=case_results,
+    )
 
 
 def _check_determinism(
     node: "composite | primitive",
     schedule: list[str | dict[str, tp.Any]] | None = None,
+    observer: VerificationObserver | None = None,
 ):
     base_ctx = SpecContext(f"{node.name}_determinism")
     inputs = [base_ctx.spec_of(arg) for arg in node.inner_args]
@@ -355,6 +372,7 @@ def _check_determinism(
         base_ctx=base_ctx,
         inputs=inputs,
         schedule=schedule,
+        observer=observer,
     )
 
     print(f"{node.name} specification {'is' if result['proved'] else 'is not'} deterministic")
@@ -428,6 +446,7 @@ class composite(Node):
     def check_spec(
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
+        observer: VerificationObserver | None = None,
     ):
         base_ctx = self.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in self.inner_args]
@@ -454,6 +473,7 @@ class composite(Node):
             base_ctx=base_ctx,
             inputs=inputs,
             schedule=schedule,
+            observer=observer,
         )
         
         print(f"{self.ctx.name} {'has' if result['proved'] else 'has not'} been proved")
@@ -463,8 +483,13 @@ class composite(Node):
     def check_determinism(
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
+        observer: VerificationObserver | None = None,
     ):
-        return _check_determinism(self, schedule=schedule)
+        return _check_determinism(
+            self,
+            schedule=schedule,
+            observer=observer,
+        )
     
     def _validate_components(self, composite_name: str) -> None:
         visited: set[Node] = set()
@@ -589,8 +614,13 @@ class primitive(Node):
     def check_determinism(
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
+        observer: VerificationObserver | None = None,
     ):
-        return _check_determinism(self, schedule=schedule)
+        return _check_determinism(
+            self,
+            schedule=schedule,
+            observer=observer,
+        )
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):
         connector = "└── " if is_last else "├── "

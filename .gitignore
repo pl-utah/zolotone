@@ -3,6 +3,7 @@ __pycache__
 *.swp
 \#*\#
 reports/
+report/
 .pytest_cache/
 .ipynb_checkpoints/
 report.json
