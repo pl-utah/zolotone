@@ -96,10 +96,10 @@ def fp32_decode_spec(x: fp32, ctx):
         is_inf,
         is_nan,
     ) = x.decode()[1:]
-
+    
     def bool_to_real(flag):
         return If(flag, ctx.one(), ctx.zero())
-
+    
     return (
         sign,
         exponent,
@@ -117,9 +117,9 @@ def fp32_pack_spec(s, e, m, ctx):
     one = ctx.one()
     two = ctx.two()
     max_exponent = ctx.real_val(Float32.inf_code)
-
+    
     ctx.assume(s.eq(zero) | s.eq(one))
-
+    
     exponent_is_zero = e.eq(zero)
     exponent_is_max = e.eq(max_exponent)
     mantissa_is_zero = m.eq(zero)
@@ -128,7 +128,7 @@ def fp32_pack_spec(s, e, m, ctx):
     is_inf = exponent_is_max & mantissa_is_zero
     is_nan = exponent_is_max & (~mantissa_is_zero)
     is_norm = (~exponent_is_zero) & (~exponent_is_max)
-
+    
     signed = sign_multiplier(ctx, s)
     normal_value = (
         signed
@@ -141,7 +141,7 @@ def fp32_pack_spec(s, e, m, ctx):
         * two ** (-ctx.real_val(Float32.mantissa_bits))
         * two ** (one - ctx.real_val(Float32.exponent_bias))
     )
-     value = If(
+    value = If(
         is_norm,
         normal_value,
         If(
@@ -150,7 +150,7 @@ def fp32_pack_spec(s, e, m, ctx):
             If(is_zero, zero, ctx.fresh_real("special")),
         ),
     )
-
+    
     return fp32(
         value=value,
         sign=s,
