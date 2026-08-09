@@ -273,6 +273,40 @@ class BFloat16T(StaticType):
         return BFloat16(rng.getrandbits(self.total_bits()))
 
 
+class E4M3FNT(StaticType):
+    """Static type for the finite-only 8-bit E4M3 floating-point format."""
+
+    def __init__(self):
+        super().__init__()
+        self.sign_bits = 1
+        self.exponent_bits = 4
+        self.mantissa_bits = 3
+
+    def total_bits(self):
+        return 8
+
+    def __repr__(self):
+        return "E4M3FN<8>"
+
+    __str__ = __repr__
+
+    def __eq__(self, other):
+        return isinstance(other, E4M3FNT)
+
+    def _clone_impl(self) -> "E4M3FNT":
+        return E4M3FNT()
+
+    def to_spec(self, name, ctx):
+        from ..spec.custom_specs.e4m3fn import e4m3fn
+
+        return e4m3fn.fresh(name, ctx)
+
+    def random_runtime_value(self, rng: random.Random):
+        from .runtime import E4M3FN
+
+        return E4M3FN(rng.getrandbits(self.total_bits()))
+
+
 class TupleT(StaticType):
     def __init__(self, *args: StaticType):
         super().__init__()

@@ -1,5 +1,5 @@
-from .runtime import BFloat16, Bool, Float16, Float32, Q, RuntimeType, Tuple, UQ
-from .static import BFloat16T, BoolT, Float16T, Float32T, QT, StaticType, TupleT, UQT
+from .runtime import BFloat16, Bool, E4M3FN, Float16, Float32, Q, RuntimeType, Tuple, UQ
+from .static import BFloat16T, BoolT, E4M3FNT, Float16T, Float32T, QT, StaticType, TupleT, UQT
 
 __all__ = [
     "RuntimeType",
@@ -10,6 +10,7 @@ __all__ = [
     "Float16",
     "Float32",
     "BFloat16",
+    "E4M3FN",
     "StaticType",
     "BoolT",
     "QT",
@@ -17,5 +18,6 @@ __all__ = [
     "Float16T",
     "Float32T",
     "BFloat16T",
+    "E4M3FNT",
     "TupleT",
 ]

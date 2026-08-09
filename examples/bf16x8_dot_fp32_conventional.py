@@ -1,6 +1,5 @@
 from zolotone import *
 from .encode_Float32 import *
-from .common import *
 
 N = 4
 Wf = 30

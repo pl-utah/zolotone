@@ -54,7 +54,6 @@ from examples.bf16_to_fp16 import bf16_to_fp16
 from examples.fp16_to_bf16 import fp16_to_bf16
 from examples.fp16_to_fp32 import fp16_to_fp32
 from examples.fp32_to_fp16 import fp32_to_fp16
-from examples.common import and_spec, neg_spec, or_spec, xor_spec
 from examples.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
     dot_product_spec as bf16x8_dot_fp32_spec,
@@ -2381,8 +2380,6 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(design.evaluate(), expected)
 
     def test_shift_if_subnormal_accepts_configurable_extra_bits(self):
-        from examples.encode_Float32 import shift_if_subnormal
-
         mantissa = Const(UQ.from_float(1.5, 1, 3))
         exponent = Const(Q.from_int(1))
 
@@ -2933,6 +2930,210 @@ class TestFloat16Spec(unittest.TestCase):
         self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
         with self.assertRaisesRegex(ValueError, "Unknown fp16 classification"):
             value.observables_for_classification("finite")
+
+
+class TestE4M3FNSpec(unittest.TestCase):
+    def test_runtime_layout_values_and_validation(self):
+        self.assertEqual(E4M3FN.Zero().val, 0x00)
+        self.assertEqual(E4M3FN.nZero().val, 0x80)
+        self.assertEqual(E4M3FN.NaN().val, 0x7F)
+        self.assertEqual(E4M3FN(0x01).to_val(), 2 ** -9)
+        self.assertEqual(E4M3FN(0x07).to_val(), 7 * 2 ** -9)
+        self.assertEqual(E4M3FN(0x08).to_val(), 2 ** -6)
+        self.assertEqual(E4M3FN(0x7E).to_val(), 448.0)
+        self.assertEqual(E4M3FN(0xFE).to_val(), -448.0)
+        self.assertTrue(math.isnan(E4M3FN(0x7F).to_val()))
+        self.assertTrue(math.isnan(E4M3FN(0xFF).to_val()))
+
+        value = E4M3FN.from_fields(1, 15, 6)
+        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 15, 6))
+        self.assertEqual(value.copy(), value)
+        self.assertEqual(value.static_type(), E4M3FNT())
+        self.assertEqual(value.total_bits(), 8)
+
+        for invalid in (-1, 256, 1.5, "0"):
+            with self.subTest(packed=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    E4M3FN(invalid)
+        for fields in ((2, 0, 0), (0, -1, 0), (0, 16, 0), (0, 0, -1), (0, 0, 8)):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    E4M3FN.from_fields(*fields)
+
+    def test_exhaustive_decode_classification_and_values(self):
+        counts = {"norm": 0, "sub": 0, "zero": 0, "nan": 0}
+        names = tuple(counts)
+        for bits in range(256):
+            runtime = E4M3FN(bits)
+            decoded = e4m3fn_decode(Const(runtime))
+            fields = tuple(node.evaluate().val for node in decoded)
+            self.assertEqual(fields[:3], (bits >> 7, (bits >> 3) & 15, bits & 7))
+            self.assertEqual(sum(fields[3:]), 1)
+            counts[names[fields[3:].index(1)]] += 1
+
+            spec = runtime.to_spec(SpecContext(f"e4m3fn-{bits}"))
+            expected = spec.classification_flags()[names[fields[3:].index(1)]]
+            self.assertEqual(expected.constant_fold(), BoolLit(True))
+
+        self.assertEqual(counts, {"norm": 238, "sub": 14, "zero": 2, "nan": 2})
+
+    def test_pack_decode_round_trip_in_python_and_jit_cpp(self):
+        @Composite(name="e4m3fn_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def roundtrip(x):
+            decoded = e4m3fn_decode(x)
+            return e4m3fn_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var("value", sign=E4M3FNT())
+        design = roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(256):
+                value.load_val(E4M3FN(bits))
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+
+    def test_symbolic_shape_classification_and_observables(self):
+        ctx = SpecContext("fresh-e4m3fn")
+        value = e4m3fn.fresh("x", ctx)
+        self.assertEqual(tuple(value.classification_flags()), ("norm", "sub", "zero", "nan"))
+        self.assertNotIn("inf", value.classification_flags())
+        self.assertEqual(value.observables_for_classification("norm"), (value.value,))
+        self.assertEqual(value.observables_for_classification("sub"), (value.value,))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
+        self.assertIsInstance(E4M3FNT().to_spec("input", ctx), e4m3fn)
+        self.assertIsInstance(E4M3FNT().random_runtime_value(random.Random(1)), E4M3FN)
+
+        self.assertEqual(e4m3fn.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e4m3fn.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
+        with self.assertRaisesRegex(ValueError, "Unknown e4m3fn classification"):
+            value.observables_for_classification("inf")
+
+    def test_symbolic_encode_boundaries(self):
+        cases = (
+            (0.0, "is_pzero"),
+            (2 ** -10, "is_pzero"),
+            (2 ** -9, "is_sub"),
+            (2 ** -6, "is_norm"),
+            (448.0, "is_norm"),
+            (1000.0, "is_norm"),
+            (-1000.0, "is_norm"),
+        )
+        for real_value, predicate in cases:
+            with self.subTest(real_value=real_value):
+                ctx = SpecContext("encode-e4m3fn")
+                encoded = e4m3fn.encode(RealLit(real_value), ctx)
+                ctx.check(getattr(encoded, predicate))
+                report = simplify_ctx(ctx)
+                if report["status"] == "unknown":
+                    report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+                self.assertEqual(report["status"], "unsat", report)
+
+    def test_bit_level_encoder_rne_signed_zero_and_saturation(self):
+        sign = Var("sign", UQT(1, 0))
+        exponent = Var("exponent", QT(8, 0))
+        mantissa = Var("mantissa", UQT(12, 12))
+        design = e4m3fn_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+
+        def q8(value):
+            return Q(value & 0xFF, 8, 0)
+
+        cases = (
+            (0, 7, 0.0, 0x00),
+            (1, 7, 0.0, 0x80),
+            (0, 7, 1.0, 0x38),
+            (1, 7, 1.0, 0xB8),
+            (0, -1, 0.25, 0x00),  # half of the minimum subnormal
+            (0, -1, 0.75, 0x02),  # 1.5 subnormal units ties to even
+            (0, -1, 1.25, 0x02),  # 2.5 subnormal units ties to even
+            (0, -1, 3.75, 0x08),  # largest-sub/min-normal midpoint
+            (0, 7, 1.0625, 0x38),  # normal tie rounds to even mantissa 0
+            (0, 7, 1.1875, 0x3A),  # normal tie rounds to even mantissa 2
+            (0, 7, 1.9375, 0x40),  # rounding carry increments exponent
+            (0, 15, 1.75, 0x7E),
+            (0, 15, 1.875, 0x7E),  # reserved NaN result saturates
+            (0, 20, 1.0, 0x7E),
+            (1, 20, 1.0, 0xFE),
+        )
+        try:
+            for sign_value, exponent_value, mantissa_value, expected in cases:
+                with self.subTest(
+                    sign=sign_value,
+                    exponent=exponent_value,
+                    mantissa=mantissa_value,
+                ):
+                    sign_runtime = UQ(sign_value, 1, 0)
+                    exponent_runtime = q8(exponent_value)
+                    mantissa_runtime = UQ.from_float(mantissa_value, 12, 12)
+                    sign.load_val(sign_runtime)
+                    exponent.load_val(exponent_runtime)
+                    mantissa.load_val(mantissa_runtime)
+                    self.assertEqual(design.evaluate().val, expected)
+                    self.assertEqual(
+                        compiled(
+                            sign_runtime.val,
+                            exponent_runtime.val,
+                            mantissa_runtime.val,
+                        ),
+                        expected,
+                    )
+        finally:
+            tempdir.cleanup()
+
+    def test_encoder_recreates_every_finite_encoding(self):
+        sign = Var("finite_sign", UQT(1, 0))
+        exponent = Var("finite_exponent", QT(8, 0))
+        mantissa = Var("finite_mantissa", UQT(2, 12))
+        design = e4m3fn_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(256):
+                runtime = E4M3FN(bits)
+                if runtime.is_nan:
+                    continue
+                if runtime.exponent == 0:
+                    exponent_value = 1
+                    mantissa_value = runtime.mantissa / 8
+                else:
+                    exponent_value = runtime.exponent
+                    mantissa_value = 1 + runtime.mantissa / 8
+
+                sign_value = UQ(runtime.sign, 1, 0)
+                exponent_value = Q(exponent_value, 8, 0)
+                mantissa_value = UQ.from_float(mantissa_value, 2, 12)
+                sign.load_val(sign_value)
+                exponent.load_val(exponent_value)
+                mantissa.load_val(mantissa_value)
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(
+                    compiled(sign_value.val, exponent_value.val, mantissa_value.val),
+                    bits,
+                )
+        finally:
+            tempdir.cleanup()
+
+    def test_saturating_encoder_determinism_and_specification_proofs(self):
+        def spec(ctx):
+            return e4m3fn.encode(ctx.two() ** ctx.real_val(13), ctx)
+
+        @Composite(name="e4m3fn_encode_saturation_proof", spec=spec)
+        def saturation_design():
+            return e4m3fn_encode(
+                Const(UQ(0, 1, 0)),
+                Const(Q.from_int(20)),
+                Const(UQ.from_int(1)),
+            )
+
+        design = saturation_design()
+        schedule = [
+            {"tool": "simplify"},
+            {"tool": "z3", "timeout_ms": 5000},
+        ]
+        self.assertTrue(design.check_determinism(schedule=schedule)["proved"])
+        self.assertTrue(design.check_spec(schedule=schedule)["proved"])
 
 
 class TestBFloat16Spec(unittest.TestCase):

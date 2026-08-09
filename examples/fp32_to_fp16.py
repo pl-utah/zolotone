@@ -1,6 +1,5 @@
 from zolotone import *
 
-from .common import *
 from .encode_Float16 import fp16_encode
 
 

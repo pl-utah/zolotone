@@ -1,7 +1,6 @@
 from zolotone import *
 from .encode_Float32 import *
 from .CSA import CSA_tree4
-from .common import *
 from .max_exponent import *
 
 s = 2

@@ -1,6 +1,5 @@
 from zolotone import *
 
-from .common import *
 from .encode_Float32 import *
 
 def spec_fp32_mult(x: fp32, y: fp32, ctx):

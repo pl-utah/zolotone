@@ -1,14 +1,5 @@
 from zolotone import *
 
-from .common import *
-from .encode_Float32 import (
-    drop_implicit_bit,
-    normalize_to_1_xxx,
-    round_mantissa,
-    shift_if_subnormal,
-)
-
-
 def fp16_encodings_spec(m, e, ctx):
     return m * ctx.two() ** ctx.real_val(Float16.mantissa_bits), e
 

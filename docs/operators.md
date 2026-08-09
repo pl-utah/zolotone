@@ -1,6 +1,8 @@
 ### Type notation
 - `Q<I,F>`: signed fixed-point with `I` integer and `F` fractional bits; `UQ<I,F>` unsigned.
-- `Float16`, `BFloat16`, `Float32`: IEEE754 formats.
+- `Float16`, `BFloat16`, `Float32`: IEEE754 formats; `E4M3FN` is the
+  finite-only 8-bit `S.EEEE.MMM` format (bias 7, signed zeros, subnormals,
+  finite values through ±448, and the reserved `x.1111.111` NaN codes).
 - `T`: arbitrary bitvector type, `Any`: unconstrained node chosen by caller.
 - `x`: tuple: explicit output node supplied by caller (shape must match the result).
 - `n<int>, s<int> etc.`: literal integers passed as Python args, not nodes.
@@ -95,6 +97,14 @@
 | `fp16_pack` | Primitive | `UQ<1,0> -> UQ<5,0> -> UQ<10,0> -> Float16` | Assemble binary16 from sign, exponent, and mantissa fields. |
 | `fp16_decode` | Primitive | `Float16 -> DecodedFP16` | Split binary16 into fields and zero/normal/subnormal/infinity/NaN flags. |
 
+## E4M3FN helpers (`zolotone/components/E4M3FN.py`)
+
+| Name | Kind | Type | Purpose/Notes |
+| --- | --- | --- | --- |
+| `e4m3fn_pack` | Primitive | `UQ<1,0> -> UQ<4,0> -> UQ<3,0> -> E4M3FN` | Assemble the packed `S.EEEE.MMM` byte. |
+| `e4m3fn_decode` | Primitive | `E4M3FN -> DecodedE4M3FN` | Split fields and produce normal/subnormal/zero/NaN flags; there is no infinity flag. |
+| `e4m3fn_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> E4M3FN` | Normalize, stage three G/R/S bits for subnormals, round with RNE, preserve signed zero, and saturate overflow or the reserved NaN code to ±448. |
+
 ## Float helpers (`zolotone/numtypes/Float.py`)
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
@@ -117,13 +127,26 @@
 | `Copy` | Op | `T -> T` | Node copy. |
 | `Tuple_get_item` | Op | `(T0 x T1 x ...) -> idx<int> -> T_idx` | Tuple selection by constant index. |
 
-### Examples
-
-## Common helpers (`examples/common.py`)
+## Common helpers (`zolotone/components/common.py`)
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
-| `mantissa_add_implicit_bit` | Composite | `UQ<I,0> -> UQ<1,I>` | Prefix implicit leading 1. |
-| `sign_xor` | Primitive | `UQ<1,0> -> UQ<1,0> -> UQ<1,0>` | XOR sign bits. |
+| `add_implicit_bit` | Primitive | `UQ<0,F> -> UQ<1,F>` | Prefix the implicit leading significand bit. |
+| `fraction_to_integer` | Primitive | `UQ<0,F> -> UQ<F,0>` | Reinterpret fractional bits as an integer field. |
+| `integer_to_fraction` | Primitive | `UQ<I,0> -> UQ<0,I>` | Reinterpret integer bits as a fractional field. |
+| `bit_and`, `bit_or`, `bit_xor`, `bit_neg` | Primitive | single-bit inputs -> `UQ<1,0>` | Boolean operations represented as one-bit implementation nodes. |
+
+## Rounding routines (`zolotone/components/rounding_routines.py`)
+
+| Name | Kind | Type | Purpose/Notes |
+| --- | --- | --- | --- |
+| `uq_RNE_IEEE` | Primitive | `UQ<I,F> -> bits_to_cut<int> -> (UQ<I',F'> x UQ<1,0>)` | Guard/round/sticky round-to-nearest, ties-to-even with an overflow bit. |
+| `round_mantissa` | Primitive | `UQ<I,F> -> UQ<E,0> -> target_bits<int> -> (UQ<I',F'> x UQ<E+1,0>)` | Round a mantissa and increment the exponent on carry. |
+| `lzc` | Primitive | `UQ<I,F> -> UQ<ceil(log2(I+F+1)),0>` | Count leading zero bits. |
+| `normalize_to_1_xxx` | Primitive | `UQ<I,F> -> Q<E,0> -> (UQ<1,F'> x Q<E',0>)` | Normalize a nonzero mantissa to `1.xxx` while adjusting its exponent. |
+| `drop_implicit_bit` | Primitive | `UQ<1,F> -> UQ<0,F>` | Remove the normalized implicit leading bit. |
+| `shift_if_subnormal` | Primitive | normalized mantissa/exponent -> shifted mantissa/exponent | Stage explicit G/R/S bits and shift values entering the subnormal range. |
+
+### Examples
 
 ## Optimized max exponent (`examples/max_exponent.py`)
 | Name | Kind | Type | Purpose/Notes |
@@ -139,10 +162,8 @@
 ## Float32 encoder (`examples/encode_Float32.py`)
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
-| `round_to_the_nearest_even` | Primitive | `UQ<I,F> -> UQ<E,0> -> target_bits<int> -> (UQ<min(I, target_bits), max(target_bits - I, 0)> x UQ<E+1,0>)` | Guard/round/sticky rounding of mantissa and exponent bump. |
-| `lzc` | Primitive | `UQ<I,F> -> UQ<ceil(log2(I+F+1)), 0>` | Leading-zero count. |
-| `normalize_to_1_xxx` | Primitive | `UQ<I,F> -> Q<E,0> -> (UQ<1, max(I-1,0)+F> x Q<max(E, max(max(1, ceil(log2(I+F+1)))+1, bitlen(I)+1)+2)+1, 0>)` | Normalize mantissa to `1.xxx`; exponent stays signed with fractional bits preserved. |
-| `encode_Float32` | Primitive | `Q<I,F> -> Q<E,0> -> Float32` | Pack sign, exponent, mantissa with subnormal/inf/nan handling. |
+| `fp32_encodings` | Primitive | rounded mantissa/exponent -> raw mantissa/exponent | Clamp infinity and form final FP32 fields. |
+| `fp32_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> Float32` | Encode FP32 using the shared component rounding routines. |
 
 ## Optimized design helpers (`examples/optimized.py`)
 | Name | Kind | Type | Purpose/Notes |
