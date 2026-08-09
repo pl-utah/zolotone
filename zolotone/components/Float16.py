@@ -5,6 +5,13 @@ from ..spec import *
 from ..types import *
 from .Tuple import make_Tuple
 from .basics import *
+from .rounding_routines import (
+    drop_implicit_bit,
+    normalize_to_1_xxx,
+    round_mantissa,
+    shift_if_subnormal,
+)
+from .UQ import uq_fraction_to_integer, uq_is_zero, uq_min
 
 
 ########### Private Helpers ############
@@ -272,4 +279,63 @@ def fp16_decode(x: Node) -> DecodedFP16:
         is_zero=decoded[5],
         is_inf=decoded[6],
         is_nan=decoded[7],
+    )
+
+
+def fp16_encodings_spec(m, e, ctx):
+    return m * ctx.two() ** ctx.real_val(Float16.mantissa_bits), e
+
+
+@Primitive(name="fp16_encodings", spec=fp16_encodings_spec)
+def fp16_encodings(m_rounded: Node, e_rounded: Node):
+    final_e_wide = uq_min(
+        e_rounded,
+        Const(UQ.from_int(Float16.inf_code)),
+    )
+    final_e = basic_identity(
+        final_e_wide,
+        Const(UQ.from_int(Float16.inf_code)),
+    )
+    is_inf = basic_and_reduce(final_e, Const(UQ(0, 1, 0)))
+    final_m = basic_mux_2_1(
+        is_inf,
+        m_rounded,
+        Const(UQ(0, 1, 0)),
+        m_rounded.copy(),
+    )
+    return make_Tuple(uq_fraction_to_integer(final_m), final_e)
+
+
+def fp16_encode_spec(s, e, m, ctx):
+    signed = sign_multiplier(ctx, s)
+    finite_value = (
+        signed
+        * m
+        * ctx.two() ** (e - ctx.real_val(Float16.exponent_bias))
+    )
+    return fp16.encode(finite_value, ctx)
+
+
+@Composite(name="fp16_encode", spec=fp16_encode_spec)
+def fp16_encode(s: Node, e: Node, m: Node) -> Node:
+    if e.node_type.frac_bits != 0:
+        raise ValueError("fp16_encode exponent must have zero fractional bits")
+
+    encode_exact_zero = uq_is_zero(m)
+    normalized_m, normalized_e = normalize_to_1_xxx(m, e)
+    shifted_m, shifted_e = shift_if_subnormal(
+        normalized_m,
+        normalized_e,
+        subnormal_extra_bits=3,
+    )
+    rounded_m, rounded_e = round_mantissa(
+        drop_implicit_bit(shifted_m),
+        shifted_e,
+        target_bits=Float16.mantissa_bits,
+    )
+    final_m, final_e = fp16_encodings(rounded_m, rounded_e)
+    return if_then_else(
+        encode_exact_zero,
+        Const(Float16.Zero()),
+        fp16_pack(s, final_e, final_m),
     )

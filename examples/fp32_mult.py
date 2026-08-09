@@ -1,6 +1,5 @@
 from zolotone import *
 
-from .encode_Float32 import *
 
 def spec_fp32_mult(x: fp32, y: fp32, ctx):
     invalid = (x.is_inf & y.is_zero) | (y.is_inf & x.is_zero)
@@ -53,8 +52,8 @@ def fp32_mult(x: Node, y: Node) -> Node:
     )
     
     # UQ<23, 0> -> UQ<0, 23>
-    x_m_fraction = integer_to_fraction(X.mantissa)
-    y_m_fraction = integer_to_fraction(Y.mantissa)
+    x_m_fraction = uq_integer_to_fraction(X.mantissa)
+    y_m_fraction = uq_integer_to_fraction(Y.mantissa)
     
     # UQ<1, 23>
     x_m_formatted = if_then_else(

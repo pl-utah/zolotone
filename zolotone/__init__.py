@@ -5,7 +5,7 @@ from .components.basics import *
 from .components.Bool import *
 from .components.Q import *
 from .components.UQ import *
-from .components.Float import *
+from .components.Float32 import *
 from .components.Float16 import *
 from .components.BFloat16 import *
 from .components.common import *

@@ -6,7 +6,6 @@ from ..types import UQ
 from .basics import (
     basic_and,
     basic_concat,
-    basic_identity,
     basic_invert,
     basic_or,
     basic_xor,
@@ -14,8 +13,6 @@ from .basics import (
 
 __all__ = [
     "add_implicit_bit",
-    "fraction_to_integer",
-    "integer_to_fraction",
     "and_spec",
     "bit_and",
     "xor_spec",
@@ -41,40 +38,6 @@ def add_implicit_bit(x: Node) -> Primitive:
             y=x,
             out=Const(UQ(0, 1, frac_bits)),
         )
-
-    return impl(x)
-
-
-def fraction_to_integer(x: Node) -> Primitive:
-    if x.node_type.int_bits != 0:
-        raise ValueError(
-            "fraction_to_integer expects a UQ value with zero integer bits"
-        )
-    frac_bits = x.node_type.frac_bits
-
-    def spec(x, ctx):
-        return x * ctx.two() ** ctx.real_val(frac_bits)
-
-    @Primitive(name="fraction_to_integer", spec=spec, c_inline=True)
-    def impl(x: Node):
-        return basic_identity(x=x, out=Const(UQ(0, frac_bits, 0)))
-
-    return impl(x)
-
-
-def integer_to_fraction(x: Node) -> Primitive:
-    if x.node_type.frac_bits != 0:
-        raise ValueError(
-            "integer_to_fraction expects a UQ value with zero fractional bits"
-        )
-    int_bits = x.node_type.int_bits
-
-    def spec(x, ctx):
-        return x * ctx.two() ** (-ctx.real_val(int_bits))
-
-    @Primitive(name="integer_to_fraction", spec=spec, c_inline=True)
-    def impl(x: Node):
-        return basic_identity(x=x, out=Const(UQ(0, 0, int_bits)))
 
     return impl(x)
 

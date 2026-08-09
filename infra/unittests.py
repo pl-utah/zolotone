@@ -2295,8 +2295,6 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         self.assertIs(decoded.is_nan, decoded[7])
 
     def test_fp32_encoder_spec_canonicalizes_exact_zero(self):
-        from examples.encode_Float32 import fp32_encode_spec
-
         for sign in (0, 1):
             with self.subTest(sign=sign):
                 ctx = SpecContext(f"fp32-encode-zero-sign-{sign}")
@@ -2330,8 +2328,6 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         self.assertIsInstance(encoded.mantissa, RealVar)
 
     def test_fp32_encode_design_canonicalizes_exact_zero(self):
-        from examples.encode_Float32 import fp32_encode
-
         for sign in (0, 1):
             with self.subTest(sign=sign):
                 design = fp32_encode(
@@ -2360,8 +2356,6 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_encode_design_preserves_negative_underflow_sign(self):
-        from examples.encode_Float32 import fp32_encode
-
         sign = Const(UQ(1, 1, 0))
         exponent = Const(Q.from_int(-22))
 

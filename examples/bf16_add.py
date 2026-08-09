@@ -1,6 +1,5 @@
 from zolotone import *
 
-from .encode_BFloat16 import *
 
 
 def spec_bf16_add(x: bf16, y: bf16, ctx):
@@ -53,8 +52,8 @@ def bf16_add(x: Node, y: Node) -> Node:
     )
 
     # 3. Format and align significands.
-    x_mantissa_fraction = integer_to_fraction(X.mantissa)
-    y_mantissa_fraction = integer_to_fraction(Y.mantissa)
+    x_mantissa_fraction = uq_integer_to_fraction(X.mantissa)
+    y_mantissa_fraction = uq_integer_to_fraction(Y.mantissa)
 
     # Implicit bit
     x_significand = if_then_else(

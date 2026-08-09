@@ -1,6 +1,5 @@
 from zolotone import *
 
-from .encode_Float16 import fp16_encode
 
 
 def spec_bf16_to_fp16(x: bf16, ctx):
@@ -18,7 +17,7 @@ def spec_bf16_to_fp16(x: bf16, ctx):
 def bf16_to_fp16(x: Node) -> Node:
     X = bf16_decode(x)
 
-    mantissa_fraction = integer_to_fraction(X.mantissa)
+    mantissa_fraction = uq_integer_to_fraction(X.mantissa)
     significand = if_then_else(
         X.is_norm,
         add_implicit_bit(mantissa_fraction),

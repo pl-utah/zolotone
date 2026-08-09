@@ -10,8 +10,7 @@ from .rounding_routines import (
     round_mantissa,
     shift_if_subnormal,
 )
-from .common import fraction_to_integer
-from .UQ import uq_eq, uq_gt, uq_is_zero, uq_min
+from .UQ import uq_eq, uq_fraction_to_integer, uq_gt, uq_is_zero, uq_min
 from .basics import (
     basic_and,
     basic_and_reduce,
@@ -255,7 +254,7 @@ def e4m3fn_encodings(m_rounded: Node, e_rounded: Node):
         clamped_e_wide,
         Const(UQ(0, E4M3FN.exponent_bits, 0)),
     )
-    final_m = fraction_to_integer(m_rounded)
+    final_m = uq_fraction_to_integer(m_rounded)
 
     exponent_is_15 = uq_eq(final_e, max_exponent)
     mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(0, 1, 0)))

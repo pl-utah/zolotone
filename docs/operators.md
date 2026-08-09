@@ -58,6 +58,8 @@
 | `uq_lshift` | Primitive | `UQ<I,F> -> Any -> UQ<I,F>` | Logical left shift without resize. |
 | `uq_select` | Primitive | `UQ<I,F> -> start<int> -> end<int> -> UQ<(start-end+1)-k, k>` where `k = max(0, min(start, F-1)-end+1)` | Bit slice with fractional portion preserved when slicing frac bits. |
 | `uq_resize` | Primitive | `UQ<I,F> -> int_bits<int> -> frac_bits<int> -> UQ<int_bits, frac_bits>` | Resize/round toward zero (no truncation allowed). |
+| `uq_fraction_to_integer` | Primitive | `UQ<0,F> -> UQ<F,0>` | Reinterpret fractional bits as an integer field. |
+| `uq_integer_to_fraction` | Primitive | `UQ<I,0> -> UQ<0,I>` | Reinterpret integer bits as a fractional field. |
 
 ## Signed fixed-point primitives (`zolotone/numtypes/Q.py`)
 | Name | Kind | Type | Purpose/Notes |
@@ -83,19 +85,22 @@
 | `q_add_sign` | Primitive | `Q<I,F> -> UQ<1,0> -> Q<I,F>` | Apply sign bit to unsigned magnitude. |
 | `q_abs` | Primitive | `Q<I,F> -> Q<I,F>` | Absolute value (safe at min). |
 
-## BF16 helpers (`zolotone/numtypes/BFloat16.py`)
+## BF16 helpers (`zolotone/components/BFloat16.py`)
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
 | `_bf16_mantissa` | Op | `BFloat16 -> UQ<7,0>` | Extract mantissa bits. |
 | `_bf16_exponent` | Op | `BFloat16 -> UQ<8,0>` | Extract exponent bits. |
 | `_bf16_sign` | Op | `BFloat16 -> UQ<1,0>` | Extract sign bit. |
 | `bf16_decode` | Primitive | `BFloat16 -> (UQ<1,0> x UQ<7,0> x UQ<8,0>)` | Split BF16 into sign/mantissa/exponent. |
+| `bf16_pack` | Primitive | `UQ<1,0> -> UQ<8,0> -> UQ<7,0> -> BFloat16` | Assemble BF16 fields. |
+| `bf16_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> BFloat16` | Encode BF16 using the shared component rounding routines. |
 
 ## FP16 helpers (`zolotone/components/Float16.py`)
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
 | `fp16_pack` | Primitive | `UQ<1,0> -> UQ<5,0> -> UQ<10,0> -> Float16` | Assemble binary16 from sign, exponent, and mantissa fields. |
 | `fp16_decode` | Primitive | `Float16 -> DecodedFP16` | Split binary16 into fields and zero/normal/subnormal/infinity/NaN flags. |
+| `fp16_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> Float16` | Encode FP16 using the shared component rounding routines. |
 
 ## E4M3FN helpers (`zolotone/components/E4M3FN.py`)
 
@@ -105,10 +110,13 @@
 | `e4m3fn_decode` | Primitive | `E4M3FN -> DecodedE4M3FN` | Split fields and produce normal/subnormal/zero/NaN flags; there is no infinity flag. |
 | `e4m3fn_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> E4M3FN` | Normalize, stage three G/R/S bits for subnormals, round with RNE, preserve signed zero, and saturate overflow or the reserved NaN code to ±448. |
 
-## Float helpers (`zolotone/numtypes/Float.py`)
+## Float32 helpers (`zolotone/components/Float32.py`)
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
-| `float32_alloc` | Op | `UQ<1,0> -> UQ<23,0> -> UQ<8,0> -> Float32` | Assemble FP32 from sign, mantissa, exponent fields. |
+| `fp32_pack` | Primitive | `UQ<1,0> -> UQ<8,0> -> UQ<23,0> -> Float32` | Assemble FP32 fields. |
+| `fp32_decode` | Primitive | `Float32 -> DecodedFP32` | Split FP32 into fields and classification flags. |
+| `fp32_encodings` | Primitive | rounded mantissa/exponent -> raw mantissa/exponent | Clamp infinity and form final FP32 fields. |
+| `fp32_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> Float32` | Encode FP32 using the shared component rounding routines. |
 
 ## Tuple helpers (`zolotone/numtypes/Tuple.py`)
 | Name | Kind | Type | Purpose/Notes |
@@ -131,8 +139,6 @@
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
 | `add_implicit_bit` | Primitive | `UQ<0,F> -> UQ<1,F>` | Prefix the implicit leading significand bit. |
-| `fraction_to_integer` | Primitive | `UQ<0,F> -> UQ<F,0>` | Reinterpret fractional bits as an integer field. |
-| `integer_to_fraction` | Primitive | `UQ<I,0> -> UQ<0,I>` | Reinterpret integer bits as a fractional field. |
 | `bit_and`, `bit_or`, `bit_xor`, `bit_neg` | Primitive | single-bit inputs -> `UQ<1,0>` | Boolean operations represented as one-bit implementation nodes. |
 
 ## Rounding routines (`zolotone/components/rounding_routines.py`)
@@ -158,12 +164,6 @@
 | --- | --- | --- | --- |
 | `CSA` | Primitive | `QT<I0, F0> -> QT<I1, F1> -> QT<I2, F2> -> (QT<max(I0, I1, I2), max(F0, F1, F2)> x QT<max(I0, I1, I2) + 1, max(F0, F1, F2)>)` | Carry save adder. |
 | `CSA_tree4` | Composite | `Q<I0,F0> -> Q<I1,F1> -> Q<I2,F2> -> Q<I3,F3> -> Q<max(I0, I1, I2, I3)+3, max(F0, F1, F2, F3)>` | 4-input CSA tree with width alignment. |
-
-## Float32 encoder (`examples/encode_Float32.py`)
-| Name | Kind | Type | Purpose/Notes |
-| --- | --- | --- | --- |
-| `fp32_encodings` | Primitive | rounded mantissa/exponent -> raw mantissa/exponent | Clamp infinity and form final FP32 fields. |
-| `fp32_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> Float32` | Encode FP32 using the shared component rounding routines. |
 
 ## Optimized design helpers (`examples/optimized.py`)
 | Name | Kind | Type | Purpose/Notes |
