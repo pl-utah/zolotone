@@ -307,6 +307,74 @@ class E4M3FNT(StaticType):
         return E4M3FN(rng.getrandbits(self.total_bits()))
 
 
+class E5M2FNUZT(StaticType):
+    """Static type for the AMD finite-only E5M2FNUZ format."""
+
+    def __init__(self):
+        super().__init__()
+        self.sign_bits = 1
+        self.exponent_bits = 5
+        self.mantissa_bits = 2
+
+    def total_bits(self):
+        return 8
+
+    def __repr__(self):
+        return "E5M2FNUZ<8>"
+
+    __str__ = __repr__
+
+    def __eq__(self, other):
+        return isinstance(other, E5M2FNUZT)
+
+    def _clone_impl(self) -> "E5M2FNUZT":
+        return E5M2FNUZT()
+
+    def to_spec(self, name, ctx):
+        from ..spec.custom_specs.e5m2fnuz import e5m2fnuz
+
+        return e5m2fnuz.fresh(name, ctx)
+
+    def random_runtime_value(self, rng: random.Random):
+        from .runtime import E5M2FNUZ
+
+        return E5M2FNUZ(rng.getrandbits(self.total_bits()))
+
+
+class E2M1T(StaticType):
+    """Static type for the finite-only four-bit E2M1 format."""
+
+    def __init__(self):
+        super().__init__()
+        self.sign_bits = 1
+        self.exponent_bits = 2
+        self.mantissa_bits = 1
+
+    def total_bits(self):
+        return 4
+
+    def __repr__(self):
+        return "E2M1<4>"
+
+    __str__ = __repr__
+
+    def __eq__(self, other):
+        return isinstance(other, E2M1T)
+
+    def _clone_impl(self) -> "E2M1T":
+        return E2M1T()
+
+    def to_spec(self, name, ctx):
+        from ..spec.custom_specs.e2m1 import e2m1
+
+        return e2m1.fresh(name, ctx)
+
+    def random_runtime_value(self, rng: random.Random):
+        from .runtime import E2M1
+
+        return E2M1(rng.getrandbits(self.total_bits()))
+
+
 class TupleT(StaticType):
     def __init__(self, *args: StaticType):
         super().__init__()

@@ -102,29 +102,12 @@ class DecodedFP32(NamedTuple):
 
 
 def fp32_decode_spec(x: fp32, ctx):
-    (
-        sign,
-        exponent,
-        mantissa,
-        is_normal,
-        is_subnormal,
-        is_zero,
-        is_inf,
-        is_nan,
-    ) = x.decode()[1:]
-
-    def bool_to_real(flag):
-        return If(flag, ctx.one(), ctx.zero())
-
-    return (
-        sign,
-        exponent,
-        mantissa,
-        bool_to_real(is_normal),
-        bool_to_real(is_subnormal),
-        bool_to_real(is_zero),
-        bool_to_real(is_inf),
-        bool_to_real(is_nan),
+    decoded = x.decode()[1:]
+    classification_count = len(x.classification_flags())
+    fields = decoded[:-classification_count]
+    classifications = decoded[-classification_count:]
+    return fields + tuple(
+        If(flag, ctx.one(), ctx.zero()) for flag in classifications
     )
 
 

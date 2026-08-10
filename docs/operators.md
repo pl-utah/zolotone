@@ -3,6 +3,12 @@
 - `Float16`, `BFloat16`, `Float32`: IEEE754 formats; `E4M3FN` is the
   finite-only 8-bit `S.EEEE.MMM` format (bias 7, signed zeros, subnormals,
   finite values through ±448, and the reserved `x.1111.111` NaN codes).
+- `E5M2FNUZ`: AMD finite-only 8-bit `S.EEEEE.MM` (bias 16), with `0x00`
+  as its sole zero, `0x80` as its sole NaN, subnormals from `2^-17`, and
+  finite values through ±57,344.
+- `E2M1`: finite-only 4-bit `S.EE.M` (bias 1), with signed zeros,
+  subnormal magnitude 0.5, and normal values through ±6; it has no NaN or
+  infinity encodings.
 - `T`: arbitrary bitvector type, `Any`: unconstrained node chosen by caller.
 - `x`: tuple: explicit output node supplied by caller (shape must match the result).
 - `n<int>, s<int> etc.`: literal integers passed as Python args, not nodes.
@@ -109,6 +115,22 @@
 | `e4m3fn_pack` | Primitive | `UQ<1,0> -> UQ<4,0> -> UQ<3,0> -> E4M3FN` | Assemble the packed `S.EEEE.MMM` byte. |
 | `e4m3fn_decode` | Primitive | `E4M3FN -> DecodedE4M3FN` | Split fields and produce normal/subnormal/zero/NaN flags; there is no infinity flag. |
 | `e4m3fn_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> E4M3FN` | Normalize, stage three G/R/S bits for subnormals, round with RNE, preserve signed zero, and saturate overflow or the reserved NaN code to ±448. |
+
+## E5M2FNUZ helpers (`zolotone/components/E5M2FNUZ.py`)
+
+| Name | Kind | Type | Purpose/Notes |
+| --- | --- | --- | --- |
+| `e5m2fnuz_pack` | Primitive | `UQ<1,0> -> UQ<5,0> -> UQ<2,0> -> E5M2FNUZ` | Assemble the packed `S.EEEEE.MM` byte. |
+| `e5m2fnuz_decode` | Primitive | `E5M2FNUZ -> DecodedE5M2FNUZ` | Split fields and produce normal/subnormal/zero/NaN flags; `0x80` is the only NaN. |
+| `e5m2fnuz_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> E5M2FNUZ` | Normalize, stage G/R/S bits, round with RNE, canonicalize underflow to unsigned zero, and saturate overflow to ±57,344. |
+
+## E2M1 helpers (`zolotone/components/E2M1.py`)
+
+| Name | Kind | Type | Purpose/Notes |
+| --- | --- | --- | --- |
+| `e2m1_pack` | Primitive | `UQ<1,0> -> UQ<2,0> -> UQ<1,0> -> E2M1` | Assemble the packed `S.EE.M` nibble. |
+| `e2m1_decode` | Primitive | `E2M1 -> DecodedE2M1` | Split fields and produce normal/subnormal/zero flags. |
+| `e2m1_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> E2M1` | Normalize, stage G/R/S bits, round with RNE, preserve the supplied zero sign, and saturate overflow to ±6. |
 
 ## Float32 helpers (`zolotone/components/Float32.py`)
 | Name | Kind | Type | Purpose/Notes |

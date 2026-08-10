@@ -3130,6 +3130,350 @@ class TestE4M3FNSpec(unittest.TestCase):
         self.assertTrue(design.check_spec(schedule=schedule)["proved"])
 
 
+class TestE5M2FNUZSpec(unittest.TestCase):
+    def test_runtime_layout_values_validation_copy_and_static_type(self):
+        self.assertEqual(E5M2FNUZ.Zero().val, 0x00)
+        self.assertEqual(E5M2FNUZ.NaN().val, 0x80)
+        self.assertEqual(E5M2FNUZ.exponent_bias, 16)
+        self.assertEqual(E5M2FNUZ(0x01).to_val(), 2 ** -17)
+        self.assertEqual(E5M2FNUZ(0x03).to_val(), 3 * 2 ** -17)
+        self.assertEqual(E5M2FNUZ(0x04).to_val(), 2 ** -15)
+        self.assertEqual(E5M2FNUZ(0x7F).to_val(), 57344.0)
+        self.assertEqual(E5M2FNUZ(0xFF).to_val(), -57344.0)
+        self.assertTrue(math.isnan(E5M2FNUZ(0x80).to_val()))
+
+        value = E5M2FNUZ.from_fields(1, 31, 3)
+        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 31, 3))
+        self.assertEqual(value.copy(), value)
+        self.assertEqual(value.static_type(), E5M2FNUZT())
+        self.assertEqual(value.total_bits(), 8)
+        generator, next_shared = E5M2FNUZ.random_generator(
+            seed=1, shared_exponent_bits=2
+        )
+        self.assertIsInstance(generator(), E5M2FNUZ)
+        self.assertEqual(next_shared() & 0x07, 0)
+
+        for invalid in (-1, 256, 1.5, "0"):
+            with self.subTest(packed=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    E5M2FNUZ(invalid)
+        for fields in (
+            (2, 0, 0),
+            (0, -1, 0),
+            (0, 32, 0),
+            (0, 0, -1),
+            (0, 0, 4),
+        ):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                E5M2FNUZ.from_fields(*fields)
+
+    def test_exhaustive_classification_and_pack_decode_round_trip(self):
+        counts = {"norm": 0, "sub": 0, "zero": 0, "nan": 0}
+        names = tuple(counts)
+
+        @Composite(name="e5m2fnuz_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def roundtrip(x):
+            decoded = e5m2fnuz_decode(x)
+            return e5m2fnuz_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var("e5m2fnuz_value", sign=E5M2FNUZT())
+        design = roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(256):
+                runtime = E5M2FNUZ(bits)
+                decoded = e5m2fnuz_decode(Const(runtime))
+                fields = tuple(node.evaluate().val for node in decoded)
+                self.assertEqual(fields[:3], (bits >> 7, (bits >> 2) & 31, bits & 3))
+                self.assertEqual(sum(fields[3:]), 1)
+                classification = names[fields[3:].index(1)]
+                counts[classification] += 1
+                spec = runtime.to_spec(SpecContext(f"e5m2fnuz-{bits}"))
+                self.assertEqual(
+                    spec.classification_flags()[classification].constant_fold(),
+                    BoolLit(True),
+                )
+                value.load_val(runtime)
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+        self.assertEqual(counts, {"norm": 248, "sub": 6, "zero": 1, "nan": 1})
+
+    def test_symbolic_shape_constructors_and_boundaries(self):
+        ctx = SpecContext("fresh-e5m2fnuz")
+        value = e5m2fnuz.fresh("x", ctx)
+        self.assertEqual(
+            tuple(value.classification_flags()), ("norm", "sub", "zero", "nan")
+        )
+        self.assertEqual(value.observables_for_classification("zero"), (BoolLit(True),))
+        self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
+        self.assertIsInstance(E5M2FNUZT().to_spec("input", ctx), e5m2fnuz)
+        self.assertIsInstance(
+            E5M2FNUZT().random_runtime_value(random.Random(1)), E5M2FNUZ
+        )
+        self.assertEqual(e5m2fnuz.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2fnuz.nan(ctx).is_nan.constant_fold(), BoolLit(True))
+        self.assertFalse(hasattr(e5m2fnuz, "nzero"))
+        self.assertFalse(hasattr(e5m2fnuz, "inf"))
+
+        for real_value, predicate in (
+            (0.0, "is_pzero"),
+            (2 ** -18, "is_pzero"),
+            (2 ** -17, "is_sub"),
+            (2 ** -15, "is_norm"),
+            (57344.0, "is_norm"),
+            (100000.0, "is_norm"),
+            (-100000.0, "is_norm"),
+        ):
+            boundary_ctx = SpecContext("encode-e5m2fnuz")
+            encoded = e5m2fnuz.encode(RealLit(real_value), boundary_ctx)
+            boundary_ctx.check(getattr(encoded, predicate))
+            report = simplify_ctx(boundary_ctx)
+            if report["status"] == "unknown":
+                report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+            self.assertEqual(report["status"], "unsat", report)
+
+    def test_encoder_rne_unsigned_zero_saturation_and_all_finite_encodings(self):
+        sign = Var("e5_sign", UQT(1, 0))
+        exponent = Var("e5_exponent", QT(8, 0))
+        mantissa = Var("e5_mantissa", UQT(2, 12))
+        design = e5m2fnuz_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+
+        def run(sign_value, exponent_value, mantissa_value):
+            sign_runtime = UQ(sign_value, 1, 0)
+            exponent_runtime = Q(exponent_value & 0xFF, 8, 0)
+            mantissa_runtime = UQ.from_float(mantissa_value, 2, 12)
+            sign.load_val(sign_runtime)
+            exponent.load_val(exponent_runtime)
+            mantissa.load_val(mantissa_runtime)
+            return (
+                design.evaluate().val,
+                compiled(sign_runtime.val, exponent_runtime.val, mantissa_runtime.val),
+            )
+
+        try:
+            cases = (
+                (0, 16, 0.0, 0x00),
+                (1, 16, 0.0, 0x00),
+                (0, 1, 0.125, 0x00),
+                (1, 1, 0.125, 0x00),
+                (0, 1, 0.375, 0x02),
+                (0, 1, 0.625, 0x02),
+                (0, 1, 0.875, 0x04),
+                (0, 16, 1.125, 0x40),
+                (0, 16, 1.375, 0x42),
+                (0, 16, 1.875, 0x44),
+                (0, 31, 1.75, 0x7F),
+                (1, 40, 1.0, 0xFF),
+            )
+            for sign_value, exponent_value, mantissa_value, expected in cases:
+                with self.subTest(
+                    sign=sign_value, exponent=exponent_value, mantissa=mantissa_value
+                ):
+                    self.assertEqual(
+                        run(sign_value, exponent_value, mantissa_value),
+                        (expected, expected),
+                    )
+
+            for bits in range(256):
+                runtime = E5M2FNUZ(bits)
+                if runtime.is_nan:
+                    continue
+                exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
+                mantissa_value = (
+                    runtime.mantissa / 4
+                    if runtime.exponent == 0
+                    else 1 + runtime.mantissa / 4
+                )
+                self.assertEqual(
+                    run(runtime.sign, exponent_value, mantissa_value), (bits, bits)
+                )
+        finally:
+            tempdir.cleanup()
+
+    def test_saturating_encoder_determinism_and_specification_proofs(self):
+        def spec(ctx):
+            return e5m2fnuz.encode(ctx.two() ** ctx.real_val(24), ctx)
+
+        @Composite(name="e5m2fnuz_encode_saturation_proof", spec=spec)
+        def saturation_design():
+            return e5m2fnuz_encode(
+                Const(UQ(0, 1, 0)),
+                Const(Q.from_int(40)),
+                Const(UQ.from_int(1)),
+            )
+
+        design = saturation_design()
+        schedule = [{"tool": "simplify"}, {"tool": "z3", "timeout_ms": 5000}]
+        self.assertTrue(design.check_determinism(schedule=schedule)["proved"])
+        self.assertTrue(design.check_spec(schedule=schedule)["proved"])
+
+
+class TestE2M1Spec(unittest.TestCase):
+    def test_runtime_layout_values_validation_and_static_type(self):
+        self.assertEqual(E2M1.Zero().val, 0x0)
+        self.assertEqual(E2M1.nZero().val, 0x8)
+        self.assertEqual(E2M1(0x1).to_val(), 0.5)
+        self.assertEqual(E2M1(0x2).to_val(), 1.0)
+        self.assertEqual(E2M1(0x7).to_val(), 6.0)
+        self.assertEqual(E2M1(0xF).to_val(), -6.0)
+        value = E2M1.from_fields(1, 3, 1)
+        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 3, 1))
+        self.assertEqual(value.copy(), value)
+        self.assertEqual(value.static_type(), E2M1T())
+        self.assertEqual(value.total_bits(), 4)
+        self.assertFalse(hasattr(E2M1, "NaN"))
+        self.assertFalse(hasattr(E2M1, "Inf"))
+        generator, next_shared = E2M1.random_generator(seed=1, shared_exponent_bits=1)
+        self.assertIsInstance(generator(), E2M1)
+        self.assertEqual(next_shared() & 0x01, 0)
+
+        for invalid in (-1, 16, 1.5, "0"):
+            with self.subTest(packed=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    E2M1(invalid)
+        for fields in ((2, 0, 0), (0, -1, 0), (0, 4, 0), (0, 0, -1), (0, 0, 2)):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                E2M1.from_fields(*fields)
+
+    def test_exhaustive_classification_and_pack_decode_round_trip(self):
+        counts = {"norm": 0, "sub": 0, "zero": 0}
+        names = tuple(counts)
+
+        @Composite(name="e2m1_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def roundtrip(x):
+            decoded = e2m1_decode(x)
+            return e2m1_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var("e2m1_value", sign=E2M1T())
+        design = roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(16):
+                runtime = E2M1(bits)
+                decoded = e2m1_decode(Const(runtime))
+                fields = tuple(node.evaluate().val for node in decoded)
+                self.assertEqual(fields[:3], (bits >> 3, (bits >> 1) & 3, bits & 1))
+                self.assertEqual(sum(fields[3:]), 1)
+                classification = names[fields[3:].index(1)]
+                counts[classification] += 1
+                spec = runtime.to_spec(SpecContext(f"e2m1-{bits}"))
+                self.assertEqual(
+                    spec.classification_flags()[classification].constant_fold(),
+                    BoolLit(True),
+                )
+                value.load_val(runtime)
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+        self.assertEqual(counts, {"norm": 12, "sub": 2, "zero": 2})
+
+    def test_symbolic_shape_and_zero_constructors(self):
+        ctx = SpecContext("fresh-e2m1")
+        value = e2m1.fresh("x", ctx)
+        self.assertEqual(tuple(value.classification_flags()), ("norm", "sub", "zero"))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertIsInstance(E2M1T().to_spec("input", ctx), e2m1)
+        self.assertIsInstance(E2M1T().random_runtime_value(random.Random(1)), E2M1)
+        self.assertEqual(e2m1.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e2m1.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
+        self.assertFalse(hasattr(e2m1, "nan"))
+        self.assertFalse(hasattr(e2m1, "inf"))
+
+        for real_value, predicate in (
+            (0.0, "is_pzero"),
+            (-0.25, "is_nzero"),
+            (0.5, "is_sub"),
+            (1.0, "is_norm"),
+            (6.0, "is_norm"),
+            (10.0, "is_norm"),
+            (-10.0, "is_norm"),
+        ):
+            boundary_ctx = SpecContext("encode-e2m1")
+            encoded = e2m1.encode(RealLit(real_value), boundary_ctx)
+            boundary_ctx.check(getattr(encoded, predicate))
+            report = simplify_ctx(boundary_ctx)
+            if report["status"] == "unknown":
+                report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+            self.assertEqual(report["status"], "unsat", report)
+
+    def test_encoder_rne_signed_zero_saturation_and_all_encodings(self):
+        sign = Var("e2_sign", UQT(1, 0))
+        exponent = Var("e2_exponent", QT(8, 0))
+        mantissa = Var("e2_mantissa", UQT(2, 12))
+        design = e2m1_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+
+        def run(sign_value, exponent_value, mantissa_value):
+            sign_runtime = UQ(sign_value, 1, 0)
+            exponent_runtime = Q(exponent_value & 0xFF, 8, 0)
+            mantissa_runtime = UQ.from_float(mantissa_value, 2, 12)
+            sign.load_val(sign_runtime)
+            exponent.load_val(exponent_runtime)
+            mantissa.load_val(mantissa_runtime)
+            return (
+                design.evaluate().val,
+                compiled(sign_runtime.val, exponent_runtime.val, mantissa_runtime.val),
+            )
+
+        try:
+            cases = (
+                (0, 1, 0.0, 0x0),
+                (1, 1, 0.0, 0x8),
+                (0, 1, 0.25, 0x0),
+                (1, 1, 0.25, 0x8),
+                (0, 1, 0.75, 0x2),
+                (1, 1, 0.75, 0xA),
+                (0, 1, 1.25, 0x2),
+                (0, 1, 1.75, 0x4),
+                (0, 3, 1.25, 0x6),
+                (0, 3, 1.5, 0x7),
+                (1, 5, 1.0, 0xF),
+            )
+            for sign_value, exponent_value, mantissa_value, expected in cases:
+                with self.subTest(
+                    sign=sign_value, exponent=exponent_value, mantissa=mantissa_value
+                ):
+                    self.assertEqual(
+                        run(sign_value, exponent_value, mantissa_value),
+                        (expected, expected),
+                    )
+
+            for bits in range(16):
+                runtime = E2M1(bits)
+                exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
+                mantissa_value = (
+                    runtime.mantissa / 2
+                    if runtime.exponent == 0
+                    else 1 + runtime.mantissa / 2
+                )
+                self.assertEqual(
+                    run(runtime.sign, exponent_value, mantissa_value), (bits, bits)
+                )
+        finally:
+            tempdir.cleanup()
+
+    def test_saturating_encoder_determinism_and_specification_proofs(self):
+        def spec(ctx):
+            return e2m1.encode(ctx.real_val(16), ctx)
+
+        @Composite(name="e2m1_encode_saturation_proof", spec=spec)
+        def saturation_design():
+            return e2m1_encode(
+                Const(UQ(0, 1, 0)),
+                Const(Q.from_int(5)),
+                Const(UQ.from_int(1)),
+            )
+
+        design = saturation_design()
+        schedule = [{"tool": "simplify"}, {"tool": "z3", "timeout_ms": 5000}]
+        self.assertTrue(design.check_determinism(schedule=schedule)["proved"])
+        self.assertTrue(design.check_spec(schedule=schedule)["proved"])
+
+
 class TestBFloat16Spec(unittest.TestCase):
     def test_bf16_value_selects_finite_formula_or_fresh_special(self):
         ctx = SpecContext("bf16-finite-value")

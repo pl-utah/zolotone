@@ -1,33 +1,12 @@
 from typing import NamedTuple
 
-from ..ast import Composite, Const, Node, Op, Primitive, if_then_else
-from ..spec import If, e4m3fn, sign_multiplier
-from ..types import E4M3FN, E4M3FNT, RuntimeType, StaticType, UQ, UQT
-from .Tuple import make_Tuple
-from .rounding_routines import (
-    drop_implicit_bit,
-    normalize_to_1_xxx,
-    round_mantissa,
-    shift_if_subnormal,
-)
-from .UQ import uq_eq, uq_fraction_to_integer, uq_gt, uq_is_zero, uq_min
-from .basics import (
-    basic_and,
-    basic_and_reduce,
-    basic_identity,
-    basic_invert,
-    basic_mux_2_1,
-    basic_or,
-    basic_or_reduce,
-)
-
-__all__ = [
-    "DecodedE4M3FN",
-    "e4m3fn_pack",
-    "e4m3fn_decode",
-    "e4m3fn_encodings",
-    "e4m3fn_encode",
-]
+from ..ast import *
+from ..spec import *
+from ..types import *
+from .Tuple import *
+from .rounding_routines import *
+from .UQ import *
+from .basics import *
 
 
 def _e4m3fn_mantissa(x: Node) -> Op:
@@ -85,14 +64,14 @@ def _e4m3fn_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
         mantissa: StaticType,
     ) -> E4M3FNT:
         return E4M3FNT()
-
+    
     def impl(
         sign_bit: RuntimeType,
         exponent: RuntimeType,
         mantissa: RuntimeType,
     ) -> E4M3FN:
         return E4M3FN.from_fields(sign_bit.val, exponent.val, mantissa.val)
-
+    
     return Op(
         sign=sign,
         impl=impl,
@@ -117,27 +96,12 @@ class DecodedE4M3FN(NamedTuple):
 
 
 def e4m3fn_decode_spec(x: e4m3fn, ctx):
-    (
-        sign,
-        exponent,
-        mantissa,
-        is_normal,
-        is_subnormal,
-        is_zero,
-        is_nan,
-    ) = x.decode()[1:]
-
-    def bool_to_real(flag):
-        return If(flag, ctx.one(), ctx.zero())
-
-    return (
-        sign,
-        exponent,
-        mantissa,
-        bool_to_real(is_normal),
-        bool_to_real(is_subnormal),
-        bool_to_real(is_zero),
-        bool_to_real(is_nan),
+    decoded = x.decode()[1:]
+    classification_count = len(x.classification_flags())
+    fields = decoded[:-classification_count]
+    classifications = decoded[-classification_count:]
+    return fields + tuple(
+        If(flag, ctx.one(), ctx.zero()) for flag in classifications
     )
 
 
@@ -147,16 +111,16 @@ def e4m3fn_pack_spec(s, e, m, ctx):
     two = ctx.two()
     max_exponent = ctx.real_val(15)
     max_mantissa = ctx.real_val(7)
-
+    
     ctx.assume(s.eq(zero) | s.eq(one))
-
+    
     exponent_is_zero = e.eq(zero)
     mantissa_is_zero = m.eq(zero)
     is_zero = exponent_is_zero & mantissa_is_zero
     is_sub = exponent_is_zero & (~mantissa_is_zero)
     is_nan = e.eq(max_exponent) & m.eq(max_mantissa)
     is_norm = (~exponent_is_zero) & (~is_nan)
-
+    
     signed = sign_multiplier(ctx, s)
     normal_value = (
         signed
@@ -197,7 +161,7 @@ def e4m3fn_decode(x: Node) -> DecodedE4M3FN:
         sign = _e4m3fn_sign(x)
         exponent = _e4m3fn_exponent(x)
         mantissa = _e4m3fn_mantissa(x)
-
+        
         bit = UQ(0, 1, 0)
         mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(bit))
         mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(bit))
@@ -219,7 +183,7 @@ def e4m3fn_decode(x: Node) -> DecodedE4M3FN:
             is_zero,
             is_nan,
         )
-
+    
     decoded = decode(x)
     return DecodedE4M3FN(
         sign=decoded[0],
@@ -255,7 +219,7 @@ def e4m3fn_encodings(m_rounded: Node, e_rounded: Node):
         Const(UQ(0, E4M3FN.exponent_bits, 0)),
     )
     final_m = uq_fraction_to_integer(m_rounded)
-
+    
     exponent_is_15 = uq_eq(final_e, max_exponent)
     mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(0, 1, 0)))
     reserved_nan = basic_and(
@@ -302,10 +266,10 @@ def e4m3fn_encode_spec(s, e, m, ctx):
 @Composite(name="e4m3fn_encode", spec=e4m3fn_encode_spec)
 def e4m3fn_encode(s: Node, e: Node, m: Node) -> Node:
     """Encode sign, biased exponent, and unsigned magnitude using RNE."""
-
+    
     if e.node_type.frac_bits != 0:
         raise ValueError("e4m3fn_encode exponent must have zero fractional bits")
-
+    
     encode_exact_zero = uq_is_zero(m)
     normalized_m, normalized_e = normalize_to_1_xxx(m, e)
     shifted_m, shifted_e = shift_if_subnormal(

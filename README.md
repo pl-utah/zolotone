@@ -65,7 +65,7 @@ verified against this golden specification.
 Zolotone connects golden specifications to typed implementation models:
 
 1. Define math-level intent using `RealExpr`, `BoolExpr`, `FPExpr`, and formats
-   such as `fp16`, `fp32`, `bf16`, and finite-only `e4m3fn`.
+   such as `fp16`, `fp32`, `bf16`, `e4m3fn`, `e5m2fnuz`, and `e2m1`.
 2. Build an implementation from typed `Primitive` and `Composite` nodes.
 3. Attach a specification to each operation or composite.
 4. Call `check_determinism()` to prove that repeated evaluations of the
