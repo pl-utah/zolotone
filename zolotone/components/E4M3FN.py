@@ -242,25 +242,12 @@ def e4m3fn_encodings(m_rounded: Node, e_rounded: Node):
 
 
 def e4m3fn_encode_spec(s, e, m, ctx):
-    signed = sign_multiplier(ctx, s)
     finite_value = (
-        signed
+        sign_multiplier(ctx, s)
         * m
         * ctx.two() ** (e - ctx.real_val(E4M3FN.exponent_bias))
     )
-    encoded = e4m3fn.encode(finite_value, ctx)
-    # The bit-level interface carries a sign independently from the magnitude,
-    # so it can preserve negative zero even though mathematical reals cannot.
-    return e4m3fn(
-        value=encoded.value,
-        sign=s,
-        exponent=encoded.exponent,
-        mantissa=encoded.mantissa,
-        is_norm=encoded.is_norm,
-        is_sub=encoded.is_sub,
-        is_zero=encoded.is_zero,
-        is_nan=encoded.is_nan,
-    )
+    return e4m3fn.encode(finite_value, ctx)
 
 
 @Composite(name="e4m3fn_encode", spec=e4m3fn_encode_spec)
@@ -283,10 +270,8 @@ def e4m3fn_encode(s: Node, e: Node, m: Node) -> Node:
         target_bits=E4M3FN.mantissa_bits,
     )
     final_m, final_e = e4m3fn_encodings(rounded_m, rounded_e)
-    packed = e4m3fn_pack(s, final_e, final_m)
-    signed_zero = e4m3fn_pack(
-        s,
-        Const(UQ(0, E4M3FN.exponent_bits, 0)),
-        Const(UQ(0, E4M3FN.mantissa_bits, 0)),
+    return if_then_else(
+        encode_exact_zero,
+        Const(E4M3FN.Zero()),
+        e4m3fn_pack(s, final_e, final_m),
     )
-    return if_then_else(encode_exact_zero, signed_zero, packed)

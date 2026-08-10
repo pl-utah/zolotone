@@ -203,21 +203,12 @@ def e2m1_encode_spec(s, e, m, ctx):
         * m
         * ctx.two() ** (e - ctx.real_val(E2M1.exponent_bias))
     )
-    encoded = e2m1.encode(finite_value, ctx)
-    return e2m1(
-        value=encoded.value,
-        sign=s,
-        exponent=encoded.exponent,
-        mantissa=encoded.mantissa,
-        is_norm=encoded.is_norm,
-        is_sub=encoded.is_sub,
-        is_zero=encoded.is_zero,
-    )
+    return e2m1.encode(finite_value, ctx)
 
 
 @Composite(name="e2m1_encode", spec=e2m1_encode_spec)
 def e2m1_encode(s: Node, e: Node, m: Node) -> Node:
-    """Encode using RNE, signed zero, and finite saturation."""
+    """Encode using RNE, canonical exact zero, and finite saturation."""
 
     if e.node_type.frac_bits != 0:
         raise ValueError("e2m1_encode exponent must have zero fractional bits")
@@ -230,13 +221,8 @@ def e2m1_encode(s: Node, e: Node, m: Node) -> Node:
         drop_implicit_bit(shifted_m), shifted_e, target_bits=E2M1.mantissa_bits
     )
     final_m, final_e = e2m1_encodings(rounded_m, rounded_e)
-    signed_zero = e2m1_pack(
-        s,
-        Const(UQ(0, E2M1.exponent_bits, 0)),
-        Const(UQ(0, E2M1.mantissa_bits, 0)),
-    )
     return if_then_else(
         encode_exact_zero,
-        signed_zero,
+        Const(E2M1.Zero()),
         e2m1_pack(s, final_e, final_m),
     )

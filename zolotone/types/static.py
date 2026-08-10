@@ -341,6 +341,40 @@ class E5M2FNUZT(StaticType):
         return E5M2FNUZ(rng.getrandbits(self.total_bits()))
 
 
+class E5M2T(StaticType):
+    """Static type for the OCP 8-bit E5M2 floating-point format."""
+
+    def __init__(self):
+        super().__init__()
+        self.sign_bits = 1
+        self.exponent_bits = 5
+        self.mantissa_bits = 2
+
+    def total_bits(self):
+        return 8
+
+    def __repr__(self):
+        return "E5M2<8>"
+
+    __str__ = __repr__
+
+    def __eq__(self, other):
+        return isinstance(other, E5M2T)
+
+    def _clone_impl(self) -> "E5M2T":
+        return E5M2T()
+
+    def to_spec(self, name, ctx):
+        from ..spec.custom_specs.e5m2 import e5m2
+
+        return e5m2.fresh(name, ctx)
+
+    def random_runtime_value(self, rng: random.Random):
+        from .runtime import E5M2
+
+        return E5M2(rng.getrandbits(self.total_bits()))
+
+
 class E2M1T(StaticType):
     """Static type for the finite-only four-bit E2M1 format."""
 

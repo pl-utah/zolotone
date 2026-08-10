@@ -12,17 +12,12 @@ def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
 
 
 @dataclass(frozen=True)
-class e4m3fn(FPExpr):
-    """Symbolic finite-only E4M3 floating-point value.
+class e5m2(FPExpr):
+    """Symbolic OCP E5M2 value with signed zeros and infinities."""
 
-    Exponent 15 remains finite for mantissas 0 through 6.  The two signed
-    encodings with exponent 15 and mantissa 7 are NaNs; there are no
-    infinity encodings.
-    """
-
-    exponent_bits: ClassVar[int] = 4
-    mantissa_bits: ClassVar[int] = 3
-    exponent_bias: ClassVar[int] = 7
+    exponent_bits: ClassVar[int] = 5
+    mantissa_bits: ClassVar[int] = 2
+    exponent_bias: ClassVar[int] = 15
 
     value: RealExpr
     sign: RealExpr
@@ -31,10 +26,11 @@ class e4m3fn(FPExpr):
     is_norm: BoolExpr
     is_sub: BoolExpr
     is_zero: BoolExpr
+    is_inf: BoolExpr
     is_nan: BoolExpr
 
     @classmethod
-    def fresh(cls, name: str, ctx) -> "e4m3fn":
+    def fresh(cls, name: str, ctx) -> "e5m2":
         name = ctx.fresh_name(name)
         sign = ctx.fresh_real(f"{name}_sign")
         exponent = ctx.fresh_real(f"{name}_exponent")
@@ -42,15 +38,14 @@ class e4m3fn(FPExpr):
         is_norm = ctx.fresh_bool(f"{name}_is_norm")
         is_sub = ctx.fresh_bool(f"{name}_is_sub")
         is_zero = ctx.fresh_bool(f"{name}_is_zero")
+        is_inf = ctx.fresh_bool(f"{name}_is_inf")
         is_nan = ctx.fresh_bool(f"{name}_is_nan")
 
         zero = ctx.zero()
         one = ctx.one()
         two = ctx.two()
-        max_exponent = ctx.real_val(15)
-        max_finite_mantissa = ctx.real_val(6)
-        max_mantissa = ctx.real_val(7)
-
+        max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
+        max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
         signed = sign_multiplier(ctx, sign)
         normal_value = (
             signed
@@ -66,9 +61,12 @@ class e4m3fn(FPExpr):
         value = If(
             is_norm,
             normal_value,
-            If(is_sub, subnormal_value, If(is_zero, zero, ctx.fresh_real("special"))),
+            If(
+                is_sub,
+                subnormal_value,
+                If(is_zero, zero, ctx.fresh_real("special")),
+            ),
         )
-
         out = cls(
             value=value,
             sign=sign,
@@ -77,6 +75,7 @@ class e4m3fn(FPExpr):
             is_norm=is_norm,
             is_sub=is_sub,
             is_zero=is_zero,
+            is_inf=is_inf,
             is_nan=is_nan,
         )
 
@@ -84,38 +83,22 @@ class e4m3fn(FPExpr):
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
         out._assume_exclusive_classification(ctx)
-
         ctx.assume(
-            _implies(
-                is_norm,
-                (exponent >= one)
-                & ((exponent < max_exponent) | (mantissa <= max_finite_mantissa)),
-            )
+            _implies(is_norm, (exponent >= one) & (exponent < max_exponent))
         )
         ctx.assume(_implies(is_sub, exponent.eq(zero) & (mantissa >= one)))
         ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
-        ctx.assume(
-            _implies(
-                is_nan,
-                exponent.eq(max_exponent) & mantissa.eq(max_mantissa),
-            )
-        )
+        ctx.assume(_implies(is_inf, exponent.eq(max_exponent) & mantissa.eq(zero)))
+        ctx.assume(_implies(is_nan, exponent.eq(max_exponent) & (mantissa >= one)))
         return out
 
-    # saturating
     @classmethod
-    def encode(cls, value: RealExpr, ctx) -> "e4m3fn":
-        """Round a real value to E4M3FN using round-to-nearest-even.
-
-        Values beyond the finite range saturate to signed 448. Since a
-        mathematical real has no negative-zero identity, exact zero produced
-        through this API is positive. Operations that require a negative-zero
-        result select it outside the scalar encoder.
-        """
+    def encode(cls, value: RealExpr, ctx) -> "e5m2":
+        """Round a real value to non-saturating E5M2 using RNE."""
 
         if not isinstance(value, RealExpr):
             raise TypeError(
-                f"e4m3fn.encode value must be RealExpr, got {type(value).__name__}"
+                f"e5m2.encode value must be RealExpr, got {type(value).__name__}"
             )
 
         zero = ctx.zero()
@@ -123,25 +106,22 @@ class e4m3fn(FPExpr):
         two = ctx.two()
         magnitude = abs(value)
         sign = If(value < zero, one, zero)
-        exponent = ctx.fresh_real("encoded_e4m3fn_exponent")
-        mantissa = ctx.fresh_real("encoded_e4m3fn_mantissa")
-
-        max_exponent = ctx.real_val(15)
-        max_mantissa = ctx.real_val(7)
-        max_finite_mantissa = ctx.real_val(6)
+        exponent = ctx.fresh_real("encoded_e5m2_exponent")
+        mantissa = ctx.fresh_real("encoded_e5m2_mantissa")
+        max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
+        max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
         smallest_normal = two ** (one - exponent_bias)
         smallest_subnormal = two ** (one - exponent_bias - mantissa_bits)
         zero_boundary = smallest_subnormal * two ** ctx.real_val(-1)
-        max_finite = ctx.real_val(448)
+        greatest_normal = ctx.real_val(57344)
 
         is_zero = magnitude <= zero_boundary
         is_sub = (magnitude > zero_boundary) & (magnitude < smallest_normal)
-        is_norm = magnitude >= smallest_normal
+        is_norm = (magnitude >= smallest_normal) & (magnitude <= greatest_normal)
+        is_inf = magnitude > greatest_normal
         is_nan = ctx.false()
-
-        signed = sign_multiplier(ctx, sign)
         normal_magnitude = (
             (one + mantissa * two ** (-mantissa_bits))
             * two ** (exponent - exponent_bias)
@@ -151,56 +131,79 @@ class e4m3fn(FPExpr):
             * two ** (-mantissa_bits)
             * two ** (one - exponent_bias)
         )
-        clamped_magnitude = If(magnitude > max_finite, max_finite, magnitude)
-        clamped_magnitude = If(is_zero, zero, signed * clamped_magnitude)
-
+        encoded_value = If(
+            is_norm | is_sub,
+            value,
+            If(is_zero, zero, ctx.fresh_real("special")),
+        )
         out = cls(
-            value=clamped_magnitude,
+            value=encoded_value,
             sign=sign,
             exponent=exponent,
             mantissa=mantissa,
             is_norm=is_norm,
             is_sub=is_sub,
             is_zero=is_zero,
+            is_inf=is_inf,
             is_nan=is_nan,
         )
 
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
         ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
-        ctx.assume(_implies(is_sub, (mantissa >= one) & (mantissa <= max_mantissa)))
+        ctx.assume(_implies(is_sub, exponent.eq(zero) & (mantissa >= one)))
         ctx.assume(
-            _implies(
-                is_norm & (magnitude > max_finite),
-                exponent.eq(max_exponent) & mantissa.eq(max_finite_mantissa),
-            )
+            _implies(is_norm, (exponent >= one) & (exponent < max_exponent))
         )
-        ctx.assume(
-            _implies(
-                is_norm & (magnitude <= max_finite),
-                magnitude.eq(normal_magnitude),
-            )
-        )
-        ctx.assume(
-            _implies(is_sub, magnitude.eq(subnormal_magnitude))
-        )
+        ctx.assume(_implies(is_inf, exponent.eq(max_exponent) & mantissa.eq(zero)))
+        ctx.assume(_implies(is_norm, magnitude.eq(normal_magnitude)))
+        ctx.assume(_implies(is_sub, magnitude.eq(subnormal_magnitude)))
         return out
 
     @classmethod
-    def nan(cls, ctx) -> "e4m3fn":
+    def nan(cls, ctx) -> "e5m2":
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(0),
-            exponent=RealLit(15),
-            mantissa=RealLit(7),
+            exponent=RealLit(31),
+            mantissa=RealLit(2),
             is_norm=BoolLit(False),
             is_sub=BoolLit(False),
             is_zero=BoolLit(False),
+            is_inf=BoolLit(False),
             is_nan=BoolLit(True),
         )
 
     @classmethod
-    def zero(cls, ctx) -> "e4m3fn":
+    def inf(cls, ctx) -> "e5m2":
+        return cls(
+            value=ctx.fresh_real("special"),
+            sign=RealLit(0),
+            exponent=RealLit(31),
+            mantissa=RealLit(0),
+            is_norm=BoolLit(False),
+            is_sub=BoolLit(False),
+            is_zero=BoolLit(False),
+            is_inf=BoolLit(True),
+            is_nan=BoolLit(False),
+        )
+
+    @classmethod
+    def ninf(cls, ctx) -> "e5m2":
+        return cls(
+            value=ctx.fresh_real("special"),
+            sign=RealLit(1),
+            exponent=RealLit(31),
+            mantissa=RealLit(0),
+            is_norm=BoolLit(False),
+            is_sub=BoolLit(False),
+            is_zero=BoolLit(False),
+            is_inf=BoolLit(True),
+            is_nan=BoolLit(False),
+        )
+
+    @classmethod
+    def zero(cls, ctx) -> "e5m2":
         return cls(
             value=ctx.zero(),
             sign=RealLit(0),
@@ -209,11 +212,12 @@ class e4m3fn(FPExpr):
             is_norm=BoolLit(False),
             is_sub=BoolLit(False),
             is_zero=BoolLit(True),
+            is_inf=BoolLit(False),
             is_nan=BoolLit(False),
         )
 
     @classmethod
-    def nzero(cls, ctx) -> "e4m3fn":
+    def nzero(cls, ctx) -> "e5m2":
         return cls(
             value=ctx.zero(),
             sign=RealLit(1),
@@ -222,17 +226,18 @@ class e4m3fn(FPExpr):
             is_norm=BoolLit(False),
             is_sub=BoolLit(False),
             is_zero=BoolLit(True),
+            is_inf=BoolLit(False),
             is_nan=BoolLit(False),
         )
 
     def observables_for_classification(self, classification: str):
         if classification in {"norm", "sub"}:
             return (self.value,)
-        if classification == "zero":
+        if classification in {"zero", "inf"}:
             return (self.sign,)
         if classification == "nan":
             return (BoolLit(True),)
-        raise ValueError(f"Unknown e4m3fn classification {classification!r}")
+        raise ValueError(f"Unknown e5m2 classification {classification!r}")
 
     def decode(self):
         return (
@@ -243,6 +248,7 @@ class e4m3fn(FPExpr):
             self.is_norm,
             self.is_sub,
             self.is_zero,
+            self.is_inf,
             self.is_nan,
         )
 
@@ -251,12 +257,21 @@ class e4m3fn(FPExpr):
             "norm": self.is_norm,
             "sub": self.is_sub,
             "zero": self.is_zero,
+            "inf": self.is_inf,
             "nan": self.is_nan,
         }
 
     @property
     def is_finite(self):
         return self.is_norm | self.is_sub | self.is_zero
+
+    @property
+    def is_ninf(self):
+        return self.is_inf & self.sign.eq(RealLit(1))
+
+    @property
+    def is_pinf(self):
+        return self.is_inf & self.sign.eq(RealLit(0))
 
     @property
     def is_nzero(self):
