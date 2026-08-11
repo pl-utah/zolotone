@@ -50,10 +50,19 @@ from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
 from examples.bf16_mult import bf16_mult
 from examples.bf16_relu import bf16_relu
-from examples.bf16_to_fp16 import bf16_to_fp16
-from examples.fp16_to_bf16 import fp16_to_bf16
-from examples.fp16_to_fp32 import fp16_to_fp32
-from examples.fp32_to_fp16 import fp32_to_fp16
+from examples.converters import (
+    CONVERTER_FORMATS,
+    CONVERTER_REGISTRY,
+    FORMAT_STATIC_TYPES,
+    bf16_to_fp32,
+    fp16_to_fp32,
+    fp32_to_bf16,
+    fp32_to_e2m1,
+    fp32_to_e4m3fn,
+    fp32_to_e5m2,
+    fp32_to_e5m2fnuz,
+    fp32_to_fp16,
+)
 from examples.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
     dot_product_spec as bf16x8_dot_fp32_spec,
@@ -366,12 +375,7 @@ class TestRunDesigns(unittest.TestCase):
             "bf16_add",
             "bf16_mult",
             "bf16_relu",
-            "bf16_to_fp16",
-            "bf16_to_fp32",
-            "fp16_to_bf16",
-            "fp16_to_fp32",
-            "fp32_to_bf16",
-            "fp32_to_fp16",
+            *CONVERTER_REGISTRY,
             "fp32_add",
             "fp32_mult",
             "bf16x8_dot_fp32_conventional",
@@ -3810,6 +3814,67 @@ class TestBFloat16Spec(unittest.TestCase):
 
 
 class TestFloatFormatConversions(unittest.TestCase):
+    def test_registry_contains_only_fp32_round_trips(self):
+        formats = {"bf16", "fp16", "e5m2", "e5m2fnuz", "e4m3fn", "e2m1"}
+        expected = {
+            name
+            for format_name in formats
+            for name in (
+                f"{format_name}_to_fp32",
+                f"fp32_to_{format_name}",
+            )
+        }
+
+        self.assertEqual(len(CONVERTER_REGISTRY), 12)
+        self.assertEqual(set(CONVERTER_REGISTRY), expected)
+        self.assertEqual(set(CONVERTER_FORMATS), expected)
+
+        for name, conversion in CONVERTER_REGISTRY.items():
+            source_name, target_name = CONVERTER_FORMATS[name]
+            with self.subTest(conversion=name):
+                source = Var(name="source", sign=FORMAT_STATIC_TYPES[source_name]())
+                design = conversion(source)
+                self.assertEqual(design.name, name)
+                self.assertEqual(design.node_type, FORMAT_STATIC_TYPES[target_name]())
+
+    def test_small_formats_convert_exhaustively_to_fp32(self):
+        runtime_types = {
+            "e5m2": E5M2,
+            "e5m2fnuz": E5M2FNUZ,
+            "e4m3fn": E4M3FN,
+            "e2m1": E2M1,
+        }
+
+        for source_name, runtime_type in runtime_types.items():
+            conversion = CONVERTER_REGISTRY[f"{source_name}_to_fp32"]
+            source = Var(name="source", sign=FORMAT_STATIC_TYPES[source_name]())
+            design = conversion(source)
+            tempdir, compiled = jit_compile(design)
+            try:
+                for source_bits in range(1 << runtime_type(0).total_bits()):
+                    value = runtime_type(source_bits)
+                    if math.isnan(value.to_val()):
+                        expected = Float32.NaN().val
+                    elif math.isinf(value.to_val()):
+                        expected = (
+                            Float32.nInf().val if value.sign else Float32.Inf().val
+                        )
+                    else:
+                        expected = struct.unpack(
+                            ">I",
+                            struct.pack(">f", value.to_val()),
+                        )[0]
+
+                    source.load_val(value)
+                    with self.subTest(
+                        conversion=conversion.__name__,
+                        source_bits=hex(source_bits),
+                    ):
+                        self.assertEqual(design.evaluate().val, expected)
+                        self.assertEqual(compiled(source_bits), expected)
+            finally:
+                tempdir.cleanup()
+
     def _assert_python_and_cpp(self, conversion, runtime_type, cases):
         source = Var(name="source", sign=runtime_type(0).static_type())
         design = conversion(source)
@@ -3840,6 +3905,23 @@ class TestFloatFormatConversions(unittest.TestCase):
             ),
         )
 
+    def test_bf16_to_fp32_is_exact(self):
+        self._assert_python_and_cpp(
+            bf16_to_fp32,
+            BFloat16,
+            (
+                ("positive-zero", 0x0000, 0x00000000),
+                ("negative-zero", 0x8000, 0x80000000),
+                ("smallest-subnormal", 0x0001, 0x00010000),
+                ("largest-subnormal", 0x007F, 0x007F0000),
+                ("one", 0x3F80, 0x3F800000),
+                ("largest-finite", 0x7F7F, 0x7F7F0000),
+                ("positive-infinity", 0x7F80, 0x7F800000),
+                ("negative-infinity", 0xFF80, 0xFF800000),
+                ("nan", 0x7FC0, 0x7FC00000),
+            ),
+        )
+
     def test_fp32_to_fp16_rounds_and_classifies(self):
         self._assert_python_and_cpp(
             fp32_to_fp16,
@@ -3860,40 +3942,78 @@ class TestFloatFormatConversions(unittest.TestCase):
             ),
         )
 
-    def test_fp16_to_bf16_rounds_to_nearest_even(self):
+    def test_fp32_to_bf16_rounds_to_nearest_even(self):
         self._assert_python_and_cpp(
-            fp16_to_bf16,
-            Float16,
+            fp32_to_bf16,
+            Float32,
             (
-                ("positive-zero", 0x0000, 0x0000),
-                ("negative-zero", 0x8000, 0x8000),
-                ("smallest-subnormal", 0x0001, 0x3380),
-                ("tie-to-even-down", 0x3C04, 0x3F80),
-                ("tie-to-even-up", 0x3C0C, 0x3F82),
-                ("largest-finite", 0x7BFF, 0x4780),
-                ("positive-infinity", 0x7C00, 0x7F80),
-                ("negative-infinity", 0xFC00, 0xFF80),
-                ("nan", 0x7E00, 0x7FC0),
+                ("positive-zero", 0x00000000, 0x0000),
+                ("negative-zero", 0x80000000, 0x8000),
+                ("tie-to-even-down", 0x3F808000, 0x3F80),
+                ("tie-to-even-up", 0x3F818000, 0x3F82),
+                ("positive-infinity", 0x7F800000, 0x7F80),
+                ("negative-infinity", 0xFF800000, 0xFF80),
+                ("nan", 0x7FC00000, 0x7FC0),
             ),
         )
 
-    def test_bf16_to_fp16_handles_range_changes(self):
-        self._assert_python_and_cpp(
-            bf16_to_fp16,
-            BFloat16,
+    def test_fp32_to_small_formats_handles_special_values(self):
+        cases = (
             (
-                ("positive-zero", 0x0000, 0x0000),
-                ("negative-zero", 0x8000, 0x8000),
-                ("smallest-fp16-subnormal", 0x3380, 0x0001),
-                ("smallest-fp16-normal", 0x3880, 0x0400),
-                ("one", 0x3F80, 0x3C00),
-                ("largest-in-range", 0x477F, 0x7BF8),
-                ("overflow", 0x4780, 0x7C00),
-                ("positive-infinity", 0x7F80, 0x7C00),
-                ("negative-infinity", 0xFF80, 0xFC00),
-                ("nan", 0x7FC0, 0x7E00),
+                fp32_to_e5m2,
+                (
+                    (0x00000000, 0x00),
+                    (0x80000000, 0x80),
+                    (0x3F800000, 0x3C),
+                    (0x7F800000, 0x7C),
+                    (0xFF800000, 0xFC),
+                    (0x7FC00000, 0x7E),
+                ),
+            ),
+            (
+                fp32_to_e5m2fnuz,
+                (
+                    (0x00000000, 0x00),
+                    (0x80000000, 0x00),
+                    (0x3F800000, 0x40),
+                    (0x7F800000, 0x7F),
+                    (0xFF800000, 0xFF),
+                    (0x7FC00000, 0x80),
+                ),
+            ),
+            (
+                fp32_to_e4m3fn,
+                (
+                    (0x00000000, 0x00),
+                    (0x80000000, 0x80),
+                    (0x3F800000, 0x38),
+                    (0x7F800000, 0x7E),
+                    (0xFF800000, 0xFE),
+                    (0x7FC00000, 0x7F),
+                ),
+            ),
+            (
+                fp32_to_e2m1,
+                (
+                    (0x00000000, 0x0),
+                    (0x80000000, 0x8),
+                    (0x3E800000, 0x0),
+                    (0x3F400000, 0x2),
+                    (0x7F800000, 0x7),
+                    (0xFF800000, 0xF),
+                    (0x7FC00000, 0x7),
+                ),
             ),
         )
+        for conversion, raw_cases in cases:
+            self._assert_python_and_cpp(
+                conversion,
+                Float32,
+                tuple(
+                    (hex(source_bits), source_bits, expected_bits)
+                    for source_bits, expected_bits in raw_cases
+                ),
+            )
 
 
 class TestBFloat16Add(unittest.TestCase):

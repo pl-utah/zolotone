@@ -1,7 +1,6 @@
 from zolotone import *
 
 
-
 def spec_fp16_to_fp32(x: fp16, ctx):
     return Cases(
         case(x.is_nan, fp32.nan(ctx)),
@@ -23,12 +22,18 @@ def fp16_to_fp32(x: Node) -> Node:
         add_implicit_bit(mantissa_fraction),
         uq_resize(mantissa_fraction, 1, Float16.mantissa_bits),
     )
-    # Widen the exact ten-bit FP16 significand to FP32's 23-bit precision.
-    # The encoder's additional bits are reserved for G/R/S rounding state.
-    significand = uq_resize(significand, 1, Float32.mantissa_bits)
+    significand = uq_resize(
+        significand,
+        1,
+        max(Float16.mantissa_bits, Float32.mantissa_bits),
+    )
 
     subnormal_exponent = Const(
-        UQ(1, X.exponent.node_type.int_bits, X.exponent.node_type.frac_bits)
+        UQ(
+            1,
+            X.exponent.node_type.int_bits,
+            X.exponent.node_type.frac_bits,
+        )
     )
     effective_exponent = if_then_else(
         X.is_sub,
@@ -40,33 +45,41 @@ def fp16_to_fp32(x: Node) -> Node:
         Const(Q.from_int(Float32.exponent_bias - Float16.exponent_bias)),
     )
 
-    finite_result = fp32_encode(X.sign, target_exponent, significand)
+    result = fp32_encode(X.sign, target_exponent, significand)
 
-    encode_ninf = bit_and(X.is_inf, X.sign)
-    encode_pinf = bit_and(X.is_inf, bit_neg(X.sign))
-    encode_nzero = bit_and(X.is_zero, X.sign)
+    encode_negative_zero = bit_and(X.is_zero, X.sign)
+    result = if_then_else(
+        encode_negative_zero,
+        Const(Float32.nZero()),
+        result,
+    )
 
-    return if_then_else(
+    encode_positive_infinity = bit_and(X.is_inf, bit_neg(X.sign))
+    result = if_then_else(
+        encode_positive_infinity,
+        Const(Float32.Inf()),
+        result,
+    )
+
+    encode_negative_infinity = bit_and(X.is_inf, X.sign)
+    result = if_then_else(
+        encode_negative_infinity,
+        Const(Float32.nInf()),
+        result,
+    )
+
+    result = if_then_else(
         X.is_nan,
         Const(Float32.NaN()),
-        if_then_else(
-            encode_ninf,
-            Const(Float32.nInf()),
-            if_then_else(
-                encode_pinf,
-                Const(Float32.Inf()),
-                if_then_else(
-                    encode_nzero,
-                    Const(Float32.nZero()),
-                    finite_result,
-                ),
-            ),
-        ),
+        result,
     )
+    return result
 
 
 if __name__ == "__main__":
-    cast = fp16_to_fp32(Var(name="x", sign=Float16T()))
+    cast = fp16_to_fp32(
+        Var(name="x", sign=Float16T()),
+    )
 
     cast.check_determinism()
     cast.check_spec()

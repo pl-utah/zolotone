@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DESIGN_TIMEOUT_S = 10 * 60
+DEFAULT_DESIGN_TIMEOUT_S = 30 # 10 * 60
 DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
 CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5
@@ -30,17 +30,16 @@ from examples.CSA import CSA_tree4
 from examples.bf16_add import bf16_add
 from examples.bf16_mult import bf16_mult
 from examples.bf16_relu import bf16_relu
-from examples.bf16_to_fp16 import bf16_to_fp16
-from examples.bf16_to_fp32 import bf16_to_fp32
 from examples.bf16x8_dot_fp32_conventional import bf16x8_dot_fp32_conventional
 from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.converters import (
+    CONVERTER_FORMATS,
+    CONVERTER_REGISTRY,
+    FORMAT_STATIC_TYPES,
+)
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
-from examples.fp16_to_bf16 import fp16_to_bf16
-from examples.fp16_to_fp32 import fp16_to_fp32
-from examples.fp32_to_bf16 import fp32_to_bf16
-from examples.fp32_to_fp16 import fp32_to_fp16
-from zolotone import BFloat16T, Float16T, Float32T, Node, QT, Var
+from zolotone import BFloat16T, Float32T, Node, QT, Var
 from zolotone.solver import CaseVerificationResult
 
 
@@ -73,28 +72,14 @@ def _build_bf16_relu() -> Node:
     return bf16_relu(Var(name="x", sign=BFloat16T()))
 
 
-def _build_bf16_to_fp32() -> Node:
-    return bf16_to_fp32(Var(name="x", sign=BFloat16T()))
+def _build_converter(name: str) -> Node:
+    source_name, _ = CONVERTER_FORMATS[name]
+    source = Var(name="x", sign=FORMAT_STATIC_TYPES[source_name]())
+    return CONVERTER_REGISTRY[name](source)
 
 
-def _build_bf16_to_fp16() -> Node:
-    return bf16_to_fp16(Var(name="x", sign=BFloat16T()))
-
-
-def _build_fp16_to_bf16() -> Node:
-    return fp16_to_bf16(Var(name="x", sign=Float16T()))
-
-
-def _build_fp16_to_fp32() -> Node:
-    return fp16_to_fp32(Var(name="x", sign=Float16T()))
-
-
-def _build_fp32_to_bf16() -> Node:
-    return fp32_to_bf16(Var(name="x", sign=Float32T()))
-
-
-def _build_fp32_to_fp16() -> Node:
-    return fp32_to_fp16(Var(name="x", sign=Float32T()))
+def _converter_design_case(name: str) -> DesignCase:
+    return DesignCase(name, lambda name=name: _build_converter(name))
 
 
 def _build_fp32_add() -> Node:
@@ -131,12 +116,7 @@ DESIGNS = (
     DesignCase("bf16_add", _build_bf16_add),
     DesignCase("bf16_mult", _build_bf16_mult),
     DesignCase("bf16_relu", _build_bf16_relu),
-    DesignCase("bf16_to_fp16", _build_bf16_to_fp16),
-    DesignCase("bf16_to_fp32", _build_bf16_to_fp32),
-    DesignCase("fp16_to_bf16", _build_fp16_to_bf16),
-    DesignCase("fp16_to_fp32", _build_fp16_to_fp32),
-    DesignCase("fp32_to_bf16", _build_fp32_to_bf16),
-    DesignCase("fp32_to_fp16", _build_fp32_to_fp16),
+    *(_converter_design_case(name) for name in CONVERTER_REGISTRY),
     DesignCase("fp32_add", _build_fp32_add),
     DesignCase("fp32_mult", _build_fp32_mult),
     DesignCase("bf16x8_dot_fp32_conventional", _build_conventional_dot_product),

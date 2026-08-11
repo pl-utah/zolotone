@@ -89,8 +89,9 @@ and return `{"proved": bool, "proof_traces": [...]}`.
 - `zolotone/solver/`, `zolotone/smt/`, and `zolotone/egglog/` — proof scheduling
   and solver integrations.
 - `zolotone/codegen/` — C++ generation for implementation models.
-- `examples/` — FP32 arithmetic and conventional/optimized BF16 dot-product
-  implementations with golden specifications.
+- `examples/` — FP32 arithmetic, FP32 format converters, and
+  conventional/optimized BF16 dot-product implementations with golden
+  specifications. See `examples/converters/README.md` for converter semantics.
 - `docs/operators.md` — available implementation operators and primitives.
 
 ## Quick start
