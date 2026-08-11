@@ -50,7 +50,10 @@ from examples.fp32_mult import fp32_mult
 from examples.bf16_add import bf16_add
 from examples.bf16_mult import bf16_mult
 from examples.bf16_relu import bf16_relu
-from examples.common import and_spec, neg_spec, or_spec, xor_spec
+from examples.bf16_to_fp16 import bf16_to_fp16
+from examples.fp16_to_bf16 import fp16_to_bf16
+from examples.fp16_to_fp32 import fp16_to_fp32
+from examples.fp32_to_fp16 import fp32_to_fp16
 from examples.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
     dot_product_spec as bf16x8_dot_fp32_spec,
@@ -363,8 +366,12 @@ class TestRunDesigns(unittest.TestCase):
             "bf16_add",
             "bf16_mult",
             "bf16_relu",
+            "bf16_to_fp16",
             "bf16_to_fp32",
+            "fp16_to_bf16",
+            "fp16_to_fp32",
             "fp32_to_bf16",
+            "fp32_to_fp16",
             "fp32_add",
             "fp32_mult",
             "bf16x8_dot_fp32_conventional",
@@ -1953,6 +1960,59 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             },
         )
 
+    def test_fp_expr_builds_shared_exclusive_classification_assumptions(self):
+        flags = tuple(
+            BoolVar(name)
+            for name in ("norm", "sub", "zero", "inf", "nan")
+        )
+        value = fp32(
+            value=RealVar("value"),
+            sign=RealVar("sign"),
+            exponent=RealVar("exponent"),
+            mantissa=RealVar("mantissa"),
+            is_norm=flags[0],
+            is_sub=flags[1],
+            is_zero=flags[2],
+            is_inf=flags[3],
+            is_nan=flags[4],
+        )
+        ctx = SpecContext("shared-fp-classification")
+
+        value._assume_exclusive_classification(ctx)
+
+        at_least_one = flags[0]
+        for flag in flags[1:]:
+            at_least_one = at_least_one | flag
+        pairwise_exclusions = [
+            (~lhs) | (~rhs)
+            for idx, lhs in enumerate(flags)
+            for rhs in flags[idx + 1:]
+        ]
+        self.assertEqual(ctx.assumes, [at_least_one, *pairwise_exclusions])
+
+    def test_fp_expr_constant_fold_is_shared_by_all_formats(self):
+        self.assertIs(fp16.constant_fold, FPExpr.constant_fold)
+        self.assertIs(bf16.constant_fold, FPExpr.constant_fold)
+        self.assertIs(fp32.constant_fold, FPExpr.constant_fold)
+
+        value = fp16(
+            value=RealLit(1) + RealLit(2),
+            sign=RealLit(0),
+            exponent=RealLit(15),
+            mantissa=RealLit(0),
+            is_norm=BoolLit(True),
+            is_sub=BoolLit(False),
+            is_zero=BoolLit(False),
+            is_inf=BoolLit(False),
+            is_nan=BoolLit(False),
+        )
+
+        folded = value.constant_fold()
+
+        self.assertIsInstance(folded, fp16)
+        self.assertEqual(folded.value, RealLit(3))
+        self.assertIs(folded.constant_fold(), folded)
+
     def test_fp_expr_requires_a_declared_value_field(self):
         with self.assertRaisesRegex(TypeError, "must declare a value"):
             class MissingValueFP(FPExpr):
@@ -2235,8 +2295,6 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         self.assertIs(decoded.is_nan, decoded[7])
 
     def test_fp32_encoder_spec_canonicalizes_exact_zero(self):
-        from examples.encode_Float32 import fp32_encode_spec
-
         for sign in (0, 1):
             with self.subTest(sign=sign):
                 ctx = SpecContext(f"fp32-encode-zero-sign-{sign}")
@@ -2270,8 +2328,6 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         self.assertIsInstance(encoded.mantissa, RealVar)
 
     def test_fp32_encode_design_canonicalizes_exact_zero(self):
-        from examples.encode_Float32 import fp32_encode
-
         for sign in (0, 1):
             with self.subTest(sign=sign):
                 design = fp32_encode(
@@ -2300,8 +2356,6 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_encode_design_preserves_negative_underflow_sign(self):
-        from examples.encode_Float32 import fp32_encode
-
         sign = Const(UQ(1, 1, 0))
         exponent = Const(Q.from_int(-22))
 
@@ -2318,6 +2372,27 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                     Const(UQ.from_float(mantissa, 1, Float32.mantissa_bits)),
                 )
                 self.assertEqual(design.evaluate(), expected)
+
+    def test_shift_if_subnormal_accepts_configurable_extra_bits(self):
+        mantissa = Const(UQ.from_float(1.5, 1, 3))
+        exponent = Const(Q.from_int(1))
+
+        default_mantissa, _ = shift_if_subnormal(mantissa, exponent)
+        custom_mantissa, _ = shift_if_subnormal(
+            mantissa,
+            exponent,
+            subnormal_extra_bits=5,
+        )
+
+        self.assertEqual(default_mantissa.node_type, UQT(1, 6))
+        self.assertEqual(custom_mantissa.node_type, UQT(1, 8))
+        self.assertEqual(default_mantissa.evaluate().to_val(), 1.5)
+        self.assertEqual(custom_mantissa.evaluate().to_val(), 1.5)
+
+        with self.assertRaisesRegex(TypeError, "must be an int"):
+            shift_if_subnormal(mantissa, exponent, subnormal_extra_bits=1.5)
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            shift_if_subnormal(mantissa, exponent, subnormal_extra_bits=-1)
 
     def test_fp32_multiplier_spec_zero_handling(self):
         from examples.fp32_mult import spec_fp32_mult
@@ -2659,6 +2734,949 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             self.assertEqual(set(labels), {"output"})
 
 
+class TestFloat16Spec(unittest.TestCase):
+    def test_float16_runtime_layout_values_and_specials(self):
+        self.assertEqual(Float16.mantissa_bits, 10)
+        self.assertEqual(Float16.exponent_bits, 5)
+        self.assertEqual(Float16.exponent_bias, 15)
+        self.assertEqual(Float16.Zero().val, 0x0000)
+        self.assertEqual(Float16.nZero().val, 0x8000)
+        self.assertEqual(Float16.Inf().val, 0x7C00)
+        self.assertEqual(Float16.nInf().val, 0xFC00)
+        self.assertEqual(Float16.NaN().val, 0x7E00)
+        self.assertEqual(Float16.NaN(1).val, 0x7C01)
+
+        largest_negative = Float16.from_fields(
+            sign=1,
+            exponent=30,
+            mantissa=1023,
+        )
+        self.assertEqual(largest_negative.val, 0xFBFF)
+        self.assertEqual(largest_negative.sign, 1)
+        self.assertEqual(largest_negative.exponent, 30)
+        self.assertEqual(largest_negative.mantissa, 1023)
+        self.assertEqual(largest_negative.copy(), largest_negative)
+        self.assertEqual(largest_negative.static_type(), Float16T())
+
+        self.assertEqual(Float16(0x0001).to_val(), 2 ** -24)
+        self.assertEqual(Float16(0x03FF).to_val(), 1023 * (2 ** -24))
+        self.assertEqual(Float16(0x0400).to_val(), 2 ** -14)
+        self.assertEqual(Float16(0x3C00).to_val(), 1.0)
+        self.assertEqual(Float16(0x7BFF).to_val(), 65504.0)
+        self.assertTrue(math.isinf(Float16.Inf().to_val()))
+        self.assertTrue(math.isnan(Float16.NaN().to_val()))
+        self.assertLess(math.copysign(1.0, Float16.nZero().to_val()), 0)
+
+    def test_float16_runtime_rejects_invalid_encodings(self):
+        with self.assertRaisesRegex(TypeError, "packed bits as int"):
+            Float16(1.0)
+        with self.assertRaisesRegex(ValueError, "packed bits must fit"):
+            Float16(1 << 16)
+        with self.assertRaisesRegex(ValueError, "sign must be 0 or 1"):
+            Float16.from_fields(2, 0, 0)
+        with self.assertRaisesRegex(ValueError, "exponent out of range"):
+            Float16.from_fields(0, 32, 0)
+        with self.assertRaisesRegex(ValueError, "mantissa out of range"):
+            Float16.from_fields(0, 0, 1024)
+        with self.assertRaisesRegex(TypeError, "NaN payload must be int"):
+            Float16.NaN("quiet")
+        with self.assertRaisesRegex(ValueError, "non-zero"):
+            Float16.NaN(0)
+
+    def test_fp16_format_and_explicit_classifications(self):
+        self.assertEqual(fp16.exponent_bits, 5)
+        self.assertEqual(fp16.mantissa_bits, 10)
+        self.assertEqual(fp16.exponent_bias, 15)
+
+        ctx = SpecContext("explicit-fp16-values")
+        cases = (
+            (fp16.nan(ctx), "is_nan"),
+            (fp16.inf(ctx), "is_pinf"),
+            (fp16.ninf(ctx), "is_ninf"),
+            (fp16.zero(ctx), "is_pzero"),
+            (fp16.nzero(ctx), "is_nzero"),
+        )
+        special_names = set()
+        for value, predicate in cases:
+            with self.subTest(predicate=predicate):
+                self.assertEqual(
+                    getattr(value, predicate).constant_fold(),
+                    BoolLit(True),
+                )
+                if predicate in {"is_nan", "is_pinf", "is_ninf"}:
+                    self.assertIsInstance(value.value, RealVar)
+                    special_names.add(value.value.name)
+                else:
+                    self.assertEqual(value.value, RealLit(0))
+        self.assertEqual(len(special_names), 3)
+
+    def test_float16_runtime_and_static_types_produce_structured_specs(self):
+        runtime_cases = (
+            (Float16.Zero(), "is_pzero"),
+            (Float16.nZero(), "is_nzero"),
+            (Float16(0x0001), "is_sub"),
+            (Float16(0x3C00), "is_norm"),
+            (Float16.Inf(), "is_pinf"),
+            (Float16.nInf(), "is_ninf"),
+            (Float16.NaN(), "is_nan"),
+        )
+        for runtime_value, predicate in runtime_cases:
+            with self.subTest(bits=runtime_value.val):
+                ctx = SpecContext("runtime-fp16")
+                value = runtime_value.to_spec(ctx)
+                self.assertIsInstance(value, fp16)
+                self.assertEqual(
+                    getattr(value, predicate).constant_fold(),
+                    BoolLit(True),
+                )
+
+        ctx = SpecContext("static-fp16")
+        self.assertIsInstance(Float16T().to_spec("input", ctx), fp16)
+        rng = random.Random(1)
+        self.assertIsInstance(Float16T().random_runtime_value(rng), Float16)
+
+    def test_fp16_encode_classifies_representative_boundaries(self):
+        cases = (
+            ("positive-zero", 0.0, "is_pzero"),
+            ("negative-underflow", -(2 ** -26), "is_nzero"),
+            ("smallest-subnormal", 2 ** -24, "is_sub"),
+            ("smallest-normal", 2 ** -14, "is_norm"),
+            ("greatest-normal", 65504.0, "is_norm"),
+            ("positive-overflow", 70000.0, "is_pinf"),
+            ("negative-overflow", -70000.0, "is_ninf"),
+        )
+
+        for name, real_value, predicate in cases:
+            with self.subTest(value=name):
+                ctx = SpecContext(f"fp16-encode-{name}")
+                encoded = fp16.encode(RealLit(real_value), ctx)
+                ctx.check(getattr(encoded, predicate))
+
+                report = simplify_ctx(ctx)
+                if report["status"] == "unknown":
+                    report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+
+                self.assertEqual(report["status"], "unsat", report)
+
+        with self.assertRaisesRegex(TypeError, "fp16.encode value must be RealExpr"):
+            fp16.encode(1.0, SpecContext("invalid-fp16-encode"))
+
+    def test_fp16_decode_names_and_classifies_fields(self):
+        cases = (
+            (Float16.Zero(), (0, 0, 0, 0, 0, 1, 0, 0)),
+            (Float16.nZero(), (1, 0, 0, 0, 0, 1, 0, 0)),
+            (Float16(0x0001), (0, 0, 1, 0, 1, 0, 0, 0)),
+            (Float16(0x3C00), (0, 15, 0, 1, 0, 0, 0, 0)),
+            (Float16.Inf(), (0, 31, 0, 0, 0, 0, 1, 0)),
+            (Float16.NaN(), (0, 31, 512, 0, 0, 0, 0, 1)),
+        )
+
+        for runtime_value, expected in cases:
+            with self.subTest(bits=runtime_value.val):
+                decoded = fp16_decode(Const(runtime_value))
+                self.assertEqual(
+                    tuple(field.evaluate().val for field in decoded),
+                    expected,
+                )
+                self.assertIs(decoded.sign, decoded[0])
+                self.assertIs(decoded.is_nan, decoded[7])
+
+    def test_fp16_pack_round_trips_in_python_and_cpp(self):
+        def identity_spec(x, ctx):
+            del ctx
+            return x
+
+        @Composite(name="fp16_pack_decode_roundtrip", spec=identity_spec)
+        def fp16_pack_decode_roundtrip(x):
+            decoded = fp16_decode(x)
+            return fp16_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var(name="value", sign=Float16T())
+        design = fp16_pack_decode_roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        cases = (0x0000, 0x8000, 0x0001, 0x03FF, 0x0400, 0x3C00, 0x7BFF, 0x7C00, 0x7E00, 0xFFFF)
+        try:
+            for bits in cases:
+                with self.subTest(bits=bits):
+                    value.load_val(Float16(bits))
+                    self.assertEqual(design.evaluate().val, bits)
+                    self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+
+    def test_fp16_observables_match_other_ieee_formats(self):
+        value = fp16(
+            value=RealVar("value"),
+            sign=RealVar("sign"),
+            exponent=RealVar("exponent"),
+            mantissa=RealVar("mantissa"),
+            is_norm=BoolVar("is_norm"),
+            is_sub=BoolVar("is_sub"),
+            is_zero=BoolVar("is_zero"),
+            is_inf=BoolVar("is_inf"),
+            is_nan=BoolVar("is_nan"),
+        )
+
+        self.assertEqual(value.observables_for_classification("norm"), (value.value,))
+        self.assertEqual(value.observables_for_classification("sub"), (value.value,))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("inf"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
+        with self.assertRaisesRegex(ValueError, "Unknown fp16 classification"):
+            value.observables_for_classification("finite")
+
+
+class TestE4M3FNSpec(unittest.TestCase):
+    def test_runtime_layout_values_and_validation(self):
+        self.assertEqual(E4M3FN.Zero().val, 0x00)
+        self.assertEqual(E4M3FN.nZero().val, 0x80)
+        self.assertEqual(E4M3FN.NaN().val, 0x7F)
+        self.assertEqual(E4M3FN(0x01).to_val(), 2 ** -9)
+        self.assertEqual(E4M3FN(0x07).to_val(), 7 * 2 ** -9)
+        self.assertEqual(E4M3FN(0x08).to_val(), 2 ** -6)
+        self.assertEqual(E4M3FN(0x7E).to_val(), 448.0)
+        self.assertEqual(E4M3FN(0xFE).to_val(), -448.0)
+        self.assertTrue(math.isnan(E4M3FN(0x7F).to_val()))
+        self.assertTrue(math.isnan(E4M3FN(0xFF).to_val()))
+
+        value = E4M3FN.from_fields(1, 15, 6)
+        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 15, 6))
+        self.assertEqual(value.copy(), value)
+        self.assertEqual(value.static_type(), E4M3FNT())
+        self.assertEqual(value.total_bits(), 8)
+
+        for invalid in (-1, 256, 1.5, "0"):
+            with self.subTest(packed=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    E4M3FN(invalid)
+        for fields in ((2, 0, 0), (0, -1, 0), (0, 16, 0), (0, 0, -1), (0, 0, 8)):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    E4M3FN.from_fields(*fields)
+
+    def test_exhaustive_decode_classification_and_values(self):
+        counts = {"norm": 0, "sub": 0, "zero": 0, "nan": 0}
+        names = tuple(counts)
+        for bits in range(256):
+            runtime = E4M3FN(bits)
+            decoded = e4m3fn_decode(Const(runtime))
+            fields = tuple(node.evaluate().val for node in decoded)
+            self.assertEqual(fields[:3], (bits >> 7, (bits >> 3) & 15, bits & 7))
+            self.assertEqual(sum(fields[3:]), 1)
+            counts[names[fields[3:].index(1)]] += 1
+
+            spec = runtime.to_spec(SpecContext(f"e4m3fn-{bits}"))
+            expected = spec.classification_flags()[names[fields[3:].index(1)]]
+            self.assertEqual(expected.constant_fold(), BoolLit(True))
+
+        self.assertEqual(counts, {"norm": 238, "sub": 14, "zero": 2, "nan": 2})
+
+    def test_pack_decode_round_trip_in_python_and_jit_cpp(self):
+        @Composite(name="e4m3fn_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def roundtrip(x):
+            decoded = e4m3fn_decode(x)
+            return e4m3fn_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var("value", sign=E4M3FNT())
+        design = roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(256):
+                value.load_val(E4M3FN(bits))
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+
+    def test_symbolic_shape_classification_and_observables(self):
+        ctx = SpecContext("fresh-e4m3fn")
+        value = e4m3fn.fresh("x", ctx)
+        self.assertEqual(tuple(value.classification_flags()), ("norm", "sub", "zero", "nan"))
+        self.assertNotIn("inf", value.classification_flags())
+        self.assertEqual(value.observables_for_classification("norm"), (value.value,))
+        self.assertEqual(value.observables_for_classification("sub"), (value.value,))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
+        self.assertIsInstance(E4M3FNT().to_spec("input", ctx), e4m3fn)
+        self.assertIsInstance(E4M3FNT().random_runtime_value(random.Random(1)), E4M3FN)
+
+        self.assertEqual(e4m3fn.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e4m3fn.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
+        with self.assertRaisesRegex(ValueError, "Unknown e4m3fn classification"):
+            value.observables_for_classification("inf")
+
+    def test_symbolic_encode_boundaries(self):
+        cases = (
+            (0.0, "is_pzero"),
+            (2 ** -10, "is_pzero"),
+            (2 ** -9, "is_sub"),
+            (2 ** -6, "is_norm"),
+            (448.0, "is_norm"),
+            (1000.0, "is_norm"),
+            (-1000.0, "is_norm"),
+        )
+        for real_value, predicate in cases:
+            with self.subTest(real_value=real_value):
+                ctx = SpecContext("encode-e4m3fn")
+                encoded = e4m3fn.encode(RealLit(real_value), ctx)
+                ctx.check(getattr(encoded, predicate))
+                report = simplify_ctx(ctx)
+                if report["status"] == "unknown":
+                    report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+                self.assertEqual(report["status"], "unsat", report)
+
+    def test_bit_level_encoder_rne_canonical_zero_and_saturation(self):
+        sign = Var("sign", UQT(1, 0))
+        exponent = Var("exponent", QT(8, 0))
+        mantissa = Var("mantissa", UQT(12, 12))
+        design = e4m3fn_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+
+        def q8(value):
+            return Q(value & 0xFF, 8, 0)
+
+        cases = (
+            (0, 7, 0.0, 0x00),
+            (1, 7, 0.0, 0x00),
+            (0, 7, 1.0, 0x38),
+            (1, 7, 1.0, 0xB8),
+            (0, -1, 0.25, 0x00),  # half of the minimum subnormal
+            (1, -1, 0.25, 0x80),  # negative nonzero underflow retains its sign
+            (0, -1, 0.75, 0x02),  # 1.5 subnormal units ties to even
+            (0, -1, 1.25, 0x02),  # 2.5 subnormal units ties to even
+            (0, -1, 3.75, 0x08),  # largest-sub/min-normal midpoint
+            (0, 7, 1.0625, 0x38),  # normal tie rounds to even mantissa 0
+            (0, 7, 1.1875, 0x3A),  # normal tie rounds to even mantissa 2
+            (0, 7, 1.9375, 0x40),  # rounding carry increments exponent
+            (0, 15, 1.75, 0x7E),
+            (0, 15, 1.875, 0x7E),  # reserved NaN result saturates
+            (0, 20, 1.0, 0x7E),
+            (1, 20, 1.0, 0xFE),
+        )
+        try:
+            for sign_value, exponent_value, mantissa_value, expected in cases:
+                with self.subTest(
+                    sign=sign_value,
+                    exponent=exponent_value,
+                    mantissa=mantissa_value,
+                ):
+                    sign_runtime = UQ(sign_value, 1, 0)
+                    exponent_runtime = q8(exponent_value)
+                    mantissa_runtime = UQ.from_float(mantissa_value, 12, 12)
+                    sign.load_val(sign_runtime)
+                    exponent.load_val(exponent_runtime)
+                    mantissa.load_val(mantissa_runtime)
+                    self.assertEqual(design.evaluate().val, expected)
+                    self.assertEqual(
+                        compiled(
+                            sign_runtime.val,
+                            exponent_runtime.val,
+                            mantissa_runtime.val,
+                        ),
+                        expected,
+                    )
+        finally:
+            tempdir.cleanup()
+
+    def test_encoder_recreates_every_finite_encoding(self):
+        sign = Var("finite_sign", UQT(1, 0))
+        exponent = Var("finite_exponent", QT(8, 0))
+        mantissa = Var("finite_mantissa", UQT(2, 12))
+        design = e4m3fn_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(256):
+                runtime = E4M3FN(bits)
+                if runtime.is_nan:
+                    continue
+                if runtime.exponent == 0:
+                    exponent_value = 1
+                    mantissa_value = runtime.mantissa / 8
+                else:
+                    exponent_value = runtime.exponent
+                    mantissa_value = 1 + runtime.mantissa / 8
+
+                sign_value = UQ(runtime.sign, 1, 0)
+                exponent_value = Q(exponent_value, 8, 0)
+                mantissa_value = UQ.from_float(mantissa_value, 2, 12)
+                sign.load_val(sign_value)
+                exponent.load_val(exponent_value)
+                mantissa.load_val(mantissa_value)
+                expected = 0x00 if bits == E4M3FN.nZero().val else bits
+                self.assertEqual(design.evaluate().val, expected)
+                self.assertEqual(
+                    compiled(sign_value.val, exponent_value.val, mantissa_value.val),
+                    expected,
+                )
+        finally:
+            tempdir.cleanup()
+
+    def test_saturating_encoder_determinism_and_specification_proofs(self):
+        def spec(ctx):
+            return e4m3fn.encode(ctx.two() ** ctx.real_val(13), ctx)
+
+        @Composite(name="e4m3fn_encode_saturation_proof", spec=spec)
+        def saturation_design():
+            return e4m3fn_encode(
+                Const(UQ(0, 1, 0)),
+                Const(Q.from_int(20)),
+                Const(UQ.from_int(1)),
+            )
+
+        design = saturation_design()
+        schedule = [
+            {"tool": "simplify"},
+            {"tool": "z3", "timeout_ms": 5000},
+        ]
+        self.assertTrue(design.check_determinism(schedule=schedule)["proved"])
+        self.assertTrue(design.check_spec(schedule=schedule)["proved"])
+
+
+class TestE5M2Spec(unittest.TestCase):
+    def test_runtime_constants_constructors_validation_copy_and_static_type(self):
+        self.assertEqual(E5M2.exponent_bias, 15)
+        self.assertEqual(E5M2.min_subnormal, 2 ** -16)
+        self.assertEqual(E5M2.min_normal, 2 ** -14)
+        self.assertEqual(E5M2.max_finite, 57344.0)
+        self.assertEqual(E5M2.Zero().val, 0x00)
+        self.assertEqual(E5M2.nZero().val, 0x80)
+        self.assertEqual(E5M2.Inf().val, 0x7C)
+        self.assertEqual(E5M2.nInf().val, 0xFC)
+        self.assertEqual(E5M2.NaN().val, 0x7E)
+        self.assertEqual(
+            [E5M2.NaN(payload).val for payload in range(1, 4)],
+            [0x7D, 0x7E, 0x7F],
+        )
+        self.assertEqual(E5M2(0x01).to_val(), 2 ** -16)
+        self.assertEqual(E5M2(0x03).to_val(), 3 * 2 ** -16)
+        self.assertEqual(E5M2(0x04).to_val(), 2 ** -14)
+        self.assertEqual(E5M2(0x7B).to_val(), 57344.0)
+        self.assertEqual(E5M2(0xFB).to_val(), -57344.0)
+        self.assertEqual(E5M2(0x7C).to_val(), float("inf"))
+        self.assertEqual(E5M2(0xFC).to_val(), float("-inf"))
+        for bits in (0x7D, 0x7E, 0x7F, 0xFD, 0xFE, 0xFF):
+            self.assertTrue(math.isnan(E5M2(bits).to_val()))
+
+        value = E5M2.from_fields(1, 30, 3)
+        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 30, 3))
+        self.assertEqual(value.copy(), value)
+        self.assertEqual(value.static_type(), E5M2T())
+        self.assertEqual(value.total_bits(), 8)
+        generator, next_shared = E5M2.random_generator(
+            seed=1, shared_exponent_bits=2
+        )
+        self.assertIsInstance(generator(), E5M2)
+        self.assertEqual(next_shared() & 0x07, 0)
+
+        for invalid in (-1, 256, 1.5, "0"):
+            with self.subTest(packed=invalid), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                E5M2(invalid)
+        for fields in (
+            (2, 0, 0),
+            (0, -1, 0),
+            (0, 32, 0),
+            (0, 0, -1),
+            (0, 0, 4),
+        ):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                E5M2.from_fields(*fields)
+        for payload in (0, 4, -1, 1.5, "2"):
+            with self.subTest(payload=payload), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                E5M2.NaN(payload)
+
+    def test_exhaustive_classification_and_pack_decode_round_trip(self):
+        counts = {"norm": 0, "sub": 0, "zero": 0, "inf": 0, "nan": 0}
+        names = tuple(counts)
+
+        @Composite(name="e5m2_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def roundtrip(x):
+            decoded = e5m2_decode(x)
+            return e5m2_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var("e5m2_value", sign=E5M2T())
+        design = roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(256):
+                runtime = E5M2(bits)
+                decoded = e5m2_decode(Const(runtime))
+                fields = tuple(node.evaluate().val for node in decoded)
+                self.assertEqual(
+                    fields[:3], (bits >> 7, (bits >> 2) & 31, bits & 3)
+                )
+                self.assertEqual(sum(fields[3:]), 1)
+                classification = names[fields[3:].index(1)]
+                counts[classification] += 1
+                spec = runtime.to_spec(SpecContext(f"e5m2-{bits}"))
+                self.assertEqual(
+                    spec.classification_flags()[classification].constant_fold(),
+                    BoolLit(True),
+                )
+                value.load_val(runtime)
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+        self.assertEqual(
+            counts,
+            {"norm": 240, "sub": 6, "zero": 2, "inf": 2, "nan": 6},
+        )
+
+    def test_symbolic_shape_constructors_and_observables(self):
+        ctx = SpecContext("fresh-e5m2")
+        value = e5m2.fresh("x", ctx)
+        self.assertEqual(
+            tuple(value.classification_flags()),
+            ("norm", "sub", "zero", "inf", "nan"),
+        )
+        self.assertEqual(value.observables_for_classification("norm"), (value.value,))
+        self.assertEqual(value.observables_for_classification("sub"), (value.value,))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("inf"), (value.sign,))
+        self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
+        with self.assertRaisesRegex(ValueError, "Unknown e5m2 classification"):
+            value.observables_for_classification("finite")
+        self.assertIsInstance(E5M2T().to_spec("input", ctx), e5m2)
+        self.assertIsInstance(E5M2T().random_runtime_value(random.Random(1)), E5M2)
+        self.assertEqual(e5m2.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.inf(ctx).is_pinf.constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.ninf(ctx).is_ninf.constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.nan(ctx).is_nan.constant_fold(), BoolLit(True))
+
+    def test_encoder_rne_canonical_zero_infinity_and_all_finite_encodings(self):
+        sign = Var("e5m2_sign", UQT(1, 0))
+        exponent = Var("e5m2_exponent", QT(8, 0))
+        mantissa = Var("e5m2_mantissa", UQT(2, 12))
+        design = e5m2_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+
+        def run(sign_value, exponent_value, mantissa_value):
+            sign_runtime = UQ(sign_value, 1, 0)
+            exponent_runtime = Q(exponent_value & 0xFF, 8, 0)
+            mantissa_runtime = UQ.from_float(mantissa_value, 2, 12)
+            sign.load_val(sign_runtime)
+            exponent.load_val(exponent_runtime)
+            mantissa.load_val(mantissa_runtime)
+            return (
+                design.evaluate().val,
+                compiled(sign_runtime.val, exponent_runtime.val, mantissa_runtime.val),
+            )
+
+        cases = (
+            (0, 15, 0.0, 0x00),
+            (1, 15, 0.0, 0x00),
+            (0, -1, 0.5, 0x00),
+            (1, -1, 0.5, 0x80),
+            (0, -1, 1.5, 0x02),
+            (0, -1, 2.5, 0x02),
+            (0, -1, 3.5, 0x04),
+            (0, 15, 1.125, 0x3C),
+            (0, 15, 1.375, 0x3E),
+            (0, 15, 1.875, 0x40),
+            (0, 30, 1.75, 0x7B),
+            (0, 30, 1.875, 0x7C),
+            (0, 40, 1.0, 0x7C),
+            (1, 40, 1.0, 0xFC),
+        )
+        try:
+            for sign_value, exponent_value, mantissa_value, expected in cases:
+                with self.subTest(
+                    sign=sign_value,
+                    exponent=exponent_value,
+                    mantissa=mantissa_value,
+                ):
+                    self.assertEqual(
+                        run(sign_value, exponent_value, mantissa_value),
+                        (expected, expected),
+                    )
+
+            for bits in range(256):
+                runtime = E5M2(bits)
+                if runtime.is_inf or runtime.is_nan:
+                    continue
+                exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
+                mantissa_value = (
+                    runtime.mantissa / 4
+                    if runtime.exponent == 0
+                    else 1 + runtime.mantissa / 4
+                )
+                expected = 0x00 if bits == E5M2.nZero().val else bits
+                self.assertEqual(
+                    run(runtime.sign, exponent_value, mantissa_value),
+                    (expected, expected),
+                )
+        finally:
+            tempdir.cleanup()
+
+    def test_overflow_encoder_determinism_and_specification_proofs(self):
+        def spec(ctx):
+            return e5m2.encode(ctx.two() ** ctx.real_val(24), ctx)
+
+        @Composite(name="e5m2_encode_overflow_proof", spec=spec)
+        def overflow_design():
+            return e5m2_encode(
+                Const(UQ(0, 1, 0)),
+                Const(Q.from_int(39)),
+                Const(UQ.from_int(1)),
+            )
+
+        design = overflow_design()
+        schedule = [{"tool": "simplify"}, {"tool": "z3", "timeout_ms": 5000}]
+        self.assertTrue(design.check_determinism(schedule=schedule)["proved"])
+        self.assertTrue(design.check_spec(schedule=schedule)["proved"])
+
+
+class TestE5M2FNUZSpec(unittest.TestCase):
+    def test_runtime_layout_values_validation_copy_and_static_type(self):
+        self.assertEqual(E5M2FNUZ.Zero().val, 0x00)
+        self.assertEqual(E5M2FNUZ.NaN().val, 0x80)
+        self.assertEqual(E5M2FNUZ.exponent_bias, 16)
+        self.assertEqual(E5M2FNUZ(0x01).to_val(), 2 ** -17)
+        self.assertEqual(E5M2FNUZ(0x03).to_val(), 3 * 2 ** -17)
+        self.assertEqual(E5M2FNUZ(0x04).to_val(), 2 ** -15)
+        self.assertEqual(E5M2FNUZ(0x7F).to_val(), 57344.0)
+        self.assertEqual(E5M2FNUZ(0xFF).to_val(), -57344.0)
+        self.assertTrue(math.isnan(E5M2FNUZ(0x80).to_val()))
+
+        value = E5M2FNUZ.from_fields(1, 31, 3)
+        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 31, 3))
+        self.assertEqual(value.copy(), value)
+        self.assertEqual(value.static_type(), E5M2FNUZT())
+        self.assertEqual(value.total_bits(), 8)
+        generator, next_shared = E5M2FNUZ.random_generator(
+            seed=1, shared_exponent_bits=2
+        )
+        self.assertIsInstance(generator(), E5M2FNUZ)
+        self.assertEqual(next_shared() & 0x07, 0)
+
+        for invalid in (-1, 256, 1.5, "0"):
+            with self.subTest(packed=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    E5M2FNUZ(invalid)
+        for fields in (
+            (2, 0, 0),
+            (0, -1, 0),
+            (0, 32, 0),
+            (0, 0, -1),
+            (0, 0, 4),
+        ):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                E5M2FNUZ.from_fields(*fields)
+
+    def test_exhaustive_classification_and_pack_decode_round_trip(self):
+        counts = {"norm": 0, "sub": 0, "zero": 0, "nan": 0}
+        names = tuple(counts)
+
+        @Composite(name="e5m2fnuz_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def roundtrip(x):
+            decoded = e5m2fnuz_decode(x)
+            return e5m2fnuz_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var("e5m2fnuz_value", sign=E5M2FNUZT())
+        design = roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(256):
+                runtime = E5M2FNUZ(bits)
+                decoded = e5m2fnuz_decode(Const(runtime))
+                fields = tuple(node.evaluate().val for node in decoded)
+                self.assertEqual(fields[:3], (bits >> 7, (bits >> 2) & 31, bits & 3))
+                self.assertEqual(sum(fields[3:]), 1)
+                classification = names[fields[3:].index(1)]
+                counts[classification] += 1
+                spec = runtime.to_spec(SpecContext(f"e5m2fnuz-{bits}"))
+                self.assertEqual(
+                    spec.classification_flags()[classification].constant_fold(),
+                    BoolLit(True),
+                )
+                value.load_val(runtime)
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+        self.assertEqual(counts, {"norm": 248, "sub": 6, "zero": 1, "nan": 1})
+
+    def test_symbolic_shape_constructors_and_boundaries(self):
+        ctx = SpecContext("fresh-e5m2fnuz")
+        value = e5m2fnuz.fresh("x", ctx)
+        self.assertEqual(
+            tuple(value.classification_flags()), ("norm", "sub", "zero", "nan")
+        )
+        self.assertEqual(value.observables_for_classification("zero"), (BoolLit(True),))
+        self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
+        self.assertIsInstance(E5M2FNUZT().to_spec("input", ctx), e5m2fnuz)
+        self.assertIsInstance(
+            E5M2FNUZT().random_runtime_value(random.Random(1)), E5M2FNUZ
+        )
+        self.assertEqual(e5m2fnuz.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2fnuz.nan(ctx).is_nan.constant_fold(), BoolLit(True))
+        self.assertFalse(hasattr(e5m2fnuz, "nzero"))
+        self.assertFalse(hasattr(e5m2fnuz, "inf"))
+
+        for real_value, predicate in (
+            (0.0, "is_pzero"),
+            (2 ** -18, "is_pzero"),
+            (2 ** -17, "is_sub"),
+            (2 ** -15, "is_norm"),
+            (57344.0, "is_norm"),
+            (100000.0, "is_norm"),
+            (-100000.0, "is_norm"),
+        ):
+            boundary_ctx = SpecContext("encode-e5m2fnuz")
+            encoded = e5m2fnuz.encode(RealLit(real_value), boundary_ctx)
+            boundary_ctx.check(getattr(encoded, predicate))
+            report = simplify_ctx(boundary_ctx)
+            if report["status"] == "unknown":
+                report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+            self.assertEqual(report["status"], "unsat", report)
+
+    def test_encoder_rne_unsigned_zero_saturation_and_all_finite_encodings(self):
+        sign = Var("e5_sign", UQT(1, 0))
+        exponent = Var("e5_exponent", QT(8, 0))
+        mantissa = Var("e5_mantissa", UQT(2, 12))
+        design = e5m2fnuz_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+
+        def run(sign_value, exponent_value, mantissa_value):
+            sign_runtime = UQ(sign_value, 1, 0)
+            exponent_runtime = Q(exponent_value & 0xFF, 8, 0)
+            mantissa_runtime = UQ.from_float(mantissa_value, 2, 12)
+            sign.load_val(sign_runtime)
+            exponent.load_val(exponent_runtime)
+            mantissa.load_val(mantissa_runtime)
+            return (
+                design.evaluate().val,
+                compiled(sign_runtime.val, exponent_runtime.val, mantissa_runtime.val),
+            )
+
+        try:
+            cases = (
+                (0, 16, 0.0, 0x00),
+                (1, 16, 0.0, 0x00),
+                (0, 1, 0.125, 0x00),
+                (1, 1, 0.125, 0x00),
+                (0, 1, 0.375, 0x02),
+                (0, 1, 0.625, 0x02),
+                (0, 1, 0.875, 0x04),
+                (0, 16, 1.125, 0x40),
+                (0, 16, 1.375, 0x42),
+                (0, 16, 1.875, 0x44),
+                (0, 31, 1.75, 0x7F),
+                (1, 40, 1.0, 0xFF),
+            )
+            for sign_value, exponent_value, mantissa_value, expected in cases:
+                with self.subTest(
+                    sign=sign_value, exponent=exponent_value, mantissa=mantissa_value
+                ):
+                    self.assertEqual(
+                        run(sign_value, exponent_value, mantissa_value),
+                        (expected, expected),
+                    )
+
+            for bits in range(256):
+                runtime = E5M2FNUZ(bits)
+                if runtime.is_nan:
+                    continue
+                exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
+                mantissa_value = (
+                    runtime.mantissa / 4
+                    if runtime.exponent == 0
+                    else 1 + runtime.mantissa / 4
+                )
+                self.assertEqual(
+                    run(runtime.sign, exponent_value, mantissa_value), (bits, bits)
+                )
+        finally:
+            tempdir.cleanup()
+
+    def test_saturating_encoder_determinism_and_specification_proofs(self):
+        def spec(ctx):
+            return e5m2fnuz.encode(ctx.two() ** ctx.real_val(24), ctx)
+
+        @Composite(name="e5m2fnuz_encode_saturation_proof", spec=spec)
+        def saturation_design():
+            return e5m2fnuz_encode(
+                Const(UQ(0, 1, 0)),
+                Const(Q.from_int(40)),
+                Const(UQ.from_int(1)),
+            )
+
+        design = saturation_design()
+        schedule = [{"tool": "simplify"}, {"tool": "z3", "timeout_ms": 5000}]
+        self.assertTrue(design.check_determinism(schedule=schedule)["proved"])
+        self.assertTrue(design.check_spec(schedule=schedule)["proved"])
+
+
+class TestE2M1Spec(unittest.TestCase):
+    def test_runtime_layout_values_validation_and_static_type(self):
+        self.assertEqual(E2M1.Zero().val, 0x0)
+        self.assertEqual(E2M1.nZero().val, 0x8)
+        self.assertEqual(E2M1(0x1).to_val(), 0.5)
+        self.assertEqual(E2M1(0x2).to_val(), 1.0)
+        self.assertEqual(E2M1(0x7).to_val(), 6.0)
+        self.assertEqual(E2M1(0xF).to_val(), -6.0)
+        value = E2M1.from_fields(1, 3, 1)
+        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 3, 1))
+        self.assertEqual(value.copy(), value)
+        self.assertEqual(value.static_type(), E2M1T())
+        self.assertEqual(value.total_bits(), 4)
+        self.assertFalse(hasattr(E2M1, "NaN"))
+        self.assertFalse(hasattr(E2M1, "Inf"))
+        generator, next_shared = E2M1.random_generator(seed=1, shared_exponent_bits=1)
+        self.assertIsInstance(generator(), E2M1)
+        self.assertEqual(next_shared() & 0x01, 0)
+
+        for invalid in (-1, 16, 1.5, "0"):
+            with self.subTest(packed=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    E2M1(invalid)
+        for fields in ((2, 0, 0), (0, -1, 0), (0, 4, 0), (0, 0, -1), (0, 0, 2)):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                E2M1.from_fields(*fields)
+
+    def test_exhaustive_classification_and_pack_decode_round_trip(self):
+        counts = {"norm": 0, "sub": 0, "zero": 0}
+        names = tuple(counts)
+
+        @Composite(name="e2m1_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def roundtrip(x):
+            decoded = e2m1_decode(x)
+            return e2m1_pack(decoded.sign, decoded.exponent, decoded.mantissa)
+
+        value = Var("e2m1_value", sign=E2M1T())
+        design = roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for bits in range(16):
+                runtime = E2M1(bits)
+                decoded = e2m1_decode(Const(runtime))
+                fields = tuple(node.evaluate().val for node in decoded)
+                self.assertEqual(fields[:3], (bits >> 3, (bits >> 1) & 3, bits & 1))
+                self.assertEqual(sum(fields[3:]), 1)
+                classification = names[fields[3:].index(1)]
+                counts[classification] += 1
+                spec = runtime.to_spec(SpecContext(f"e2m1-{bits}"))
+                self.assertEqual(
+                    spec.classification_flags()[classification].constant_fold(),
+                    BoolLit(True),
+                )
+                value.load_val(runtime)
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+        self.assertEqual(counts, {"norm": 12, "sub": 2, "zero": 2})
+
+    def test_symbolic_shape_and_zero_constructors(self):
+        ctx = SpecContext("fresh-e2m1")
+        value = e2m1.fresh("x", ctx)
+        self.assertEqual(tuple(value.classification_flags()), ("norm", "sub", "zero"))
+        self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
+        self.assertIsInstance(E2M1T().to_spec("input", ctx), e2m1)
+        self.assertIsInstance(E2M1T().random_runtime_value(random.Random(1)), E2M1)
+        self.assertEqual(e2m1.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e2m1.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
+        self.assertFalse(hasattr(e2m1, "nan"))
+        self.assertFalse(hasattr(e2m1, "inf"))
+
+        for real_value, predicate in (
+            (0.0, "is_pzero"),
+            (-0.25, "is_nzero"),
+            (0.5, "is_sub"),
+            (1.0, "is_norm"),
+            (6.0, "is_norm"),
+            (10.0, "is_norm"),
+            (-10.0, "is_norm"),
+        ):
+            boundary_ctx = SpecContext("encode-e2m1")
+            encoded = e2m1.encode(RealLit(real_value), boundary_ctx)
+            boundary_ctx.check(getattr(encoded, predicate))
+            report = simplify_ctx(boundary_ctx)
+            if report["status"] == "unknown":
+                report = z3_check_eq(report["new_ctx"], timeout_ms=1000)
+            self.assertEqual(report["status"], "unsat", report)
+
+    def test_encoder_rne_canonical_zero_saturation_and_all_encodings(self):
+        sign = Var("e2_sign", UQT(1, 0))
+        exponent = Var("e2_exponent", QT(8, 0))
+        mantissa = Var("e2_mantissa", UQT(2, 12))
+        design = e2m1_encode(sign, exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+
+        def run(sign_value, exponent_value, mantissa_value):
+            sign_runtime = UQ(sign_value, 1, 0)
+            exponent_runtime = Q(exponent_value & 0xFF, 8, 0)
+            mantissa_runtime = UQ.from_float(mantissa_value, 2, 12)
+            sign.load_val(sign_runtime)
+            exponent.load_val(exponent_runtime)
+            mantissa.load_val(mantissa_runtime)
+            return (
+                design.evaluate().val,
+                compiled(sign_runtime.val, exponent_runtime.val, mantissa_runtime.val),
+            )
+
+        try:
+            cases = (
+                (0, 1, 0.0, 0x0),
+                (1, 1, 0.0, 0x0),
+                (0, 1, 0.25, 0x0),
+                (1, 1, 0.25, 0x8),
+                (0, 1, 0.75, 0x2),
+                (1, 1, 0.75, 0xA),
+                (0, 1, 1.25, 0x2),
+                (0, 1, 1.75, 0x4),
+                (0, 3, 1.25, 0x6),
+                (0, 3, 1.5, 0x7),
+                (1, 5, 1.0, 0xF),
+            )
+            for sign_value, exponent_value, mantissa_value, expected in cases:
+                with self.subTest(
+                    sign=sign_value, exponent=exponent_value, mantissa=mantissa_value
+                ):
+                    self.assertEqual(
+                        run(sign_value, exponent_value, mantissa_value),
+                        (expected, expected),
+                    )
+
+            for bits in range(16):
+                runtime = E2M1(bits)
+                exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
+                mantissa_value = (
+                    runtime.mantissa / 2
+                    if runtime.exponent == 0
+                    else 1 + runtime.mantissa / 2
+                )
+                expected = 0x0 if bits == E2M1.nZero().val else bits
+                self.assertEqual(
+                    run(runtime.sign, exponent_value, mantissa_value),
+                    (expected, expected),
+                )
+        finally:
+            tempdir.cleanup()
+
+    def test_saturating_encoder_determinism_and_specification_proofs(self):
+        def spec(ctx):
+            return e2m1.encode(ctx.real_val(16), ctx)
+
+        @Composite(name="e2m1_encode_saturation_proof", spec=spec)
+        def saturation_design():
+            return e2m1_encode(
+                Const(UQ(0, 1, 0)),
+                Const(Q.from_int(5)),
+                Const(UQ.from_int(1)),
+            )
+
+        design = saturation_design()
+        schedule = [{"tool": "simplify"}, {"tool": "z3", "timeout_ms": 5000}]
+        self.assertTrue(design.check_determinism(schedule=schedule)["proved"])
+        self.assertTrue(design.check_spec(schedule=schedule)["proved"])
+
+
 class TestBFloat16Spec(unittest.TestCase):
     def test_bf16_value_selects_finite_formula_or_fresh_special(self):
         ctx = SpecContext("bf16-finite-value")
@@ -2789,6 +3807,93 @@ class TestBFloat16Spec(unittest.TestCase):
         self.assertNotIsInstance(encoded.is_norm, BoolVar)
         self.assertIsInstance(encoded.exponent, RealVar)
         self.assertIsInstance(encoded.mantissa, RealVar)
+
+
+class TestFloatFormatConversions(unittest.TestCase):
+    def _assert_python_and_cpp(self, conversion, runtime_type, cases):
+        source = Var(name="source", sign=runtime_type(0).static_type())
+        design = conversion(source)
+        tempdir, compiled = jit_compile(design)
+        try:
+            for name, source_bits, expected_bits in cases:
+                with self.subTest(conversion=conversion.__name__, name=name):
+                    source.load_val(runtime_type(source_bits))
+                    self.assertEqual(design.evaluate().val, expected_bits)
+                    self.assertEqual(compiled(source_bits), expected_bits)
+        finally:
+            tempdir.cleanup()
+
+    def test_fp16_to_fp32_is_exact(self):
+        self._assert_python_and_cpp(
+            fp16_to_fp32,
+            Float16,
+            (
+                ("positive-zero", 0x0000, 0x00000000),
+                ("negative-zero", 0x8000, 0x80000000),
+                ("smallest-subnormal", 0x0001, 0x33800000),
+                ("largest-subnormal", 0x03FF, 0x387FC000),
+                ("one", 0x3C00, 0x3F800000),
+                ("largest-finite", 0x7BFF, 0x477FE000),
+                ("positive-infinity", 0x7C00, 0x7F800000),
+                ("negative-infinity", 0xFC00, 0xFF800000),
+                ("nan", 0x7E00, 0x7FC00000),
+            ),
+        )
+
+    def test_fp32_to_fp16_rounds_and_classifies(self):
+        self._assert_python_and_cpp(
+            fp32_to_fp16,
+            Float32,
+            (
+                ("positive-zero", 0x00000000, 0x0000),
+                ("negative-zero", 0x80000000, 0x8000),
+                ("half-minimum-tie", 0x33000000, 0x0000),
+                ("smallest-subnormal", 0x33800000, 0x0001),
+                ("smallest-normal", 0x38800000, 0x0400),
+                ("tie-to-even-down", 0x3F801000, 0x3C00),
+                ("tie-to-even-up", 0x3F803000, 0x3C02),
+                ("largest-finite", 0x477FE000, 0x7BFF),
+                ("overflow", 0x47800000, 0x7C00),
+                ("positive-infinity", 0x7F800000, 0x7C00),
+                ("negative-infinity", 0xFF800000, 0xFC00),
+                ("nan", 0x7FC00000, 0x7E00),
+            ),
+        )
+
+    def test_fp16_to_bf16_rounds_to_nearest_even(self):
+        self._assert_python_and_cpp(
+            fp16_to_bf16,
+            Float16,
+            (
+                ("positive-zero", 0x0000, 0x0000),
+                ("negative-zero", 0x8000, 0x8000),
+                ("smallest-subnormal", 0x0001, 0x3380),
+                ("tie-to-even-down", 0x3C04, 0x3F80),
+                ("tie-to-even-up", 0x3C0C, 0x3F82),
+                ("largest-finite", 0x7BFF, 0x4780),
+                ("positive-infinity", 0x7C00, 0x7F80),
+                ("negative-infinity", 0xFC00, 0xFF80),
+                ("nan", 0x7E00, 0x7FC0),
+            ),
+        )
+
+    def test_bf16_to_fp16_handles_range_changes(self):
+        self._assert_python_and_cpp(
+            bf16_to_fp16,
+            BFloat16,
+            (
+                ("positive-zero", 0x0000, 0x0000),
+                ("negative-zero", 0x8000, 0x8000),
+                ("smallest-fp16-subnormal", 0x3380, 0x0001),
+                ("smallest-fp16-normal", 0x3880, 0x0400),
+                ("one", 0x3F80, 0x3C00),
+                ("largest-in-range", 0x477F, 0x7BF8),
+                ("overflow", 0x4780, 0x7C00),
+                ("positive-infinity", 0x7F80, 0x7C00),
+                ("negative-infinity", 0xFF80, 0xFC00),
+                ("nan", 0x7FC0, 0x7E00),
+            ),
+        )
 
 
 class TestBFloat16Add(unittest.TestCase):

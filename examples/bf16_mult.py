@@ -1,7 +1,5 @@
 from zolotone import *
 
-from .common import *
-from .encode_BFloat16 import *
 
 
 def spec_bf16_mult(x: bf16, y: bf16, ctx):
@@ -55,8 +53,8 @@ def bf16_mult(x: Node, y: Node) -> Node:
     )
 
     # UQ<7, 0> -> UQ<0, 7>.
-    x_m_fraction = integer_to_fraction(X.mantissa)
-    y_m_fraction = integer_to_fraction(Y.mantissa)
+    x_m_fraction = uq_integer_to_fraction(X.mantissa)
+    y_m_fraction = uq_integer_to_fraction(Y.mantissa)
 
     # Normal values have an implicit leading bit; subnormals and zeros do not.
     x_m_formatted = if_then_else(

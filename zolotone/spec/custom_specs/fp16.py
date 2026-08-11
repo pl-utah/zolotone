@@ -12,17 +12,17 @@ def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
 
 
 @dataclass(frozen=True)
-class bf16(FPExpr):
-    """A symbolic IEEE-754 bfloat16 value and its format operations.
+class fp16(FPExpr):
+    """A symbolic IEEE-754 binary16 value and its format operations.
 
     ``value`` is meaningful only for normal, subnormal, and zero values.
     NaN and infinity are represented by classification fields. NaN payload
     and sign are intentionally not part of the observable semantics.
     """
 
-    exponent_bits: ClassVar[int] = 8
-    mantissa_bits: ClassVar[int] = 7
-    exponent_bias: ClassVar[int] = 127
+    exponent_bits: ClassVar[int] = 5
+    mantissa_bits: ClassVar[int] = 10
+    exponent_bias: ClassVar[int] = 15
 
     value: RealExpr
     sign: RealExpr
@@ -35,8 +35,9 @@ class bf16(FPExpr):
     is_nan: BoolExpr
 
     @classmethod
-    def fresh(cls, name: str, ctx) -> bf16:
-        """Create an unconstrained, well-formed bfloat16 value."""
+    def fresh(cls, name: str, ctx) -> fp16:
+        """Create an unconstrained, well-formed binary16 value."""
+
         name = ctx.fresh_name(name)
         sign = ctx.fresh_real(f"{name}_sign")
         exponent = ctx.fresh_real(f"{name}_exponent")
@@ -49,10 +50,9 @@ class bf16(FPExpr):
 
         zero = ctx.zero()
         one = ctx.one()
+        two = ctx.two()
         max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
         max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
-
-        two = ctx.two()
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
 
@@ -106,12 +106,12 @@ class bf16(FPExpr):
         return out
 
     @classmethod
-    def encode(cls, value: RealExpr, ctx) -> bf16:
+    def encode(cls, value: RealExpr, ctx) -> fp16:
         if not isinstance(value, RealExpr):
             raise TypeError(
-                f"bf16.encode value must be RealExpr, got {type(value).__name__}"
+                f"fp16.encode value must be RealExpr, got {type(value).__name__}"
             )
-
+        
         zero = ctx.zero()
         one = ctx.one()
         two = ctx.two()
@@ -126,10 +126,10 @@ class bf16(FPExpr):
         )
         smallest_subnormal = two ** (one - exponent_bias - mantissa_bits)
         zero_rounding_boundary = smallest_subnormal * (two ** ctx.real_val(-1))
-
+        
         magnitude = abs(value)
         sign = If(value < zero, one, zero)
-
+        
         # Under RNE, a value at the midpoint between zero and the smallest
         # subnormal ties to the even encoding (zero).
         is_zero = magnitude <= zero_rounding_boundary
@@ -143,9 +143,9 @@ class bf16(FPExpr):
         )
         is_inf = magnitude > greatest_normal
         is_nan = ctx.false()
-
-        exponent = ctx.fresh_real("encoded_bf16_exponent")
-        mantissa = ctx.fresh_real("encoded_bf16_mantissa")
+        
+        exponent = ctx.fresh_real("encoded_fp16_exponent")
+        mantissa = ctx.fresh_real("encoded_fp16_mantissa")
         special = ctx.fresh_real("special")
         encoded_value = If(
             is_norm | is_sub,
@@ -163,7 +163,7 @@ class bf16(FPExpr):
             is_inf=is_inf,
             is_nan=is_nan,
         )
-
+        
         max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
         max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
@@ -192,7 +192,7 @@ class bf16(FPExpr):
         return out
 
     @classmethod
-    def nan(cls, ctx) -> bf16:
+    def nan(cls, ctx) -> fp16:
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(0),
@@ -206,7 +206,7 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def inf(cls, ctx) -> bf16:
+    def inf(cls, ctx) -> fp16:
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(0),
@@ -220,7 +220,7 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def ninf(cls, ctx) -> bf16:
+    def ninf(cls, ctx) -> fp16:
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(1),
@@ -234,7 +234,7 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def zero(cls, ctx) -> bf16:
+    def zero(cls, ctx) -> fp16:
         return cls(
             value=ctx.zero(),
             sign=RealLit(0),
@@ -248,7 +248,7 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def nzero(cls, ctx) -> bf16:
+    def nzero(cls, ctx) -> fp16:
         return cls(
             value=ctx.zero(),
             sign=RealLit(1),
@@ -273,7 +273,7 @@ class bf16(FPExpr):
             return (self.sign,)
         if classification == "nan":
             return (BoolLit(True),)
-        raise ValueError(f"Unknown bf16 classification {classification!r}")
+        raise ValueError(f"Unknown fp16 classification {classification!r}")
 
     def decode(self):
         return (

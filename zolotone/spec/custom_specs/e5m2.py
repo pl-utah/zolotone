@@ -12,17 +12,12 @@ def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
 
 
 @dataclass(frozen=True)
-class bf16(FPExpr):
-    """A symbolic IEEE-754 bfloat16 value and its format operations.
+class e5m2(FPExpr):
+    """Symbolic OCP E5M2 value with signed zeros and infinities."""
 
-    ``value`` is meaningful only for normal, subnormal, and zero values.
-    NaN and infinity are represented by classification fields. NaN payload
-    and sign are intentionally not part of the observable semantics.
-    """
-
-    exponent_bits: ClassVar[int] = 8
-    mantissa_bits: ClassVar[int] = 7
-    exponent_bias: ClassVar[int] = 127
+    exponent_bits: ClassVar[int] = 5
+    mantissa_bits: ClassVar[int] = 2
+    exponent_bias: ClassVar[int] = 15
 
     value: RealExpr
     sign: RealExpr
@@ -35,8 +30,7 @@ class bf16(FPExpr):
     is_nan: BoolExpr
 
     @classmethod
-    def fresh(cls, name: str, ctx) -> bf16:
-        """Create an unconstrained, well-formed bfloat16 value."""
+    def fresh(cls, name: str, ctx) -> "e5m2":
         name = ctx.fresh_name(name)
         sign = ctx.fresh_real(f"{name}_sign")
         exponent = ctx.fresh_real(f"{name}_exponent")
@@ -49,24 +43,20 @@ class bf16(FPExpr):
 
         zero = ctx.zero()
         one = ctx.one()
+        two = ctx.two()
         max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
         max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
-
-        two = ctx.two()
-        mantissa_bits = ctx.real_val(cls.mantissa_bits)
-        exponent_bias = ctx.real_val(cls.exponent_bias)
-
-        signed_value = sign_multiplier(ctx, sign)
+        signed = sign_multiplier(ctx, sign)
         normal_value = (
-            signed_value
-            * (one + mantissa * (two ** (-mantissa_bits)))
-            * (two ** (exponent - exponent_bias))
+            signed
+            * (one + mantissa * two ** (-ctx.real_val(cls.mantissa_bits)))
+            * two ** (exponent - ctx.real_val(cls.exponent_bias))
         )
         subnormal_value = (
-            signed_value
+            signed
             * mantissa
-            * (two ** (-mantissa_bits))
-            * (two ** (one - exponent_bias))
+            * two ** (-ctx.real_val(cls.mantissa_bits))
+            * two ** (one - ctx.real_val(cls.exponent_bias))
         )
         value = If(
             is_norm,
@@ -77,7 +67,6 @@ class bf16(FPExpr):
                 If(is_zero, zero, ctx.fresh_real("special")),
             ),
         )
-
         out = cls(
             value=value,
             sign=sign,
@@ -93,64 +82,59 @@ class bf16(FPExpr):
         ctx.assume(sign.eq(zero) | sign.eq(one))
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
-
         out._assume_exclusive_classification(ctx)
-
-        ctx.assume(_implies(is_norm, exponent >= one))
-        ctx.assume(_implies(is_norm, exponent <= max_exponent - one))
-        ctx.assume(_implies(is_sub | is_zero, exponent.eq(zero)))
-        ctx.assume(_implies(is_zero | is_inf, mantissa.eq(zero)))
-        ctx.assume(_implies(is_inf | is_nan, exponent.eq(max_exponent)))
-        ctx.assume(_implies(is_sub | is_nan, mantissa >= one))
-
+        ctx.assume(
+            _implies(is_norm, (exponent >= one) & (exponent < max_exponent))
+        )
+        ctx.assume(_implies(is_sub, exponent.eq(zero) & (mantissa >= one)))
+        ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
+        ctx.assume(_implies(is_inf, exponent.eq(max_exponent) & mantissa.eq(zero)))
+        ctx.assume(_implies(is_nan, exponent.eq(max_exponent) & (mantissa >= one)))
         return out
 
     @classmethod
-    def encode(cls, value: RealExpr, ctx) -> bf16:
+    def encode(cls, value: RealExpr, ctx) -> "e5m2":
+        """Round a real value to non-saturating E5M2 using RNE."""
+
         if not isinstance(value, RealExpr):
             raise TypeError(
-                f"bf16.encode value must be RealExpr, got {type(value).__name__}"
+                f"e5m2.encode value must be RealExpr, got {type(value).__name__}"
             )
 
         zero = ctx.zero()
         one = ctx.one()
         two = ctx.two()
-        mantissa_bits = ctx.real_val(cls.mantissa_bits)
-        exponent_bits = ctx.real_val(cls.exponent_bits)
-        exponent_bias = ctx.real_val(cls.exponent_bias)
-
-        smallest_normal = two ** (one - exponent_bias)
-        greatest_normal = (
-            (two - two ** (-mantissa_bits))
-            * two ** (two ** exponent_bits - two - exponent_bias)
-        )
-        smallest_subnormal = two ** (one - exponent_bias - mantissa_bits)
-        zero_rounding_boundary = smallest_subnormal * (two ** ctx.real_val(-1))
-
         magnitude = abs(value)
         sign = If(value < zero, one, zero)
+        exponent = ctx.fresh_real("encoded_e5m2_exponent")
+        mantissa = ctx.fresh_real("encoded_e5m2_mantissa")
+        max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
+        max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
+        mantissa_bits = ctx.real_val(cls.mantissa_bits)
+        exponent_bias = ctx.real_val(cls.exponent_bias)
+        smallest_normal = two ** (one - exponent_bias)
+        smallest_subnormal = two ** (one - exponent_bias - mantissa_bits)
+        zero_boundary = smallest_subnormal * two ** ctx.real_val(-1)
+        greatest_normal = ctx.real_val(57344)
 
-        # Under RNE, a value at the midpoint between zero and the smallest
-        # subnormal ties to the even encoding (zero).
-        is_zero = magnitude <= zero_rounding_boundary
-        is_sub = (
-            (magnitude < smallest_normal)
-            & (magnitude > zero_rounding_boundary)
-        )
-        is_norm = (
-            (magnitude >= smallest_normal)
-            & (magnitude <= greatest_normal)
-        )
+        is_zero = magnitude <= zero_boundary
+        is_sub = (magnitude > zero_boundary) & (magnitude < smallest_normal)
+        is_norm = (magnitude >= smallest_normal) & (magnitude <= greatest_normal)
         is_inf = magnitude > greatest_normal
         is_nan = ctx.false()
-
-        exponent = ctx.fresh_real("encoded_bf16_exponent")
-        mantissa = ctx.fresh_real("encoded_bf16_mantissa")
-        special = ctx.fresh_real("special")
+        normal_magnitude = (
+            (one + mantissa * two ** (-mantissa_bits))
+            * two ** (exponent - exponent_bias)
+        )
+        subnormal_magnitude = (
+            mantissa
+            * two ** (-mantissa_bits)
+            * two ** (one - exponent_bias)
+        )
         encoded_value = If(
             is_norm | is_sub,
             value,
-            If(is_zero, zero, special),
+            If(is_zero, zero, ctx.fresh_real("special")),
         )
         out = cls(
             value=encoded_value,
@@ -164,40 +148,25 @@ class bf16(FPExpr):
             is_nan=is_nan,
         )
 
-        max_exponent = ctx.real_val((1 << cls.exponent_bits) - 1)
-        max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
-        ctx.assume(_implies(is_norm, exponent >= one))
-        ctx.assume(_implies(is_norm, exponent <= max_exponent - one))
-        ctx.assume(_implies(is_sub | is_zero, exponent.eq(zero)))
-        ctx.assume(_implies(is_inf, exponent.eq(max_exponent)))
-        ctx.assume(_implies(is_zero | is_inf, mantissa.eq(zero)))
-        ctx.assume(_implies(is_sub, mantissa >= one))
-
-        signed_value = sign_multiplier(ctx, sign)
-        normal_value = (
-            signed_value
-            * (one + mantissa * (two ** (-mantissa_bits)))
-            * (two ** (exponent - exponent_bias))
+        ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
+        ctx.assume(_implies(is_sub, exponent.eq(zero) & (mantissa >= one)))
+        ctx.assume(
+            _implies(is_norm, (exponent >= one) & (exponent < max_exponent))
         )
-        subnormal_value = (
-            signed_value
-            * mantissa
-            * (two ** (-mantissa_bits))
-            * (two ** (one - exponent_bias))
-        )
-        ctx.assume(_implies(is_norm, value.eq(normal_value)))
-        ctx.assume(_implies(is_sub, value.eq(subnormal_value)))
+        ctx.assume(_implies(is_inf, exponent.eq(max_exponent) & mantissa.eq(zero)))
+        ctx.assume(_implies(is_norm, magnitude.eq(normal_magnitude)))
+        ctx.assume(_implies(is_sub, magnitude.eq(subnormal_magnitude)))
         return out
 
     @classmethod
-    def nan(cls, ctx) -> bf16:
+    def nan(cls, ctx) -> "e5m2":
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(0),
-            exponent=RealLit((1 << cls.exponent_bits) - 1),
-            mantissa=RealLit(1),
+            exponent=RealLit(31),
+            mantissa=RealLit(2),
             is_norm=BoolLit(False),
             is_sub=BoolLit(False),
             is_zero=BoolLit(False),
@@ -206,11 +175,11 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def inf(cls, ctx) -> bf16:
+    def inf(cls, ctx) -> "e5m2":
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(0),
-            exponent=RealLit((1 << cls.exponent_bits) - 1),
+            exponent=RealLit(31),
             mantissa=RealLit(0),
             is_norm=BoolLit(False),
             is_sub=BoolLit(False),
@@ -220,11 +189,11 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def ninf(cls, ctx) -> bf16:
+    def ninf(cls, ctx) -> "e5m2":
         return cls(
             value=ctx.fresh_real("special"),
             sign=RealLit(1),
-            exponent=RealLit((1 << cls.exponent_bits) - 1),
+            exponent=RealLit(31),
             mantissa=RealLit(0),
             is_norm=BoolLit(False),
             is_sub=BoolLit(False),
@@ -234,7 +203,7 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def zero(cls, ctx) -> bf16:
+    def zero(cls, ctx) -> "e5m2":
         return cls(
             value=ctx.zero(),
             sign=RealLit(0),
@@ -248,7 +217,7 @@ class bf16(FPExpr):
         )
 
     @classmethod
-    def nzero(cls, ctx) -> bf16:
+    def nzero(cls, ctx) -> "e5m2":
         return cls(
             value=ctx.zero(),
             sign=RealLit(1),
@@ -261,19 +230,14 @@ class bf16(FPExpr):
             is_nan=BoolLit(False),
         )
 
-    def observables_for_classification(
-        self,
-        classification: str,
-    ) -> tuple[RealExpr | BoolExpr, ...]:
-        """Return only the fields observable for a known classification."""
-
+    def observables_for_classification(self, classification: str):
         if classification in {"norm", "sub"}:
             return (self.value,)
         if classification in {"zero", "inf"}:
             return (self.sign,)
         if classification == "nan":
             return (BoolLit(True),)
-        raise ValueError(f"Unknown bf16 classification {classification!r}")
+        raise ValueError(f"Unknown e5m2 classification {classification!r}")
 
     def decode(self):
         return (
@@ -288,36 +252,31 @@ class bf16(FPExpr):
             self.is_nan,
         )
 
-    def classification_flags(self) -> dict[str, BoolExpr]:
-        return dict(
-            zip(
-                ("norm", "sub", "zero", "inf", "nan"),
-                (
-                    self.is_norm,
-                    self.is_sub,
-                    self.is_zero,
-                    self.is_inf,
-                    self.is_nan,
-                ),
-            )
-        )
+    def classification_flags(self):
+        return {
+            "norm": self.is_norm,
+            "sub": self.is_sub,
+            "zero": self.is_zero,
+            "inf": self.is_inf,
+            "nan": self.is_nan,
+        }
 
     @property
-    def is_finite(self) -> BoolExpr:
+    def is_finite(self):
         return self.is_norm | self.is_sub | self.is_zero
 
     @property
-    def is_ninf(self) -> BoolExpr:
+    def is_ninf(self):
         return self.is_inf & self.sign.eq(RealLit(1))
 
     @property
-    def is_pinf(self) -> BoolExpr:
+    def is_pinf(self):
         return self.is_inf & self.sign.eq(RealLit(0))
 
     @property
-    def is_nzero(self) -> BoolExpr:
+    def is_nzero(self):
         return self.is_zero & self.sign.eq(RealLit(1))
 
     @property
-    def is_pzero(self) -> BoolExpr:
+    def is_pzero(self):
         return self.is_zero & self.sign.eq(RealLit(0))

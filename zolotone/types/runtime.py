@@ -1,7 +1,19 @@
 import random
 import time
 
-from .static import BFloat16T, BoolT, Float32T, QT, TupleT, UQT
+from .static import (
+    BFloat16T,
+    BoolT,
+    E2M1T,
+    E4M3FNT,
+    E5M2T,
+    E5M2FNUZT,
+    Float16T,
+    Float32T,
+    QT,
+    TupleT,
+    UQT,
+)
 
 
 class RuntimeType:
@@ -438,6 +450,149 @@ class Float32(RuntimeType):
         )
 
 
+class Float16(RuntimeType):
+    """IEEE-754 binary16 format: 1 sign, 5 exponent, 10 mantissa bits."""
+
+    mantissa_bits = 10
+    exponent_bits = 5
+    exponent_bias = 15
+    inf_code = 31
+    sub_code = 0
+    nan_code = 31
+    zero_code = 0
+
+    def __init__(self, val: int):
+        if not isinstance(val, int):
+            raise TypeError(
+                f"Float16 expects packed bits as int, got {type(val).__name__}"
+            )
+        if not (0 <= val < (1 << self.total_bits())):
+            raise ValueError(
+                f"Float16 packed bits must fit in {self.total_bits()} bits, got {val}"
+            )
+        self.val = val
+
+    @classmethod
+    def from_fields(cls, sign: int, exponent: int, mantissa: int):
+        if sign not in (0, 1):
+            raise ValueError(f"Float16 sign must be 0 or 1, got {sign}")
+        if not (0 <= mantissa < (1 << cls.mantissa_bits)):
+            raise ValueError(f"Float16 mantissa out of range: {mantissa}")
+        if not (0 <= exponent < (1 << cls.exponent_bits)):
+            raise ValueError(f"Float16 exponent out of range: {exponent}")
+        return cls(
+            (sign << (cls.exponent_bits + cls.mantissa_bits))
+            | (exponent << cls.mantissa_bits)
+            | mantissa
+        )
+
+    @property
+    def sign(self):
+        return (self.val >> (self.exponent_bits + self.mantissa_bits)) & 1
+
+    @property
+    def exponent(self):
+        return (self.val >> self.mantissa_bits) & ((1 << self.exponent_bits) - 1)
+
+    @property
+    def mantissa(self):
+        return self.val & ((1 << self.mantissa_bits) - 1)
+
+    @property
+    def significand(self):
+        return self.mantissa
+
+    def __str__(self):
+        return f"Float16({str(self.to_val())})"
+
+    def to_val(self):
+        """Convert the packed binary16 value to a Python float."""
+
+        if self.exponent == self.inf_code and self.mantissa == 0:
+            return float("-inf") if self.sign else float("inf")
+        if self.exponent == self.nan_code and self.mantissa != 0:
+            return float("nan")
+        if self.exponent == 0:
+            fraction = self.mantissa / (2 ** self.mantissa_bits)
+            exponent = 1 - self.exponent_bias
+            return float((-1) ** self.sign * fraction * (2 ** exponent))
+
+        fraction = 1.0 + self.mantissa / (2 ** self.mantissa_bits)
+        exponent = self.exponent - self.exponent_bias
+        return float((-1) ** self.sign * fraction * (2 ** exponent))
+
+    def to_spec(self, ctx):
+        from ..spec.custom_specs.fp16 import fp16
+
+        if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 0:
+            return fp16.inf(ctx)
+        if self.exponent == self.inf_code and self.mantissa == 0 and self.sign == 1:
+            return fp16.ninf(ctx)
+        if self.exponent == self.nan_code and self.mantissa != 0:
+            return fp16.nan(ctx)
+        if self.exponent == 0 and self.mantissa == 0 and self.sign == 1:
+            return fp16.nzero(ctx)
+        if self.exponent == 0 and self.mantissa == 0 and self.sign == 0:
+            return fp16.zero(ctx)
+
+        return fp16(
+            value=ctx.real_val(self.to_val()),
+            sign=ctx.real_val(self.sign),
+            exponent=ctx.real_val(self.exponent),
+            mantissa=ctx.real_val(self.mantissa),
+            is_norm=ctx.bool_val(self.exponent != 0),
+            is_sub=ctx.bool_val(self.exponent == 0),
+            is_zero=ctx.bool_val(False),
+            is_inf=ctx.bool_val(False),
+            is_nan=ctx.bool_val(False),
+        )
+
+    def static_type(self):
+        return Float16T()
+
+    @classmethod
+    def nInf(cls):
+        return cls.from_fields(sign=1, exponent=cls.inf_code, mantissa=0)
+
+    @classmethod
+    def Inf(cls):
+        return cls.from_fields(sign=0, exponent=cls.inf_code, mantissa=0)
+
+    @classmethod
+    def nZero(cls):
+        return cls.from_fields(sign=1, exponent=cls.zero_code, mantissa=0)
+
+    @classmethod
+    def Zero(cls):
+        return cls.from_fields(sign=0, exponent=cls.zero_code, mantissa=0)
+
+    @classmethod
+    def NaN(cls, payload: int | None = None):
+        if payload is None:
+            payload = 1 << (cls.mantissa_bits - 1)
+        if not isinstance(payload, int):
+            raise TypeError(
+                f"Float16 NaN payload must be int, got {type(payload).__name__}"
+            )
+        if not (1 <= payload < (1 << cls.mantissa_bits)):
+            raise ValueError(
+                f"Float16 NaN payload must fit in {cls.mantissa_bits} mantissa "
+                f"bits and be non-zero, got {payload}"
+            )
+        return cls.from_fields(sign=0, exponent=cls.nan_code, mantissa=payload)
+
+    def copy(self, val=None):
+        if val is None:
+            val = self.val
+        return Float16(val)
+
+    def total_bits(self):
+        return 16
+
+    def __eq__(self, other):
+        return isinstance(other, Float16) and self.val == other.val
+
+
 class BFloat16(RuntimeType):
     """Brain Floating Point 16-bit (bfloat16) format — 1 sign, 8 exponent, 7 mantissa bits."""
     mantissa_bits = 7
@@ -601,3 +756,630 @@ class BFloat16(RuntimeType):
             isinstance(other, BFloat16)
             and self.val == other.val
         )
+
+
+class E4M3FN(RuntimeType):
+    """Finite-only E4M3 format with signed zero, subnormals, and NaN."""
+
+    sign_bits = 1
+    exponent_bits = 4
+    mantissa_bits = 3
+    exponent_bias = 7
+    sub_code = 0
+    zero_code = 0
+    nan_code = 15
+    nan_mantissa = 7
+    max_finite_code = 15
+    max_finite_mantissa = 6
+
+    def __init__(self, val: int):
+        if not isinstance(val, int):
+            raise TypeError(
+                f"E4M3FN expects packed bits as int, got {type(val).__name__}"
+            )
+        if not (0 <= val < (1 << self.total_bits())):
+            raise ValueError(
+                f"E4M3FN packed bits must fit in {self.total_bits()} bits, got {val}"
+            )
+        self.val = val
+
+    @classmethod
+    def from_fields(cls, sign: int, exponent: int, mantissa: int):
+        if sign not in (0, 1):
+            raise ValueError(f"E4M3FN sign must be 0 or 1, got {sign}")
+        if not isinstance(exponent, int) or not (
+            0 <= exponent < (1 << cls.exponent_bits)
+        ):
+            raise ValueError(f"E4M3FN exponent out of range: {exponent}")
+        if not isinstance(mantissa, int) or not (
+            0 <= mantissa < (1 << cls.mantissa_bits)
+        ):
+            raise ValueError(f"E4M3FN mantissa out of range: {mantissa}")
+        return cls(
+            (sign << (cls.exponent_bits + cls.mantissa_bits))
+            | (exponent << cls.mantissa_bits)
+            | mantissa
+        )
+
+    @property
+    def sign(self):
+        return (self.val >> (self.exponent_bits + self.mantissa_bits)) & 1
+
+    @property
+    def exponent(self):
+        return (self.val >> self.mantissa_bits) & ((1 << self.exponent_bits) - 1)
+
+    @property
+    def mantissa(self):
+        return self.val & ((1 << self.mantissa_bits) - 1)
+
+    @property
+    def significand(self):
+        return self.mantissa
+
+    @property
+    def is_nan(self):
+        return self.exponent == self.nan_code and self.mantissa == self.nan_mantissa
+
+    def __str__(self):
+        return f"E4M3FN({self.to_val()})"
+
+    def to_val(self):
+        if self.is_nan:
+            return float("nan")
+        sign = -1.0 if self.sign else 1.0
+        if self.exponent == 0:
+            return float(
+                sign
+                * (self.mantissa / (2 ** self.mantissa_bits))
+                * (2 ** (1 - self.exponent_bias))
+            )
+        return float(
+            sign
+            * (1.0 + self.mantissa / (2 ** self.mantissa_bits))
+            * (2 ** (self.exponent - self.exponent_bias))
+        )
+
+    def to_spec(self, ctx):
+        from ..spec.custom_specs.e4m3fn import e4m3fn
+
+        if self.is_nan:
+            return e4m3fn.nan(ctx)
+        if self.exponent == 0 and self.mantissa == 0:
+            return e4m3fn.nzero(ctx) if self.sign else e4m3fn.zero(ctx)
+        return e4m3fn(
+            value=ctx.real_val(self.to_val()),
+            sign=ctx.real_val(self.sign),
+            exponent=ctx.real_val(self.exponent),
+            mantissa=ctx.real_val(self.mantissa),
+            is_norm=ctx.bool_val(self.exponent != 0),
+            is_sub=ctx.bool_val(self.exponent == 0),
+            is_zero=ctx.bool_val(False),
+            is_nan=ctx.bool_val(False),
+        )
+
+    def static_type(self):
+        return E4M3FNT()
+
+    @classmethod
+    def Zero(cls):
+        return cls.from_fields(0, cls.zero_code, 0)
+
+    @classmethod
+    def nZero(cls):
+        return cls.from_fields(1, cls.zero_code, 0)
+
+    @classmethod
+    def NaN(cls):
+        return cls.from_fields(0, cls.nan_code, cls.nan_mantissa)
+
+    @classmethod
+    def random_generator(cls, seed=None, shared_exponent_bits: int = 0):
+        if seed is None:
+            seed = int(time.time())
+        if not (0 <= shared_exponent_bits <= cls.exponent_bits):
+            raise ValueError(
+                f"shared_exponent_bits must be between 0 and {cls.exponent_bits}, "
+                f"got {shared_exponent_bits}"
+            )
+        rnd = random.Random(seed)
+        unshared_exponent_bits = cls.exponent_bits - shared_exponent_bits
+        shared_exponent = (
+            rnd.getrandbits(shared_exponent_bits) << unshared_exponent_bits
+        )
+
+        def gen():
+            return cls.from_fields(
+                sign=rnd.getrandbits(1),
+                exponent=(
+                    shared_exponent + rnd.getrandbits(unshared_exponent_bits)
+                ),
+                mantissa=rnd.getrandbits(cls.mantissa_bits),
+            )
+
+        def gen_shared_exp():
+            nonlocal shared_exponent
+            shared_exponent = (
+                rnd.getrandbits(shared_exponent_bits) << unshared_exponent_bits
+            )
+            return shared_exponent
+
+        return gen, gen_shared_exp
+
+    def copy(self, val=None):
+        return E4M3FN(self.val if val is None else val)
+
+    def total_bits(self):
+        return 8
+
+    def __eq__(self, other):
+        return isinstance(other, E4M3FN) and self.val == other.val
+
+
+class E5M2FNUZ(RuntimeType):
+    """AMD finite-only E5M2 format with unsigned zero and one NaN code."""
+
+    sign_bits = 1
+    exponent_bits = 5
+    mantissa_bits = 2
+    exponent_bias = 16
+    sub_code = 0
+    zero_code = 0
+    nan_code = 0
+    nan_mantissa = 0
+    max_finite_code = 31
+    max_finite_mantissa = 3
+
+    def __init__(self, val: int):
+        if not isinstance(val, int):
+            raise TypeError(
+                f"E5M2FNUZ expects packed bits as int, got {type(val).__name__}"
+            )
+        if not (0 <= val < (1 << self.total_bits())):
+            raise ValueError(
+                f"E5M2FNUZ packed bits must fit in {self.total_bits()} bits, got {val}"
+            )
+        self.val = val
+
+    @classmethod
+    def from_fields(cls, sign: int, exponent: int, mantissa: int):
+        if sign not in (0, 1):
+            raise ValueError(f"E5M2FNUZ sign must be 0 or 1, got {sign}")
+        if not isinstance(exponent, int) or not (
+            0 <= exponent < (1 << cls.exponent_bits)
+        ):
+            raise ValueError(f"E5M2FNUZ exponent out of range: {exponent}")
+        if not isinstance(mantissa, int) or not (
+            0 <= mantissa < (1 << cls.mantissa_bits)
+        ):
+            raise ValueError(f"E5M2FNUZ mantissa out of range: {mantissa}")
+        return cls(
+            (sign << (cls.exponent_bits + cls.mantissa_bits))
+            | (exponent << cls.mantissa_bits)
+            | mantissa
+        )
+
+    @property
+    def sign(self):
+        return (self.val >> (self.exponent_bits + self.mantissa_bits)) & 1
+
+    @property
+    def exponent(self):
+        return (self.val >> self.mantissa_bits) & ((1 << self.exponent_bits) - 1)
+
+    @property
+    def mantissa(self):
+        return self.val & ((1 << self.mantissa_bits) - 1)
+
+    @property
+    def significand(self):
+        return self.mantissa
+
+    @property
+    def is_nan(self):
+        return self.val == 0x80
+
+    def __str__(self):
+        return f"E5M2FNUZ({self.to_val()})"
+
+    def to_val(self):
+        if self.is_nan:
+            return float("nan")
+        sign = -1.0 if self.sign else 1.0
+        if self.exponent == 0:
+            return float(
+                sign
+                * (self.mantissa / (2 ** self.mantissa_bits))
+                * (2 ** (1 - self.exponent_bias))
+            )
+        return float(
+            sign
+            * (1.0 + self.mantissa / (2 ** self.mantissa_bits))
+            * (2 ** (self.exponent - self.exponent_bias))
+        )
+
+    def to_spec(self, ctx):
+        from ..spec.custom_specs.e5m2fnuz import e5m2fnuz
+
+        if self.is_nan:
+            return e5m2fnuz.nan(ctx)
+        if self.val == self.zero_code:
+            return e5m2fnuz.zero(ctx)
+        return e5m2fnuz(
+            value=ctx.real_val(self.to_val()),
+            sign=ctx.real_val(self.sign),
+            exponent=ctx.real_val(self.exponent),
+            mantissa=ctx.real_val(self.mantissa),
+            is_norm=ctx.bool_val(self.exponent != 0),
+            is_sub=ctx.bool_val(self.exponent == 0),
+            is_zero=ctx.bool_val(False),
+            is_nan=ctx.bool_val(False),
+        )
+
+    def static_type(self):
+        return E5M2FNUZT()
+
+    @classmethod
+    def Zero(cls):
+        return cls(0x00)
+
+    @classmethod
+    def NaN(cls):
+        return cls(0x80)
+
+    @classmethod
+    def random_generator(cls, seed=None, shared_exponent_bits: int = 0):
+        if seed is None:
+            seed = int(time.time())
+        if not (0 <= shared_exponent_bits <= cls.exponent_bits):
+            raise ValueError(
+                f"shared_exponent_bits must be between 0 and {cls.exponent_bits}, "
+                f"got {shared_exponent_bits}"
+            )
+        rnd = random.Random(seed)
+        unshared_exponent_bits = cls.exponent_bits - shared_exponent_bits
+        shared_exponent = rnd.getrandbits(shared_exponent_bits) << unshared_exponent_bits
+
+        def gen():
+            return cls.from_fields(
+                rnd.getrandbits(1),
+                shared_exponent + rnd.getrandbits(unshared_exponent_bits),
+                rnd.getrandbits(cls.mantissa_bits),
+            )
+
+        def gen_shared_exp():
+            nonlocal shared_exponent
+            shared_exponent = rnd.getrandbits(shared_exponent_bits) << unshared_exponent_bits
+            return shared_exponent
+
+        return gen, gen_shared_exp
+
+    def copy(self, val=None):
+        return E5M2FNUZ(self.val if val is None else val)
+
+    def total_bits(self):
+        return 8
+
+    def __eq__(self, other):
+        return isinstance(other, E5M2FNUZ) and self.val == other.val
+
+
+class E5M2(RuntimeType):
+    """OCP E5M2 format with IEEE-style signed zeros, infinities, and NaNs."""
+
+    sign_bits = 1
+    exponent_bits = 5
+    mantissa_bits = 2
+    exponent_bias = 15
+    sub_code = 0
+    zero_code = 0
+    inf_code = 31
+    nan_code = 31
+    max_finite_code = 30
+    max_finite_mantissa = 3
+    min_subnormal = 2 ** -16
+    min_normal = 2 ** -14
+    max_finite = 57344.0
+
+    def __init__(self, val: int):
+        if not isinstance(val, int):
+            raise TypeError(
+                f"E5M2 expects packed bits as int, got {type(val).__name__}"
+            )
+        if not (0 <= val < (1 << self.total_bits())):
+            raise ValueError(
+                f"E5M2 packed bits must fit in {self.total_bits()} bits, got {val}"
+            )
+        self.val = val
+
+    @classmethod
+    def from_fields(cls, sign: int, exponent: int, mantissa: int):
+        if not isinstance(sign, int) or sign not in (0, 1):
+            raise ValueError(f"E5M2 sign must be 0 or 1, got {sign}")
+        if not isinstance(exponent, int) or not (
+            0 <= exponent < (1 << cls.exponent_bits)
+        ):
+            raise ValueError(f"E5M2 exponent out of range: {exponent}")
+        if not isinstance(mantissa, int) or not (
+            0 <= mantissa < (1 << cls.mantissa_bits)
+        ):
+            raise ValueError(f"E5M2 mantissa out of range: {mantissa}")
+        return cls(
+            (sign << (cls.exponent_bits + cls.mantissa_bits))
+            | (exponent << cls.mantissa_bits)
+            | mantissa
+        )
+
+    @property
+    def sign(self):
+        return (self.val >> (self.exponent_bits + self.mantissa_bits)) & 1
+
+    @property
+    def exponent(self):
+        return (self.val >> self.mantissa_bits) & ((1 << self.exponent_bits) - 1)
+
+    @property
+    def mantissa(self):
+        return self.val & ((1 << self.mantissa_bits) - 1)
+
+    @property
+    def significand(self):
+        return self.mantissa
+
+    @property
+    def is_inf(self):
+        return self.exponent == self.inf_code and self.mantissa == 0
+
+    @property
+    def is_nan(self):
+        return self.exponent == self.nan_code and self.mantissa != 0
+
+    def __str__(self):
+        return f"E5M2({self.to_val()})"
+
+    def to_val(self):
+        if self.is_inf:
+            return float("-inf") if self.sign else float("inf")
+        if self.is_nan:
+            return float("nan")
+        sign = -1.0 if self.sign else 1.0
+        if self.exponent == 0:
+            return float(
+                sign
+                * (self.mantissa / (2 ** self.mantissa_bits))
+                * (2 ** (1 - self.exponent_bias))
+            )
+        return float(
+            sign
+            * (1.0 + self.mantissa / (2 ** self.mantissa_bits))
+            * (2 ** (self.exponent - self.exponent_bias))
+        )
+
+    def to_spec(self, ctx):
+        from ..spec.custom_specs.e5m2 import e5m2
+
+        if self.is_inf:
+            return e5m2.ninf(ctx) if self.sign else e5m2.inf(ctx)
+        if self.is_nan:
+            return e5m2.nan(ctx)
+        if self.exponent == 0 and self.mantissa == 0:
+            return e5m2.nzero(ctx) if self.sign else e5m2.zero(ctx)
+        return e5m2(
+            value=ctx.real_val(self.to_val()),
+            sign=ctx.real_val(self.sign),
+            exponent=ctx.real_val(self.exponent),
+            mantissa=ctx.real_val(self.mantissa),
+            is_norm=ctx.bool_val(self.exponent != 0),
+            is_sub=ctx.bool_val(self.exponent == 0),
+            is_zero=ctx.bool_val(False),
+            is_inf=ctx.bool_val(False),
+            is_nan=ctx.bool_val(False),
+        )
+
+    def static_type(self):
+        return E5M2T()
+
+    @classmethod
+    def Zero(cls):
+        return cls.from_fields(0, cls.zero_code, 0)
+
+    @classmethod
+    def nZero(cls):
+        return cls.from_fields(1, cls.zero_code, 0)
+
+    @classmethod
+    def Inf(cls):
+        return cls.from_fields(0, cls.inf_code, 0)
+
+    @classmethod
+    def nInf(cls):
+        return cls.from_fields(1, cls.inf_code, 0)
+
+    @classmethod
+    def NaN(cls, payload: int | None = None):
+        if payload is None:
+            payload = 1 << (cls.mantissa_bits - 1)
+        if not isinstance(payload, int):
+            raise TypeError(
+                f"E5M2 NaN payload must be int, got {type(payload).__name__}"
+            )
+        if not (1 <= payload < (1 << cls.mantissa_bits)):
+            raise ValueError(
+                f"E5M2 NaN payload must be between 1 and 3, got {payload}"
+            )
+        return cls.from_fields(0, cls.nan_code, payload)
+
+    @classmethod
+    def random_generator(cls, seed=None, shared_exponent_bits: int = 0):
+        if seed is None:
+            seed = int(time.time())
+        if not (0 <= shared_exponent_bits <= cls.exponent_bits):
+            raise ValueError(
+                f"shared_exponent_bits must be between 0 and {cls.exponent_bits}, "
+                f"got {shared_exponent_bits}"
+            )
+        rnd = random.Random(seed)
+        unshared_exponent_bits = cls.exponent_bits - shared_exponent_bits
+        shared_exponent = (
+            rnd.getrandbits(shared_exponent_bits) << unshared_exponent_bits
+        )
+
+        def gen():
+            return cls.from_fields(
+                sign=rnd.getrandbits(1),
+                exponent=shared_exponent + rnd.getrandbits(unshared_exponent_bits),
+                mantissa=rnd.getrandbits(cls.mantissa_bits),
+            )
+
+        def gen_shared_exp():
+            nonlocal shared_exponent
+            shared_exponent = (
+                rnd.getrandbits(shared_exponent_bits) << unshared_exponent_bits
+            )
+            return shared_exponent
+
+        return gen, gen_shared_exp
+
+    def copy(self, val=None):
+        return E5M2(self.val if val is None else val)
+
+    def total_bits(self):
+        return 8
+
+    def __eq__(self, other):
+        return isinstance(other, E5M2) and self.val == other.val
+
+
+class E2M1(RuntimeType):
+    """Finite-only four-bit E2M1 format with signed zeros."""
+
+    sign_bits = 1
+    exponent_bits = 2
+    mantissa_bits = 1
+    exponent_bias = 1
+    sub_code = 0
+    zero_code = 0
+    max_finite_code = 3
+    max_finite_mantissa = 1
+
+    def __init__(self, val: int):
+        if not isinstance(val, int):
+            raise TypeError(f"E2M1 expects packed bits as int, got {type(val).__name__}")
+        if not (0 <= val < (1 << self.total_bits())):
+            raise ValueError(
+                f"E2M1 packed bits must fit in {self.total_bits()} bits, got {val}"
+            )
+        self.val = val
+
+    @classmethod
+    def from_fields(cls, sign: int, exponent: int, mantissa: int):
+        if sign not in (0, 1):
+            raise ValueError(f"E2M1 sign must be 0 or 1, got {sign}")
+        if not isinstance(exponent, int) or not (
+            0 <= exponent < (1 << cls.exponent_bits)
+        ):
+            raise ValueError(f"E2M1 exponent out of range: {exponent}")
+        if not isinstance(mantissa, int) or not (
+            0 <= mantissa < (1 << cls.mantissa_bits)
+        ):
+            raise ValueError(f"E2M1 mantissa out of range: {mantissa}")
+        return cls(
+            (sign << (cls.exponent_bits + cls.mantissa_bits))
+            | (exponent << cls.mantissa_bits)
+            | mantissa
+        )
+
+    @property
+    def sign(self):
+        return (self.val >> (self.exponent_bits + self.mantissa_bits)) & 1
+
+    @property
+    def exponent(self):
+        return (self.val >> self.mantissa_bits) & ((1 << self.exponent_bits) - 1)
+
+    @property
+    def mantissa(self):
+        return self.val & ((1 << self.mantissa_bits) - 1)
+
+    @property
+    def significand(self):
+        return self.mantissa
+
+    def __str__(self):
+        return f"E2M1({self.to_val()})"
+
+    def to_val(self):
+        sign = -1.0 if self.sign else 1.0
+        if self.exponent == 0:
+            return float(
+                sign
+                * (self.mantissa / (2 ** self.mantissa_bits))
+                * (2 ** (1 - self.exponent_bias))
+            )
+        return float(
+            sign
+            * (1.0 + self.mantissa / (2 ** self.mantissa_bits))
+            * (2 ** (self.exponent - self.exponent_bias))
+        )
+
+    def to_spec(self, ctx):
+        from ..spec.custom_specs.e2m1 import e2m1
+
+        if self.exponent == 0 and self.mantissa == 0:
+            return e2m1.nzero(ctx) if self.sign else e2m1.zero(ctx)
+        return e2m1(
+            value=ctx.real_val(self.to_val()),
+            sign=ctx.real_val(self.sign),
+            exponent=ctx.real_val(self.exponent),
+            mantissa=ctx.real_val(self.mantissa),
+            is_norm=ctx.bool_val(self.exponent != 0),
+            is_sub=ctx.bool_val(self.exponent == 0),
+            is_zero=ctx.bool_val(False),
+        )
+
+    def static_type(self):
+        return E2M1T()
+
+    @classmethod
+    def Zero(cls):
+        return cls.from_fields(0, 0, 0)
+
+    @classmethod
+    def nZero(cls):
+        return cls.from_fields(1, 0, 0)
+
+    @classmethod
+    def random_generator(cls, seed=None, shared_exponent_bits: int = 0):
+        if seed is None:
+            seed = int(time.time())
+        if not (0 <= shared_exponent_bits <= cls.exponent_bits):
+            raise ValueError(
+                f"shared_exponent_bits must be between 0 and {cls.exponent_bits}, "
+                f"got {shared_exponent_bits}"
+            )
+        rnd = random.Random(seed)
+        unshared_exponent_bits = cls.exponent_bits - shared_exponent_bits
+        shared_exponent = rnd.getrandbits(shared_exponent_bits) << unshared_exponent_bits
+
+        def gen():
+            return cls.from_fields(
+                rnd.getrandbits(1),
+                shared_exponent + rnd.getrandbits(unshared_exponent_bits),
+                rnd.getrandbits(cls.mantissa_bits),
+            )
+
+        def gen_shared_exp():
+            nonlocal shared_exponent
+            shared_exponent = rnd.getrandbits(shared_exponent_bits) << unshared_exponent_bits
+            return shared_exponent
+
+        return gen, gen_shared_exp
+
+    def copy(self, val=None):
+        return E2M1(self.val if val is None else val)
+
+    def total_bits(self):
+        return 4
+
+    def __eq__(self, other):
+        return isinstance(other, E2M1) and self.val == other.val

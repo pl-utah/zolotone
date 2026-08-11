@@ -15,19 +15,6 @@ def sign_multiplier(ctx, sign: RealExpr) -> RealExpr:
     return If(sign.eq(one), ctx.real_val(-1), one)
 
 
-def _assume_exclusive_classification(ctx, fp32_value: fp32) -> None:
-    flags = (fp32_value.is_norm, fp32_value.is_sub, fp32_value.is_zero, fp32_value.is_inf, fp32_value.is_nan)
-    
-    at_least_one = flags[0]
-    for flag in flags[1:]:
-        at_least_one = at_least_one | flag
-    ctx.assume(at_least_one)
-
-    for i, lhs in enumerate(flags):
-        for rhs in flags[i + 1:]:
-            ctx.assume((~lhs) | (~rhs))
-
-
 @dataclass(frozen=True)
 class fp32(FPExpr):
     """A symbolic IEEE-754 binary32 value and its format operations.
@@ -111,7 +98,7 @@ class fp32(FPExpr):
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
         
-        _assume_exclusive_classification(ctx, out)
+        out._assume_exclusive_classification(ctx)
 
         ctx.assume(_implies(is_norm, exponent >= one))
         ctx.assume(_implies(is_norm, exponent <= max_exponent - one))
@@ -298,15 +285,6 @@ class fp32(FPExpr):
             # a non-empty checks list.
             return (BoolLit(True),)
         raise ValueError(f"Unknown fp32 classification {classification!r}")
-
-    def constant_fold(self) -> fp32:
-        """Fold each scalar field of this structured expression."""
-
-        old_fields = self.decode()
-        folded_fields = tuple(field.constant_fold() for field in old_fields)
-        if all(old is new for old, new in zip(old_fields, folded_fields)):
-            return self
-        return type(self)(*folded_fields)
 
     def decode(self):
         return (

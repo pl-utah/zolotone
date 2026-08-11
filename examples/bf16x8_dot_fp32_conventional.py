@@ -1,6 +1,4 @@
 from zolotone import *
-from .encode_Float32 import *
-from .common import *
 
 N = 4
 Wf = 30
@@ -146,18 +144,18 @@ def bf16x8_dot_fp32_conventional(a0: Node, a1: Node, a2: Node, a3: Node,
     for i in range(N):
         M_a[i] = if_then_else(
             A[i].is_norm,
-            add_implicit_bit(integer_to_fraction(A[i].mantissa)),
+            add_implicit_bit(uq_integer_to_fraction(A[i].mantissa)),
             uq_resize(
-                integer_to_fraction(A[i].mantissa),
+                uq_integer_to_fraction(A[i].mantissa),
                 1,
                 BFloat16.mantissa_bits,
             ),
         )
         M_b[i] = if_then_else(
             B[i].is_norm,
-            add_implicit_bit(integer_to_fraction(B[i].mantissa)),
+            add_implicit_bit(uq_integer_to_fraction(B[i].mantissa)),
             uq_resize(
-                integer_to_fraction(B[i].mantissa),
+                uq_integer_to_fraction(B[i].mantissa),
                 1,
                 BFloat16.mantissa_bits,
             ),

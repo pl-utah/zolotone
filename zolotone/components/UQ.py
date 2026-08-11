@@ -111,6 +111,44 @@ def uq_int_bits(x: Node) -> Node:
     return Const(UQ.from_int(x.node_type.int_bits))
 
 
+def uq_fraction_to_integer(x: Node) -> Primitive:
+    """Reinterpret a UQ fractional field as an integer field."""
+
+    if x.node_type.int_bits != 0:
+        raise ValueError(
+            "uq_fraction_to_integer expects a UQ value with zero integer bits"
+        )
+    frac_bits = x.node_type.frac_bits
+
+    def spec(x, ctx):
+        return x * ctx.two() ** ctx.real_val(frac_bits)
+
+    @Primitive(name="uq_fraction_to_integer", spec=spec, c_inline=True)
+    def impl(x: Node):
+        return basic_identity(x=x, out=Const(UQ(0, frac_bits, 0)))
+
+    return impl(x)
+
+
+def uq_integer_to_fraction(x: Node) -> Primitive:
+    """Reinterpret a UQ integer field as a fractional field."""
+
+    if x.node_type.frac_bits != 0:
+        raise ValueError(
+            "uq_integer_to_fraction expects a UQ value with zero fractional bits"
+        )
+    int_bits = x.node_type.int_bits
+
+    def spec(x, ctx):
+        return x * ctx.two() ** (-ctx.real_val(int_bits))
+
+    @Primitive(name="uq_integer_to_fraction", spec=spec, c_inline=True)
+    def impl(x: Node):
+        return basic_identity(x=x, out=Const(UQ(0, 0, int_bits)))
+
+    return impl(x)
+
+
 def uq_zero_extend(x: Node, n: int) -> Node:
     if not isinstance(n, int):
         raise TypeError(f"n must be int, given: {type(n).__name__}")

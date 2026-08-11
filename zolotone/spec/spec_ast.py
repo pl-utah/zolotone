@@ -171,6 +171,15 @@ class FPExpr(SpecNode, ABC):
     def decode(self) -> tuple[SpecNode, ...]:
         """Return this FP value's mathematical value and format fields."""
 
+    def constant_fold(self) -> "FPExpr":
+        """Fold each scalar field of this structured expression."""
+
+        old_fields = self.decode()
+        folded_fields = tuple(field.constant_fold() for field in old_fields)
+        if all(old is new for old, new in zip(old_fields, folded_fields)):
+            return self
+        return type(self)(*folded_fields)
+
     @property
     @abstractmethod
     def is_finite(self) -> "BoolExpr":
@@ -179,6 +188,24 @@ class FPExpr(SpecNode, ABC):
     @abstractmethod
     def classification_flags(self) -> dict[str, "BoolExpr"]:
         """Return the mutually exclusive classification predicates."""
+
+    def _assume_exclusive_classification(self, ctx) -> None:
+        """Require exactly one of this format's classifications to hold."""
+
+        flags = tuple(self.classification_flags().values())
+        if not flags:
+            raise ValueError(
+                f"{type(self).__name__}.classification_flags() must not be empty"
+            )
+
+        at_least_one = flags[0]
+        for flag in flags[1:]:
+            at_least_one = at_least_one | flag
+        ctx.assume(at_least_one)
+
+        for idx, lhs in enumerate(flags):
+            for rhs in flags[idx + 1:]:
+                ctx.assume((~lhs) | (~rhs))
 
     @abstractmethod
     def observables_for_classification(

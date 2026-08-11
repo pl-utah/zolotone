@@ -1,7 +1,5 @@
 from zolotone import *
 
-from .common import *
-from .encode_Float32 import *
 
 
 # Non-bit-precise concept specification of a single-precision IEEE adder.
@@ -57,8 +55,8 @@ def fp32_add(x: Node, y: Node) -> Node:
 
     # 3. Format and align significands.
     # Decode gives the mantissa as UQ<23, 0>; the adder datapath wants UQ<0, 23>.
-    x_mantissa_fraction = integer_to_fraction(X.mantissa)
-    y_mantissa_fraction = integer_to_fraction(Y.mantissa)
+    x_mantissa_fraction = uq_integer_to_fraction(X.mantissa)
+    y_mantissa_fraction = uq_integer_to_fraction(Y.mantissa)
 
     # Normal numbers have an implicit leading 1. Subnormals do not.
     x_significand = if_then_else(
