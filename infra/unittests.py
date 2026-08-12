@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import time
+from fractions import Fraction
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -1893,6 +1894,60 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(ctx.checks, [x.eq(one)])
 
 class TestEgglogFloatLiterals(unittest.TestCase):
+    def exact_literal_value(self, expr):
+        if isinstance(expr, RealLit):
+            return Fraction(expr.value)
+        if isinstance(expr, Mul):
+            return (
+                self.exact_literal_value(expr.lhs)
+                * self.exact_literal_value(expr.rhs)
+            )
+        if isinstance(expr, Neg):
+            return -self.exact_literal_value(expr.value)
+        if isinstance(expr, Pow):
+            base = self.exact_literal_value(expr.base)
+            exponent = self.exact_literal_value(expr.exponent)
+            self.assertEqual(exponent.denominator, 1)
+            return base ** exponent.numerator
+        self.fail(f"unexpected literal representation: {expr!r}")
+
+    def assert_expr_has_exact_float_value(self, expr, value):
+        self.assertEqual(self.exact_literal_value(expr), Fraction(value))
+
+    def test_dyadic_literals_preserve_explicit_base_two_scale(self):
+        cases = (
+            (0.125, RealLit(2) ** RealLit(-3)),
+            (
+                0.375,
+                RealLit(3) * (RealLit(2) ** RealLit(-3)),
+            ),
+            (-0.5, -(RealLit(2) ** RealLit(-1))),
+        )
+
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    from_egglog(RealLit(value).to_egglog()),
+                    expected,
+                )
+
+    def test_proof_rules_do_not_fold_dyadic_scale_to_rational(self):
+        dyadic = RealLit(0.125).to_egglog()
+        rational = Math.Num(BigRat(1, 8))
+
+        proof_egraph = EGraph()
+        load_rules(proof_egraph, fold_base_two_powers=False)
+        proof_egraph.register(dyadic)
+        proof_egraph.run(2)
+
+        folding_egraph = EGraph()
+        load_rules(folding_egraph, fold_base_two_powers=True)
+        folding_egraph.register(dyadic)
+        folding_egraph.run(2)
+
+        self.assertFalse(proof_egraph.check_bool(eq(dyadic).to(rational)))
+        self.assertTrue(folding_egraph.check_bool(eq(dyadic).to(rational)))
+
     def test_xnor_extracts_as_boolean_equality(self):
         p = BoolVar("p")
         q = BoolVar("q")
@@ -1921,14 +1976,7 @@ class TestEgglogFloatLiterals(unittest.TestCase):
         for value in values:
             with self.subTest(value=value):
                 round_tripped = from_egglog(RealLit(value).to_egglog())
-
-                if isinstance(round_tripped, RealLit):
-                    self.assertEqual(round_tripped.value.hex(), value.hex())
-                else:
-                    self.assertEqual(
-                        round_tripped,
-                        RealLit(4722366482869645) * (RealLit(2) ** RealLit(-72)),
-                    )
+                self.assert_expr_has_exact_float_value(round_tripped, value)
 
     def test_fractional_literals_constant_fold_in_egglog_without_losing_float_bits(self):
         expr = RealLit(0.1) + RealLit(0.2)
@@ -1940,14 +1988,17 @@ class TestEgglogFloatLiterals(unittest.TestCase):
         egraph.register(lowered)
         egraph.run(1)
 
-        folded = from_egglog(egraph.extract(lowered))
+        folded = from_egglog(egraph.extract(lowered)).constant_fold()
         self.assertEqual(folded, RealLit(0.1 + 0.2))
         self.assertEqual(folded.value.hex(), (0.1 + 0.2).hex())
 
     def test_fractional_pow_round_trips_through_egglog(self):
         expr = Pow(RealLit(2.5), RealLit(0.5))
+        round_tripped = from_egglog(expr.to_egglog())
 
-        self.assertEqual(from_egglog(expr.to_egglog()), expr)
+        self.assertIsInstance(round_tripped, Pow)
+        self.assert_expr_has_exact_float_value(round_tripped.base, 2.5)
+        self.assert_expr_has_exact_float_value(round_tripped.exponent, 0.5)
 
     def test_non_finite_real_lits_are_rejected_by_egglog_lowering(self):
         for value in (math.inf, -math.inf, math.nan):
@@ -4310,6 +4361,60 @@ class TestE4M3FNx2E2M1x2MultFP32(unittest.TestCase):
 
         self.assertIsInstance(result, fp32)
 
+    def test_default_schedule_proves_all_normal_output_case(self):
+        _, design = self._make_design()
+        target_name = (
+            "e4m3fnx2_e2m1x2_mult_fp32["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
+        )
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_spec()
+
+        self.assertTrue(result["proved"])
+        proof_trace = result["case_results"][0]["proof_trace"]
+        self.assertEqual(proof_trace[-1]["status"], "unsat")
+        self.assertNotIn("z3", [report["tool"] for report in proof_trace])
+
+    def test_default_schedule_proves_e4m3fn_subnormal_output_case(self):
+        _, design = self._make_design()
+        target_name = (
+            "e4m3fnx2_e2m1x2_mult_fp32["
+            "arg0=norm,arg1=sub,arg2=norm,arg3=norm,output=norm]"
+        )
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_spec()
+
+        self.assertTrue(result["proved"])
+        proof_trace = result["case_results"][0]["proof_trace"]
+        self.assertEqual(proof_trace[-1]["status"], "unsat")
+        self.assertNotIn("z3", [report["tool"] for report in proof_trace])
+
     def test_exact_boundaries_signs_zeros_and_nan_precedence(self):
         variables, design = self._make_design()
         for name, a0, a1, b0, b1, expected in self._cases():
@@ -5135,6 +5240,119 @@ class TestRivalTranslation(unittest.TestCase):
         trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.checks, [abs_check, if_check])
+
+class TestStdoutVerificationObserver(unittest.TestCase):
+    def test_default_schedule_restarts_rewrite_pipeline_three_times(self):
+        schedule = ast_nodes._default_equivalence_schedule()
+
+        self.assertEqual(
+            [step["tool"] for step in schedule],
+            [
+                "simplify",
+                "egglog-rewrite",
+                "simplify",
+                "egglog-rewrite",
+                "simplify",
+                "egglog-rewrite",
+                "z3",
+            ],
+        )
+        for rewrite_step in schedule[1:6:2]:
+            self.assertEqual(rewrite_step["iterations"], 6)
+            self.assertEqual(
+                rewrite_step["scheduler"],
+                {"match_limit": 500_000, "ban_length": 1},
+            )
+
+    def test_prints_completed_case_with_decisive_tool(self):
+        ctx = SpecContext("demo[arg0=norm,output=norm]")
+        simplified = ctx.copy()
+        simplify_report = build_proof_report(
+            ctx,
+            simplified,
+            tool="simplify",
+            runtime_s=0.25,
+            status="unknown",
+            feasibility_status="feasible",
+        )
+        z3_report = build_proof_report(
+            simplified,
+            simplified,
+            tool="z3",
+            runtime_s=0.5,
+            status="unsat",
+        )
+        result = CaseVerificationResult(
+            name=ctx.name,
+            proved=True,
+            status="unsat",
+            feasibility_status="feasible",
+            proof_trace=[simplify_report, z3_report],
+            side_feasibility_reports=[],
+        )
+        output = io.StringIO()
+
+        ast_nodes.StdoutVerificationObserver(output).case_completed(result)
+
+        rendered = output.getvalue()
+        self.assertIn("Verification cases:\n", rendered)
+        self.assertIn(
+            "PROVED  STATUS   FEASIBILITY     TOOL                          TIME  CASE",
+            rendered,
+        )
+        self.assertIn(
+            "yes     unsat    feasible        z3                          0.750s  "
+            "demo[arg0=norm,output=norm]",
+            rendered,
+        )
+
+    def test_check_equivalence_uses_stdout_observer_by_default(self):
+        ctx = SpecContext("default-observer")
+        x = ctx.real("x")
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = ast_nodes.check_equivalence(
+                ast_nodes._Spec("first", lambda _ctx: x),
+                ast_nodes._Spec("second", lambda _ctx: x),
+                base_ctx=ctx,
+                inputs=[],
+                schedule=[{"tool": "simplify"}],
+            )
+
+        self.assertTrue(result["proved"])
+        self.assertIn(
+            "yes     unsat    feasible        simplify",
+            output.getvalue(),
+        )
+        self.assertIn("default-observer", output.getvalue())
+
+    def test_explicit_observer_replaces_stdout_default(self):
+        class CollectingObserver:
+            def __init__(self):
+                self.results = []
+
+            def case_completed(self, result):
+                self.results.append(result)
+
+        ctx = SpecContext("explicit-observer")
+        x = ctx.real("x")
+        observer = CollectingObserver()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            ast_nodes.check_equivalence(
+                ast_nodes._Spec("first", lambda _ctx: x),
+                ast_nodes._Spec("second", lambda _ctx: x),
+                base_ctx=ctx,
+                inputs=[],
+                schedule=[{"tool": "simplify"}],
+                observer=observer,
+            )
+
+        self.assertEqual(len(observer.results), 1)
+        self.assertEqual(output.getvalue(), "")
+
 
 class TestSpecificationDeterminism(unittest.TestCase):
     def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):

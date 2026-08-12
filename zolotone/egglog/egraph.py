@@ -9,9 +9,9 @@ from ..solver.report import build_proof_report, merge_rule_application_counts
 ####################### PRIVATE ############################
 
 
-def _create_egraph(simplify=False) -> EGraph:
+def _create_egraph() -> EGraph:
     egraph = EGraph()
-    load_rules(egraph, simplify=simplify)
+    load_rules(egraph, fold_base_two_powers=False)
     return egraph
 
 
@@ -26,8 +26,8 @@ def _make_run_schedule(scheduler: dict[str, int | None] | None):
     )
 
 
-def _egglog_check_ctx(ctx: "SpecContext", iterations=6, simplify=False, scheduler=None):
-    egraph = _create_egraph(simplify=simplify)
+def _egglog_check_ctx(ctx: "SpecContext", iterations=6, scheduler=None):
+    egraph = _create_egraph()
     
     to_check = ctx.to_egglog(egraph)
     run_schedule = _make_run_schedule(scheduler)
@@ -105,7 +105,6 @@ def egglog_rewrite(ctx: "SpecContext", iterations: int, scheduler=None):
     proved, egglog_runtime_s, egraph, rule_application_counts, iterations_used = _egglog_check_ctx(
         ctx=ctx,
         iterations=iterations,
-        simplify=False,
         scheduler=scheduler,
     )
     status, simplify_runtime_s, simplified_ctx = _egglog_simplify_ctx(

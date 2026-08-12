@@ -1076,7 +1076,9 @@ def _remove_factor_of_two(value: int) -> tuple[int, int]:
 
 
 def _fraction_to_egglog(value: Fraction):
-    if _fraction_fits_c_long(value):
+    # Keep integral literals compact. For non-integral binary rationals,
+    # preserve the power-of-two scale so exponent rewrites can see it.
+    if value.denominator == 1 and _fraction_fits_c_long(value):
         return _math_num(value.numerator, value.denominator)
 
     sign = -1 if value.numerator < 0 else 1
@@ -1087,6 +1089,9 @@ def _fraction_to_egglog(value: Fraction):
 
     if not _fraction_fits_c_long(coefficient) or not _fits_c_long(exponent):
         raise OverflowError(f"RealLit {value} cannot be represented with C-long-sized egglog literals")
+
+    if exponent == 0:
+        return _math_num(coefficient.numerator, coefficient.denominator)
 
     scale = Math.Pow(_math_num(2), _math_num(exponent))
     if coefficient == 1:

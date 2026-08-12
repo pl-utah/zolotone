@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DESIGN_TIMEOUT_S = 30 # 10 * 60
+DEFAULT_DESIGN_TIMEOUT_S = 20 * 60
 DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
 CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5

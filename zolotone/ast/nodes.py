@@ -1,5 +1,6 @@
 import typing as tp
 import random
+import sys
 from itertools import product
 
 from ..types.runtime import RuntimeType
@@ -21,21 +22,100 @@ from ..spec.spec_context import simplify_ctx
 CLowering = tp.Callable[[list[str], bool], str]
 
 
+class StdoutVerificationObserver:
+    """Print completed verification cases as a streaming stdout table."""
+
+    def __init__(self, stream: tp.TextIO | None = None) -> None:
+        self._stream = stream
+        self._header_printed = False
+
+    def _print(self, value: str) -> None:
+        print(
+            value,
+            file=self._stream if self._stream is not None else sys.stdout,
+            flush=True,
+        )
+
+    @staticmethod
+    def _decisive_tool(result: CaseVerificationResult) -> str:
+        if (
+            result["proved"]
+            and result["feasibility_status"] == "not feasible"
+            and result["side_feasibility_reports"]
+        ):
+            tools = dict.fromkeys(
+                str(report["tool"])
+                for report in result["side_feasibility_reports"]
+            )
+            return '+'.join(tools)
+
+        proof_trace = result["proof_trace"]
+        if not proof_trace:
+            return "-"
+        decisive_report = next(
+            (
+                report
+                for report in reversed(proof_trace)
+                if report["status"] in {"sat", "unsat"}
+            ),
+            proof_trace[-1],
+        )
+        return str(decisive_report["tool"])
+
+    @staticmethod
+    def _elapsed_s(result: CaseVerificationResult) -> float:
+        reports = (
+            list(result["proof_trace"])
+            + list(result["side_feasibility_reports"])
+        )
+        return sum(float(report.get("runtime_s", 0.0)) for report in reports)
+
+    def case_completed(self, result: CaseVerificationResult) -> None:
+        if not self._header_printed:
+            self._print("Verification cases:")
+            self._print(
+                f"{'PROVED':<7} "
+                f"{'STATUS':<8} "
+                f"{'FEASIBILITY':<15} "
+                f"{'TOOL':<24} "
+                f"{'TIME':>9}  "
+                "CASE"
+            )
+            self._header_printed = True
+
+        self._print(
+            f"{'yes' if result['proved'] else 'no':<7} "
+            f"{result['status']:<8} "
+            f"{result['feasibility_status'] or 'unknown':<15} "
+            f"{self._decisive_tool(result):<24} "
+            f"{self._elapsed_s(result):>8.3f}s  "
+            f"{result['name']}"
+        )
+
+
 class _Spec(tp.NamedTuple):
     name: str
     collect: tp.Callable[[SpecContext], tp.Any]
 
 
 def _default_equivalence_schedule() -> list[dict[str, tp.Any]]:
-    return [
-        {"tool": "simplify"},
-        {
-            "tool": "egglog-rewrite",
-            "iterations": 6,
-            "scheduler": {"match_limit": 500_000, "ban_length": 1},
-        },
-        {"tool": "z3", "timeout_ms": 10000},
-    ]
+    schedule = []
+    for _ in range(3):
+        schedule.extend(
+            [
+                {"tool": "simplify"},
+                {
+                    "tool": "egglog-rewrite",
+                    "iterations": 6,
+                    "scheduler": {
+                        "match_limit": 500_000,
+                        "ban_length": 1,
+                    },
+                },
+            ]
+        )
+    schedule.append({"tool": "z3", "timeout_ms": 10000})
+    return schedule
 
 
 def _append_case_name(name: str, case_label: str) -> str:
@@ -283,6 +363,9 @@ def check_equivalence(
         raise ValueError("Equivalent specification sides must have distinct names")
     if schedule is None:
         schedule = _default_equivalence_schedule()
+    active_observer = (
+        observer if observer is not None else StdoutVerificationObserver()
+    )
 
     base_assume_count = len(base_ctx.assumes)
     base_check_count = len(base_ctx.checks)
@@ -341,8 +424,7 @@ def check_equivalence(
             side_feasibility_reports=side_feasibility_reports,
         )
         case_results.append(case_result)
-        if observer is not None:
-            observer.case_completed(case_result)
+        active_observer.case_completed(case_result)
 
     return CheckResult(
         proved=proved,

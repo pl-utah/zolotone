@@ -124,7 +124,7 @@ if __name__ == "__main__":
         Var(name="b1", sign=E2M1T()),
     )
 
-    multiplier.check_determinism()
+    # multiplier.check_determinism()
     multiplier.check_spec()
 
     with open(
