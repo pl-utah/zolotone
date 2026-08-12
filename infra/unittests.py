@@ -63,6 +63,10 @@ from examples.converters import (
     fp32_to_e5m2fnuz,
     fp32_to_fp16,
 )
+from examples.e4m3fnx2_e2m1x2_mult_fp32 import (
+    e4m3fnx2_e2m1x2_mult_fp32,
+    spec_e4m3fnx2_e2m1x2_mult_fp32,
+)
 from examples.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
     dot_product_spec as bf16x8_dot_fp32_spec,
@@ -378,6 +382,7 @@ class TestRunDesigns(unittest.TestCase):
             *CONVERTER_REGISTRY,
             "fp32_add",
             "fp32_mult",
+            "e4m3fnx2_e2m1x2_mult_fp32",
             "bf16x8_dot_fp32_conventional",
             "bf16x8_dot_fp32_optimized",
         ]
@@ -395,6 +400,15 @@ class TestRunDesigns(unittest.TestCase):
             [arg.node_type for arg in csa.inner_args],
             [QT(10, 10)] * 4,
         )
+
+        mixed_multiplier = design_runner._find_design(
+            "e4m3fnx2_e2m1x2_mult_fp32"
+        ).build()
+        self.assertEqual(
+            [arg.node_type for arg in mixed_multiplier.inner_args],
+            [E4M3FNT(), E4M3FNT(), E2M1T(), E2M1T()],
+        )
+        self.assertEqual(mixed_multiplier.node_type, Float32T())
 
     def test_check_design_runs_the_selected_check(self):
         design = design_runner._build_bf16_relu()
@@ -4235,6 +4249,130 @@ class TestBFloat16Mult(unittest.TestCase):
             tempdir_no_jit.cleanup()
 
 
+class TestE4M3FNx2E2M1x2MultFP32(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(a0, a1, b0, b1):
+        if a0.is_nan or a1.is_nan:
+            return Float32.NaN().val
+
+        sign = a0.sign ^ a1.sign ^ b0.sign ^ b1.sign
+        values = (a0, a1, b0, b1)
+        if any(value.exponent == 0 and value.mantissa == 0 for value in values):
+            return Float32.nZero().val if sign else Float32.Zero().val
+
+        product = a0.to_val() * a1.to_val() * b0.to_val() * b1.to_val()
+        return struct.unpack(">I", struct.pack(">f", product))[0]
+
+    @staticmethod
+    def _cases():
+        return (
+            ("identity", 0x38, 0x38, 0x2, 0x2, 0x3F800000),
+            ("mixed-signs", 0xB8, 0x40, 0x3, 0x1, 0xBFC00000),
+            ("subnormal-and-normal", 0x03, 0x40, 0x1, 0x4, 0x3C400000),
+            ("minimum-nonzero", 0x01, 0x01, 0x1, 0x1, 0x35800000),
+            ("maximum", 0x7E, 0x7E, 0x7, 0x7, 0x4ADC8000),
+            ("a0-negative-zero", 0x80, 0x38, 0x2, 0x2, 0x80000000),
+            ("a1-negative-zero", 0x38, 0x80, 0x2, 0x2, 0x80000000),
+            ("b0-negative-zero", 0x38, 0x38, 0x8, 0x2, 0x80000000),
+            ("b1-negative-zero", 0x38, 0x38, 0x2, 0x8, 0x80000000),
+            ("even-negative-zero", 0x80, 0xB8, 0x2, 0x2, 0x00000000),
+            ("positive-zero-odd-sign", 0x00, 0xB8, 0x2, 0x2, 0x80000000),
+            ("nan-precedes-zero", 0x7F, 0x00, 0x8, 0x2, 0x7FC00000),
+            ("negative-nan-is-canonical", 0xFF, 0x38, 0x2, 0x2, 0x7FC00000),
+        )
+
+    def _make_design(self):
+        a0 = Var(name="a0", sign=E4M3FNT())
+        a1 = Var(name="a1", sign=E4M3FNT())
+        b0 = Var(name="b0", sign=E2M1T())
+        b1 = Var(name="b1", sign=E2M1T())
+        return (a0, a1, b0, b1), e4m3fnx2_e2m1x2_mult_fp32(
+            a0, a1, b0, b1
+        )
+
+    @staticmethod
+    def _load(variables, bits):
+        variables[0].load_val(E4M3FN(bits[0]))
+        variables[1].load_val(E4M3FN(bits[1]))
+        variables[2].load_val(E2M1(bits[2]))
+        variables[3].load_val(E2M1(bits[3]))
+
+    def test_golden_spec_returns_fp32(self):
+        ctx = SpecContext("e4m3fnx2-e2m1x2-mult-fp32-spec")
+        values = (
+            E4M3FNT().to_spec("a0", ctx),
+            E4M3FNT().to_spec("a1", ctx),
+            E2M1T().to_spec("b0", ctx),
+            E2M1T().to_spec("b1", ctx),
+        )
+
+        result = spec_e4m3fnx2_e2m1x2_mult_fp32(*values, ctx)
+
+        self.assertIsInstance(result, fp32)
+
+    def test_exact_boundaries_signs_zeros_and_nan_precedence(self):
+        variables, design = self._make_design()
+        for name, a0, a1, b0, b1, expected in self._cases():
+            with self.subTest(case=name):
+                self._load(variables, (a0, a1, b0, b1))
+                self.assertEqual(design.evaluate().val, expected)
+
+    def test_random_finite_inputs_match_host_fp32_bits(self):
+        variables, design = self._make_design()
+        finite_e4m3fn = [bits for bits in range(256) if bits & 0x7F != 0x7F]
+        rng = random.Random(0)
+
+        for _ in range(500):
+            values = (
+                E4M3FN(rng.choice(finite_e4m3fn)),
+                E4M3FN(rng.choice(finite_e4m3fn)),
+                E2M1(rng.randrange(16)),
+                E2M1(rng.randrange(16)),
+            )
+            for variable, value in zip(variables, values):
+                variable.load_val(value)
+
+            with self.subTest(inputs=tuple(value.val for value in values)):
+                self.assertEqual(
+                    design.evaluate().val,
+                    self._reference_bits(*values),
+                )
+
+    def test_jit_and_nonjit_cpp_match_reference(self):
+        variables, design = self._make_design()
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        finite_e4m3fn = [bits for bits in range(256) if bits & 0x7F != 0x7F]
+        rng = random.Random(1)
+        inputs = [case[1:5] for case in self._cases()]
+        inputs.extend(
+            (
+                rng.choice(finite_e4m3fn),
+                rng.choice(finite_e4m3fn),
+                rng.randrange(16),
+                rng.randrange(16),
+            )
+            for _ in range(100)
+        )
+        try:
+            for bits in inputs:
+                values = (
+                    E4M3FN(bits[0]),
+                    E4M3FN(bits[1]),
+                    E2M1(bits[2]),
+                    E2M1(bits[3]),
+                )
+                expected = self._reference_bits(*values)
+                self._load(variables, bits)
+                with self.subTest(inputs=bits):
+                    self.assertEqual(design.evaluate().val, expected)
+                    self.assertEqual(compiled_jit(*bits), expected)
+                    self.assertEqual(compiled_no_jit(*bits), expected)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
+
+
 class TestBFloat16ReLU(unittest.TestCase):
     @staticmethod
     def _reference_bits(value: BFloat16) -> int:
@@ -5886,11 +6024,51 @@ class TestSignSpecs(unittest.TestCase):
         ctx.check(neg_conditional.eq(If(x.eq(zero), one, zero)))
         ctx.check(neg_conditional.eq(If(x.ne(zero), zero, one)))
         ctx.check(neg_conditional.eq(If(x.ne(one), one, zero)))
+        for bit_result in (
+            and_conditional,
+            or_conditional,
+            xor_conditional,
+            neg_conditional,
+        ):
+            ctx.check(bit_result.eq(zero) | bit_result.eq(one))
 
         egraph = EGraph()
         egraph.register(*constant_rules())
         checks = ctx.to_egglog(egraph)
         egraph.run(1)
+
+        self.assertTrue(egraph.check_bool(*checks))
+
+    def test_egglog_propagates_nested_xor_result_as_bit(self):
+        ctx = SpecContext("nested-xor-bit-closure")
+        a, b, c, d = [ctx.real(name) for name in ("a", "b", "c", "d")]
+        zero = ctx.zero()
+        one = ctx.one()
+
+        for value in (a, b, c, d):
+            ctx.assume(value.eq(zero) | value.eq(one))
+
+        ab = If(a.ne(b), one, zero)
+        cd = If(c.ne(d), one, zero)
+        nested_xor = If(ab.ne(cd), one, zero)
+        ctx.check(nested_xor.eq(zero) | nested_xor.eq(one))
+        ctx.check(
+            sign_multiplier(ctx, nested_xor).eq(
+                (
+                    sign_multiplier(ctx, a)
+                    * sign_multiplier(ctx, b)
+                )
+                * (
+                    sign_multiplier(ctx, c)
+                    * sign_multiplier(ctx, d)
+                )
+            )
+        )
+
+        egraph = EGraph()
+        egraph.register(*constant_rules())
+        checks = ctx.to_egglog(egraph)
+        egraph.run(2)
 
         self.assertTrue(egraph.check_bool(*checks))
 

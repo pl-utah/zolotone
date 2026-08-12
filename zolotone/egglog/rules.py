@@ -178,6 +178,10 @@ def constant_rules():
     a_is_bit = MathBool.Or(Math.Eq(a, zero), Math.Eq(a, one))
     b_is_bit = MathBool.Or(Math.Eq(b, zero), Math.Eq(b, one))
     bit_result = var("bit_result", Math)
+    bit_result_is_bit = MathBool.Or(
+        Math.Eq(bit_result, zero),
+        Math.Eq(bit_result, one),
+    )
 
     and_conditional = Math.If(
         MathBool.And(Math.Eq(a, one), Math.Eq(b, one)),
@@ -229,6 +233,7 @@ def constant_rules():
         ).then(
             union(bit_result).with_(and_product),
             union(bit_result).with_(and_min),
+            union(bit_result_is_bit).with_(MathBool.True_()),
         ),
         rule(
             eq(bit_result).to(or_conditional),
@@ -237,6 +242,7 @@ def constant_rules():
         ).then(
             union(bit_result).with_(or_polynomial),
             union(bit_result).with_(or_max),
+            union(bit_result_is_bit).with_(MathBool.True_()),
         ),
         rule(
             eq(bit_result).to(xor_conditional),
@@ -245,6 +251,7 @@ def constant_rules():
         ).then(
             union(bit_result).with_(xor_max_product),
             union(bit_result).with_(xor_polynomial),
+            union(bit_result_is_bit).with_(MathBool.True_()),
             union(sign_multiplier(bit_result)).with_(
                 Math.Mul(sign_multiplier(a), sign_multiplier(b))
             ),
@@ -257,6 +264,7 @@ def constant_rules():
             union(bit_result).with_(neg_zero_conditional),
             union(bit_result).with_(neg_not_zero_conditional),
             union(bit_result).with_(neg_not_one_conditional),
+            union(bit_result_is_bit).with_(MathBool.True_()),
         ),
         # Reflect a proven object-language equality into egglog's native
         # equality so conditional assumptions can merge their operands.

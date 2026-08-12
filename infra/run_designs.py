@@ -37,9 +37,10 @@ from examples.converters import (
     CONVERTER_REGISTRY,
     FORMAT_STATIC_TYPES,
 )
+from examples.e4m3fnx2_e2m1x2_mult_fp32 import e4m3fnx2_e2m1x2_mult_fp32
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
-from zolotone import BFloat16T, Float32T, Node, QT, Var
+from zolotone import BFloat16T, E2M1T, E4M3FNT, Float32T, Node, QT, Var
 from zolotone.solver import CaseVerificationResult
 
 
@@ -96,6 +97,15 @@ def _build_fp32_mult() -> Node:
     )
 
 
+def _build_e4m3fnx2_e2m1x2_mult_fp32() -> Node:
+    return e4m3fnx2_e2m1x2_mult_fp32(
+        Var(name="a0", sign=E4M3FNT()),
+        Var(name="a1", sign=E4M3FNT()),
+        Var(name="b0", sign=E2M1T()),
+        Var(name="b1", sign=E2M1T()),
+    )
+
+
 def _dot_product_args() -> list[Var]:
     return [
         *[Var(name=f"a_{index}", sign=BFloat16T()) for index in range(4)],
@@ -119,6 +129,10 @@ DESIGNS = (
     *(_converter_design_case(name) for name in CONVERTER_REGISTRY),
     DesignCase("fp32_add", _build_fp32_add),
     DesignCase("fp32_mult", _build_fp32_mult),
+    DesignCase(
+        "e4m3fnx2_e2m1x2_mult_fp32",
+        _build_e4m3fnx2_e2m1x2_mult_fp32,
+    ),
     DesignCase("bf16x8_dot_fp32_conventional", _build_conventional_dot_product),
     DesignCase("bf16x8_dot_fp32_optimized", _build_optimized_dot_product),
 )
