@@ -1,8 +1,8 @@
 from zolotone import *
 
 
-def spec_e4m3fnx2_e2m1x2_mult_fp32(a0, a1, b0, b1, ctx):
-    negative_sign = a0.sign.ne(a1.sign).ne(b0.sign.ne(b1.sign))
+def spec_ue4m3x2_e2m1x2_mult_fp32(a0, a1, b0, b1, ctx):
+    negative_sign = b0.sign.ne(b1.sign)
     nan_case = a0.is_nan | a1.is_nan
     zero_case = a0.is_zero | a1.is_zero | b0.is_zero | b1.is_zero
     finite_value = a0.value * a1.value * b0.value * b1.value
@@ -43,24 +43,21 @@ def _effective_exponent(decoded):
 
 
 @Composite(
-    name="e4m3fnx2_e2m1x2_mult_fp32",
-    spec=spec_e4m3fnx2_e2m1x2_mult_fp32,
+    name="ue4m3x2_e2m1x2_mult_fp32",
+    spec=spec_ue4m3x2_e2m1x2_mult_fp32,
 )
-def e4m3fnx2_e2m1x2_mult_fp32(
+def ue4m3x2_e2m1x2_mult_fp32(
     a0: Node,
     a1: Node,
     b0: Node,
     b1: Node,
 ) -> Node:
-    A0 = e4m3fn_decode(a0)
-    A1 = e4m3fn_decode(a1)
+    A0 = ue4m3_decode(a0)
+    A1 = ue4m3_decode(a1)
     B0 = e2m1_decode(b0)
     B1 = e2m1_decode(b1)
 
-    sign_bit = bit_xor(
-        bit_xor(A0.sign, A1.sign),
-        bit_xor(B0.sign, B1.sign),
-    )
+    sign_bit = bit_xor(B0.sign, B1.sign)
     any_nan = bit_or(A0.is_nan, A1.is_nan)
     any_zero = bit_or(
         bit_or(A0.is_zero, A1.is_zero),
@@ -70,8 +67,8 @@ def e4m3fnx2_e2m1x2_mult_fp32(
     # UQ1.3 x UQ1.3 x UQ1.1 x UQ1.1 is an exact UQ4.8 product.
     significand_product = uq_mul(
         uq_mul(
-            _significand(A0, E4M3FN.mantissa_bits),
-            _significand(A1, E4M3FN.mantissa_bits),
+            _significand(A0, UE4M3.mantissa_bits),
+            _significand(A1, UE4M3.mantissa_bits),
         ),
         uq_mul(
             _significand(B0, E2M1.mantissa_bits),
@@ -93,7 +90,7 @@ def e4m3fnx2_e2m1x2_mult_fp32(
         Const(
             Q.from_int(
                 Float32.exponent_bias
-                - 2 * E4M3FN.exponent_bias
+                - 2 * UE4M3.exponent_bias
                 - 2 * E2M1.exponent_bias
             )
         ),
@@ -117,24 +114,24 @@ def e4m3fnx2_e2m1x2_mult_fp32(
 
 
 if __name__ == "__main__":
-    multiplier = e4m3fnx2_e2m1x2_mult_fp32(
-        Var(name="a0", sign=E4M3FNT()),
-        Var(name="a1", sign=E4M3FNT()),
+    multiplier = ue4m3x2_e2m1x2_mult_fp32(
+        Var(name="a0", sign=UE4M3T()),
+        Var(name="a1", sign=UE4M3T()),
         Var(name="b0", sign=E2M1T()),
         Var(name="b1", sign=E2M1T()),
     )
 
-    # multiplier.check_determinism()
+    multiplier.check_determinism()
     multiplier.check_spec()
 
     with open(
-        "examples/c_models/e4m3fnx2_e2m1x2_mult_fp32_jit.hpp",
+        "examples/c_models/ue4m3x2_e2m1x2_mult_fp32_jit.hpp",
         "w",
     ) as file:
         file.write(multiplier.to_cpp(jittable=True))
 
     with open(
-        "examples/c_models/e4m3fnx2_e2m1x2_mult_fp32_no_jit.hpp",
+        "examples/c_models/ue4m3x2_e2m1x2_mult_fp32_no_jit.hpp",
         "w",
     ) as file:
         file.write(multiplier.to_cpp(jittable=False))

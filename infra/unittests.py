@@ -63,10 +63,16 @@ from examples.converters import (
     fp32_to_e5m2,
     fp32_to_e5m2fnuz,
     fp32_to_fp16,
+    fp32_to_ue4m3,
+    ue4m3_to_fp32,
 )
 from examples.e4m3fnx2_e2m1x2_mult_fp32 import (
     e4m3fnx2_e2m1x2_mult_fp32,
     spec_e4m3fnx2_e2m1x2_mult_fp32,
+)
+from examples.ue4m3x2_e2m1x2_mult_fp32 import (
+    spec_ue4m3x2_e2m1x2_mult_fp32,
+    ue4m3x2_e2m1x2_mult_fp32,
 )
 from examples.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
@@ -384,6 +390,7 @@ class TestRunDesigns(unittest.TestCase):
             "fp32_add",
             "fp32_mult",
             "e4m3fnx2_e2m1x2_mult_fp32",
+            "ue4m3x2_e2m1x2_mult_fp32",
             "bf16x8_dot_fp32_conventional",
             "bf16x8_dot_fp32_optimized",
         ]
@@ -410,6 +417,15 @@ class TestRunDesigns(unittest.TestCase):
             [E4M3FNT(), E4M3FNT(), E2M1T(), E2M1T()],
         )
         self.assertEqual(mixed_multiplier.node_type, Float32T())
+
+        unsigned_mixed_multiplier = design_runner._find_design(
+            "ue4m3x2_e2m1x2_mult_fp32"
+        ).build()
+        self.assertEqual(
+            [arg.node_type for arg in unsigned_mixed_multiplier.inner_args],
+            [UE4M3T(), UE4M3T(), E2M1T(), E2M1T()],
+        )
+        self.assertEqual(unsigned_mixed_multiplier.node_type, Float32T())
 
     def test_check_design_runs_the_selected_check(self):
         design = design_runner._build_bf16_relu()
@@ -1396,7 +1412,7 @@ class TestPowSpecOp(unittest.TestCase):
         for expr, expected in cases:
             with self.subTest(expr=str(expr)):
                 egraph = EGraph()
-                load_rules(egraph, simplify=True)
+                load_rules(egraph)
                 lowered = expr.to_egglog()
 
                 egraph.register(lowered)
@@ -3201,6 +3217,150 @@ class TestE4M3FNSpec(unittest.TestCase):
         self.assertTrue(design.check_spec(schedule=schedule)["proved"])
 
 
+class TestUE4M3Spec(unittest.TestCase):
+    def test_runtime_layout_values_and_validation(self):
+        self.assertEqual(UE4M3.Zero().val, 0x00)
+        self.assertEqual(UE4M3.NaN().val, 0x7F)
+        self.assertEqual(UE4M3(0x01).to_val(), 2 ** -9)
+        self.assertEqual(UE4M3(0x07).to_val(), 7 * 2 ** -9)
+        self.assertEqual(UE4M3(0x08).to_val(), 2 ** -6)
+        self.assertEqual(UE4M3(0x38).to_val(), 1.0)
+        self.assertEqual(UE4M3(0x7E).to_val(), 448.0)
+        self.assertTrue(math.isnan(UE4M3(0x7F).to_val()))
+
+        value = UE4M3.from_fields(15, 6)
+        self.assertEqual((value.exponent, value.mantissa), (15, 6))
+        self.assertEqual(value.copy(), value)
+        self.assertEqual(value.static_type(), UE4M3T())
+        self.assertEqual(value.total_bits(), 8)
+
+        for invalid in (-1, 128, 255, 1.5, "0"):
+            with self.subTest(packed=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    UE4M3(invalid)
+        for fields in ((-1, 0), (16, 0), (0, -1), (0, 8)):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    UE4M3.from_fields(*fields)
+
+    def test_exhaustive_decode_classification_values_and_pack_round_trip(self):
+        @Composite(name="ue4m3_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def roundtrip(x):
+            decoded = ue4m3_decode(x)
+            return ue4m3_pack(decoded.exponent, decoded.mantissa)
+
+        value = Var("value", sign=UE4M3T())
+        design = roundtrip(value)
+        tempdir, compiled = jit_compile(design)
+        counts = {"norm": 0, "sub": 0, "zero": 0, "nan": 0}
+        names = tuple(counts)
+        try:
+            for bits in range(128):
+                runtime = UE4M3(bits)
+                decoded = ue4m3_decode(Const(runtime))
+                fields = tuple(node.evaluate().val for node in decoded)
+                self.assertEqual(fields[:2], ((bits >> 3) & 15, bits & 7))
+                self.assertEqual(sum(fields[2:]), 1)
+                classification = names[fields[2:].index(1)]
+                counts[classification] += 1
+
+                spec = runtime.to_spec(SpecContext(f"ue4m3-{bits}"))
+                self.assertEqual(
+                    spec.classification_flags()[classification].constant_fold(),
+                    BoolLit(True),
+                )
+                value.load_val(runtime)
+                self.assertEqual(design.evaluate().val, bits)
+                self.assertEqual(compiled(bits), bits)
+        finally:
+            tempdir.cleanup()
+
+        self.assertEqual(counts, {"norm": 119, "sub": 7, "zero": 1, "nan": 1})
+
+    def test_symbolic_shape_and_magnitude_encoding(self):
+        ctx = SpecContext("fresh-ue4m3")
+        value = ue4m3.fresh("x", ctx)
+        self.assertEqual(
+            tuple(value.classification_flags()),
+            ("norm", "sub", "zero", "nan"),
+        )
+        self.assertEqual(value.observables_for_classification("zero"), (BoolLit(True),))
+        self.assertIsInstance(UE4M3T().to_spec("input", ctx), ue4m3)
+        self.assertIsInstance(UE4M3T().random_runtime_value(random.Random(1)), UE4M3)
+
+        positive_ctx = SpecContext("positive-ue4m3")
+        positive = ue4m3.encode(RealLit(1), positive_ctx)
+        negative_ctx = SpecContext("negative-ue4m3")
+        negative = ue4m3.encode(RealLit(-1), negative_ctx)
+        self.assertEqual(positive.value.constant_fold(), RealLit(1))
+        self.assertEqual(negative.value.constant_fold(), RealLit(1))
+
+    def test_bit_level_encoder_rne_zero_and_saturation(self):
+        exponent = Var("exponent", QT(8, 0))
+        mantissa = Var("mantissa", UQT(12, 12))
+        design = ue4m3_encode(exponent, mantissa)
+        tempdir, compiled = jit_compile(design)
+
+        cases = (
+            (7, 0.0, 0x00),
+            (7, 1.0, 0x38),
+            (-1, 0.25, 0x00),
+            (-1, 0.75, 0x02),
+            (-1, 1.25, 0x02),
+            (-1, 3.75, 0x08),
+            (7, 1.0625, 0x38),
+            (7, 1.1875, 0x3A),
+            (7, 1.9375, 0x40),
+            (15, 1.75, 0x7E),
+            (15, 1.875, 0x7E),
+            (20, 1.0, 0x7E),
+        )
+        try:
+            for exponent_value, mantissa_value, expected in cases:
+                exponent_runtime = Q(exponent_value & 0xFF, 8, 0)
+                mantissa_runtime = UQ.from_float(mantissa_value, 12, 12)
+                exponent.load_val(exponent_runtime)
+                mantissa.load_val(mantissa_runtime)
+                with self.subTest(exponent=exponent_value, mantissa=mantissa_value):
+                    self.assertEqual(design.evaluate().val, expected)
+                    self.assertEqual(
+                        compiled(exponent_runtime.val, mantissa_runtime.val),
+                        expected,
+                    )
+        finally:
+            tempdir.cleanup()
+
+    def test_fp32_converter_pins_rne_magnitude_and_special_values(self):
+        source = Var("source", Float32T())
+        design = fp32_to_ue4m3(source)
+        tempdir, compiled = jit_compile(design)
+        cases = (
+            (0x00000000, 0x00),
+            (0x80000000, 0x00),
+            (0x3A800000, 0x00),
+            (0x3B000000, 0x01),
+            (0x3B400000, 0x02),
+            (0x3BA00000, 0x02),
+            (0x3C700000, 0x08),
+            (0x3F880000, 0x38),
+            (0x3F980000, 0x3A),
+            (0xBF980000, 0x3A),
+            (0x43E00000, 0x7E),
+            (0x44000000, 0x7E),
+            (0x7F800000, 0x7E),
+            (0xFF800000, 0x7E),
+            (0x7FC00000, 0x7F),
+        )
+        try:
+            for source_bits, expected in cases:
+                source.load_val(Float32(source_bits))
+                with self.subTest(source=hex(source_bits)):
+                    self.assertEqual(design.evaluate().val, expected)
+                    self.assertEqual(compiled(source_bits), expected)
+        finally:
+            tempdir.cleanup()
+
+
 class TestE5M2Spec(unittest.TestCase):
     def test_runtime_constants_constructors_validation_copy_and_static_type(self):
         self.assertEqual(E5M2.exponent_bias, 15)
@@ -3880,7 +4040,15 @@ class TestBFloat16Spec(unittest.TestCase):
 
 class TestFloatFormatConversions(unittest.TestCase):
     def test_registry_contains_only_fp32_round_trips(self):
-        formats = {"bf16", "fp16", "e5m2", "e5m2fnuz", "e4m3fn", "e2m1"}
+        formats = {
+            "bf16",
+            "fp16",
+            "e5m2",
+            "e5m2fnuz",
+            "e4m3fn",
+            "ue4m3",
+            "e2m1",
+        }
         expected = {
             name
             for format_name in formats
@@ -3890,7 +4058,7 @@ class TestFloatFormatConversions(unittest.TestCase):
             )
         }
 
-        self.assertEqual(len(CONVERTER_REGISTRY), 12)
+        self.assertEqual(len(CONVERTER_REGISTRY), 14)
         self.assertEqual(set(CONVERTER_REGISTRY), expected)
         self.assertEqual(set(CONVERTER_FORMATS), expected)
 
@@ -3907,6 +4075,7 @@ class TestFloatFormatConversions(unittest.TestCase):
             "e5m2": E5M2,
             "e5m2fnuz": E5M2FNUZ,
             "e4m3fn": E4M3FN,
+            "ue4m3": UE4M3,
             "e2m1": E2M1,
         }
 
@@ -3916,7 +4085,8 @@ class TestFloatFormatConversions(unittest.TestCase):
             design = conversion(source)
             tempdir, compiled = jit_compile(design)
             try:
-                for source_bits in range(1 << runtime_type(0).total_bits()):
+                encoding_count = 128 if runtime_type is UE4M3 else 1 << runtime_type(0).total_bits()
+                for source_bits in range(encoding_count):
                     value = runtime_type(source_bits)
                     if math.isnan(value.to_val()):
                         expected = Float32.NaN().val
@@ -4067,6 +4237,18 @@ class TestFloatFormatConversions(unittest.TestCase):
                     (0x7F800000, 0x7),
                     (0xFF800000, 0xF),
                     (0x7FC00000, 0x7),
+                ),
+            ),
+            (
+                fp32_to_ue4m3,
+                (
+                    (0x00000000, 0x00),
+                    (0x80000000, 0x00),
+                    (0x3F800000, 0x38),
+                    (0xBF800000, 0x38),
+                    (0x7F800000, 0x7E),
+                    (0xFF800000, 0x7E),
+                    (0x7FC00000, 0x7F),
                 ),
             ),
         )
@@ -4464,6 +4646,174 @@ class TestE4M3FNx2E2M1x2MultFP32(unittest.TestCase):
                 values = (
                     E4M3FN(bits[0]),
                     E4M3FN(bits[1]),
+                    E2M1(bits[2]),
+                    E2M1(bits[3]),
+                )
+                expected = self._reference_bits(*values)
+                self._load(variables, bits)
+                with self.subTest(inputs=bits):
+                    self.assertEqual(design.evaluate().val, expected)
+                    self.assertEqual(compiled_jit(*bits), expected)
+                    self.assertEqual(compiled_no_jit(*bits), expected)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
+
+
+class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(a0, a1, b0, b1):
+        if a0.is_nan or a1.is_nan:
+            return Float32.NaN().val
+
+        sign = b0.sign ^ b1.sign
+        values = (a0, a1, b0, b1)
+        if any(value.exponent == 0 and value.mantissa == 0 for value in values):
+            return Float32.nZero().val if sign else Float32.Zero().val
+
+        product = a0.to_val() * a1.to_val() * b0.to_val() * b1.to_val()
+        return struct.unpack(">I", struct.pack(">f", product))[0]
+
+    @staticmethod
+    def _cases():
+        return (
+            ("identity", 0x38, 0x38, 0x2, 0x2, 0x3F800000),
+            ("ordinary-negative", 0x38, 0x40, 0x3, 0x9, 0xBFC00000),
+            ("even-negative-parity", 0x38, 0x40, 0xB, 0x9, 0x3FC00000),
+            ("subnormal-and-normal", 0x03, 0x40, 0x1, 0x4, 0x3C400000),
+            ("minimum-nonzero", 0x01, 0x01, 0x1, 0x1, 0x35800000),
+            ("maximum", 0x7E, 0x7E, 0x7, 0x7, 0x4ADC8000),
+            ("a0-zero-negative", 0x00, 0x38, 0xA, 0x2, 0x80000000),
+            ("a1-zero-negative", 0x38, 0x00, 0xA, 0x2, 0x80000000),
+            ("b0-negative-zero", 0x38, 0x38, 0x8, 0x2, 0x80000000),
+            ("b1-negative-zero", 0x38, 0x38, 0x2, 0x8, 0x80000000),
+            ("even-negative-zero", 0x00, 0x38, 0xA, 0xA, 0x00000000),
+            ("nan-precedes-zero", 0x7F, 0x00, 0x8, 0x2, 0x7FC00000),
+        )
+
+    def _make_design(self):
+        a0 = Var(name="a0", sign=UE4M3T())
+        a1 = Var(name="a1", sign=UE4M3T())
+        b0 = Var(name="b0", sign=E2M1T())
+        b1 = Var(name="b1", sign=E2M1T())
+        return (a0, a1, b0, b1), ue4m3x2_e2m1x2_mult_fp32(
+            a0, a1, b0, b1
+        )
+
+    @staticmethod
+    def _load(variables, bits):
+        variables[0].load_val(UE4M3(bits[0]))
+        variables[1].load_val(UE4M3(bits[1]))
+        variables[2].load_val(E2M1(bits[2]))
+        variables[3].load_val(E2M1(bits[3]))
+
+    def test_golden_spec_returns_fp32(self):
+        ctx = SpecContext("ue4m3x2-e2m1x2-mult-fp32-spec")
+        values = (
+            UE4M3T().to_spec("a0", ctx),
+            UE4M3T().to_spec("a1", ctx),
+            E2M1T().to_spec("b0", ctx),
+            E2M1T().to_spec("b1", ctx),
+        )
+        result = spec_ue4m3x2_e2m1x2_mult_fp32(*values, ctx)
+        self.assertIsInstance(result, fp32)
+
+    def _assert_spec_case_proves(self, target_name):
+        _, design = self._make_design()
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_spec()
+
+        self.assertTrue(result["proved"])
+        self.assertEqual(result["case_results"][0]["proof_trace"][-1]["status"], "unsat")
+
+    def test_default_schedule_proves_normal_and_ue4m3_subnormal_cases(self):
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_mult_fp32["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
+        )
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_mult_fp32["
+            "arg0=norm,arg1=sub,arg2=norm,arg3=norm,output=norm]"
+        )
+
+    def test_determinism(self):
+        _, design = self._make_design()
+        target_name = (
+            "ue4m3x2_e2m1x2_mult_fp32_determinism["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
+        )
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_determinism()
+        self.assertTrue(result["proved"])
+
+    def test_exact_boundaries_signs_zeros_and_nan_precedence(self):
+        variables, design = self._make_design()
+        for name, a0, a1, b0, b1, expected in self._cases():
+            with self.subTest(case=name):
+                self._load(variables, (a0, a1, b0, b1))
+                self.assertEqual(design.evaluate().val, expected)
+
+    def test_random_finite_inputs_match_host_fp32_bits(self):
+        variables, design = self._make_design()
+        finite_ue4m3 = list(range(0x7F))
+        rng = random.Random(2)
+        for _ in range(500):
+            values = (
+                UE4M3(rng.choice(finite_ue4m3)),
+                UE4M3(rng.choice(finite_ue4m3)),
+                E2M1(rng.randrange(16)),
+                E2M1(rng.randrange(16)),
+            )
+            for variable, value in zip(variables, values):
+                variable.load_val(value)
+            self.assertEqual(design.evaluate().val, self._reference_bits(*values))
+
+    def test_jit_and_nonjit_cpp_match_reference(self):
+        variables, design = self._make_design()
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        rng = random.Random(3)
+        inputs = [case[1:5] for case in self._cases()]
+        inputs.extend(
+            (
+                rng.randrange(0x7F),
+                rng.randrange(0x7F),
+                rng.randrange(16),
+                rng.randrange(16),
+            )
+            for _ in range(100)
+        )
+        try:
+            for bits in inputs:
+                values = (
+                    UE4M3(bits[0]),
+                    UE4M3(bits[1]),
                     E2M1(bits[2]),
                     E2M1(bits[3]),
                 )

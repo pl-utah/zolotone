@@ -307,6 +307,41 @@ class E4M3FNT(StaticType):
         return E4M3FN(rng.getrandbits(self.total_bits()))
 
 
+class UE4M3T(StaticType):
+    """Static type for NVIDIA's unsigned E4M3 scale format."""
+
+    def __init__(self):
+        super().__init__()
+        self.sign_bits = 0
+        self.exponent_bits = 4
+        self.mantissa_bits = 3
+
+    def total_bits(self):
+        # UE4M3 has seven meaningful bits but uses an 8-bit ABI container.
+        return 8
+
+    def __repr__(self):
+        return "UE4M3<8>"
+
+    __str__ = __repr__
+
+    def __eq__(self, other):
+        return isinstance(other, UE4M3T)
+
+    def _clone_impl(self) -> "UE4M3T":
+        return UE4M3T()
+
+    def to_spec(self, name, ctx):
+        from ..spec.custom_specs.ue4m3 import ue4m3
+
+        return ue4m3.fresh(name, ctx)
+
+    def random_runtime_value(self, rng: random.Random):
+        from .runtime import UE4M3
+
+        return UE4M3(rng.getrandbits(7))
+
+
 class E5M2FNUZT(StaticType):
     """Static type for the AMD finite-only E5M2FNUZ format."""
 

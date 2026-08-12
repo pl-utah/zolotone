@@ -4,6 +4,7 @@ from .Float32 import *
 from .Float16 import *
 from .BFloat16 import *
 from .E4M3FN import *
+from .UE4M3 import *
 from .E5M2 import *
 from .E5M2FNUZ import *
 from .E2M1 import *

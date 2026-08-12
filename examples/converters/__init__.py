@@ -8,6 +8,7 @@ from zolotone import (
     E5M2T,
     Float16T,
     Float32T,
+    UE4M3T,
 )
 
 from .bf16_to_fp32 import bf16_to_fp32
@@ -20,6 +21,8 @@ from .e5m2fnuz_to_fp32 import e5m2fnuz_to_fp32
 from .fp32_to_e5m2fnuz import fp32_to_e5m2fnuz
 from .e4m3fn_to_fp32 import e4m3fn_to_fp32
 from .fp32_to_e4m3fn import fp32_to_e4m3fn
+from .ue4m3_to_fp32 import ue4m3_to_fp32
+from .fp32_to_ue4m3 import fp32_to_ue4m3
 from .e2m1_to_fp32 import e2m1_to_fp32
 from .fp32_to_e2m1 import fp32_to_e2m1
 
@@ -30,6 +33,7 @@ FORMAT_NAMES = (
     "e5m2",
     "e5m2fnuz",
     "e4m3fn",
+    "ue4m3",
     "e2m1",
 )
 
@@ -44,6 +48,8 @@ CONVERTER_REGISTRY = {
     "fp32_to_e5m2fnuz": fp32_to_e5m2fnuz,
     "e4m3fn_to_fp32": e4m3fn_to_fp32,
     "fp32_to_e4m3fn": fp32_to_e4m3fn,
+    "ue4m3_to_fp32": ue4m3_to_fp32,
+    "fp32_to_ue4m3": fp32_to_ue4m3,
     "e2m1_to_fp32": e2m1_to_fp32,
     "fp32_to_e2m1": fp32_to_e2m1,
 }
@@ -58,6 +64,8 @@ CONVERTER_FORMATS = {
     "fp32_to_e5m2fnuz": ("fp32", "e5m2fnuz"),
     "e4m3fn_to_fp32": ("e4m3fn", "fp32"),
     "fp32_to_e4m3fn": ("fp32", "e4m3fn"),
+    "ue4m3_to_fp32": ("ue4m3", "fp32"),
+    "fp32_to_ue4m3": ("fp32", "ue4m3"),
     "e2m1_to_fp32": ("e2m1", "fp32"),
     "fp32_to_e2m1": ("fp32", "e2m1"),
 }
@@ -68,6 +76,7 @@ FORMAT_STATIC_TYPES = {
     "e5m2": E5M2T,
     "e5m2fnuz": E5M2FNUZT,
     "e4m3fn": E4M3FNT,
+    "ue4m3": UE4M3T,
     "e2m1": E2M1T,
 }
 
@@ -82,6 +91,8 @@ __all__ = [
     "fp32_to_e5m2fnuz",
     "e4m3fn_to_fp32",
     "fp32_to_e4m3fn",
+    "ue4m3_to_fp32",
+    "fp32_to_ue4m3",
     "e2m1_to_fp32",
     "fp32_to_e2m1",
     "CONVERTER_FORMATS",
