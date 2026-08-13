@@ -22,6 +22,7 @@ from egglog import EGraph
 
 from zolotone import *
 from zolotone.ast import nodes as ast_nodes
+from zolotone.ast import parallel_verification as parallel_runner
 from zolotone.egglog.rules import (
     check_rules,
     constant_rules,
@@ -5941,6 +5942,247 @@ class TestStdoutVerificationObserver(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
 
 
+class TestParallelClassificationVerification(unittest.TestCase):
+    @staticmethod
+    def _fp_identity_result(max_workers, observer=None):
+        ctx = SpecContext("parallel-fp-identity")
+        value = fp32.fresh("value", ctx)
+        return ast_nodes.check_equivalence(
+            ast_nodes._Spec("first", lambda _ctx: value),
+            ast_nodes._Spec("second", lambda _ctx: value),
+            base_ctx=ctx,
+            inputs=[],
+            schedule=[{"tool": "simplify"}],
+            observer=observer,
+            max_workers=max_workers,
+        )
+
+    @staticmethod
+    def _case_summary(result):
+        return [
+            (
+                case_result["name"],
+                case_result["proved"],
+                case_result["status"],
+                case_result["feasibility_status"],
+                [report["tool"] for report in case_result["proof_trace"]],
+                [
+                    report["feasibility_status"]
+                    for report in case_result["side_feasibility_reports"]
+                ],
+            )
+            for case_result in result["case_results"]
+        ]
+
+    def test_parallel_matches_serial_order_and_observes_in_parent(self):
+        class ParentObserver:
+            def __init__(self):
+                self.calls = []
+
+            def case_completed(self, result):
+                self.calls.append((os.getpid(), result["name"]))
+
+        observer = ParentObserver()
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            serial = self._fp_identity_result(max_workers=1)
+            parallel = self._fp_identity_result(
+                max_workers=2,
+                observer=observer,
+            )
+
+        self.assertTrue(serial["proved"])
+        self.assertEqual(
+            self._case_summary(parallel),
+            self._case_summary(serial),
+        )
+        self.assertEqual(len(observer.calls), len(parallel["case_results"]))
+        self.assertEqual(
+            {case_name for _, case_name in observer.calls},
+            {case["name"] for case in parallel["case_results"]},
+        )
+        self.assertEqual({pid for pid, _ in observer.calls}, {os.getpid()})
+
+    def test_parallel_worker_can_launch_nested_z3_process(self):
+        def run(max_workers):
+            ctx = SpecContext("parallel-nested-z3")
+            value = ctx.real("value")
+            return ast_nodes.check_equivalence(
+                ast_nodes._Spec("first", lambda _ctx: value),
+                ast_nodes._Spec("second", lambda _ctx: value + ctx.one()),
+                base_ctx=ctx,
+                inputs=[],
+                schedule=[{"tool": "z3", "timeout_ms": 1000}],
+                max_workers=max_workers,
+            )
+
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            serial = run(1)
+            parallel = run(2)
+
+        self.assertFalse(parallel["proved"])
+        self.assertEqual(self._case_summary(parallel), self._case_summary(serial))
+        self.assertEqual(parallel["proof_traces"][0][-1]["tool"], "z3")
+        self.assertEqual(parallel["proof_traces"][0][-1]["status"], "sat")
+
+    def test_serial_and_parallel_match_for_side_feasibility_cases(self):
+        def run(max_workers, second_is_feasible):
+            ctx = SpecContext("parallel-side-feasibility")
+            value = ctx.real("value")
+
+            def collect_zero(side_ctx):
+                side_ctx.assume(value.eq(side_ctx.zero()))
+                return value
+
+            def collect_second(side_ctx):
+                if second_is_feasible:
+                    side_ctx.assume(value.eq(side_ctx.one()))
+                else:
+                    side_ctx.assume(side_ctx.false())
+                return value
+
+            with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+                return ast_nodes.check_equivalence(
+                    ast_nodes._Spec("zero", collect_zero),
+                    ast_nodes._Spec("second", collect_second),
+                    base_ctx=ctx,
+                    inputs=[],
+                    schedule=[{"tool": "simplify"}],
+                    max_workers=max_workers,
+                )
+
+        for second_is_feasible in (True, False):
+            with self.subTest(second_is_feasible=second_is_feasible):
+                serial = run(1, second_is_feasible)
+                parallel = run(2, second_is_feasible)
+                self.assertEqual(serial["proved"], parallel["proved"])
+                self.assertEqual(
+                    self._case_summary(serial),
+                    self._case_summary(parallel),
+                )
+
+    def test_automatic_worker_count_uses_affinity_and_fallbacks(self):
+        with (
+            patch.object(
+                parallel_runner.os,
+                "sched_getaffinity",
+                return_value={2, 4},
+                create=True,
+            ),
+            patch.object(parallel_runner.os, "cpu_count") as cpu_count,
+        ):
+            self.assertEqual(parallel_runner.automatic_max_workers(), 2)
+            cpu_count.assert_not_called()
+
+        with (
+            patch.object(
+                parallel_runner.os,
+                "sched_getaffinity",
+                side_effect=OSError,
+                create=True,
+            ),
+            patch.object(parallel_runner.os, "cpu_count", return_value=7),
+        ):
+            self.assertEqual(parallel_runner.automatic_max_workers(), 7)
+
+        with (
+            patch.object(
+                parallel_runner.os,
+                "sched_getaffinity",
+                return_value=set(),
+                create=True,
+            ),
+            patch.object(parallel_runner.os, "cpu_count", return_value=None),
+        ):
+            self.assertEqual(parallel_runner.automatic_max_workers(), 1)
+
+    def test_invalid_worker_counts_are_rejected(self):
+        for invalid in (True, 1.5, "2", []):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(TypeError):
+                    parallel_runner.resolve_max_workers(invalid)
+        for invalid in (0, -1):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    parallel_runner.resolve_max_workers(invalid)
+
+    def test_parallel_submission_keeps_only_two_cases_per_worker_in_flight(self):
+        generated_count = 0
+        completed_count = 0
+        generation_leads = []
+
+        def cases():
+            nonlocal generated_count
+            for index in range(11):
+                generated_count += 1
+                yield SpecContext(f"bounded-{index}")
+
+        class ImmediateFuture:
+            def __init__(self, case_ctx):
+                self.case_ctx = case_ctx
+
+            def result(self):
+                return CaseVerificationResult(
+                    name=self.case_ctx.name,
+                    proved=True,
+                    status="unsat",
+                    feasibility_status="feasible",
+                    proof_trace=[],
+                    side_feasibility_reports=[],
+                )
+
+        class FakeExecutor:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def submit(self, _fn, case_ctx, *_args):
+                return ImmediateFuture(case_ctx)
+
+        def complete_one(futures, return_when):
+            nonlocal completed_count
+            self.assertEqual(return_when, parallel_runner.FIRST_COMPLETED)
+            generation_leads.append(generated_count - completed_count)
+            completed_count += 1
+            return {next(iter(futures))}, set(futures)
+
+        with (
+            patch.object(parallel_runner, "ProcessPoolExecutor", FakeExecutor),
+            patch.object(parallel_runner, "wait", side_effect=complete_one),
+        ):
+            results = parallel_runner._run_in_parallel(
+                cases(),
+                verify_case=lambda case_ctx: case_ctx,
+                verification_args=(),
+                observer=Mock(),
+                max_workers=2,
+            )
+
+        self.assertEqual(
+            [result["name"] for result in results],
+            [f"bounded-{index}" for index in range(11)],
+        )
+        self.assertLessEqual(max(generation_leads), 4)
+
+    def test_parallel_worker_exception_propagates(self):
+        ctx = SpecContext("parallel-worker-error")
+        value = ctx.real("value")
+        with self.assertRaisesRegex(ValueError, "Unknown schedule tool"):
+            ast_nodes.check_equivalence(
+                ast_nodes._Spec("first", lambda _ctx: value),
+                ast_nodes._Spec("second", lambda _ctx: value),
+                base_ctx=ctx,
+                inputs=[],
+                schedule=[{"tool": "not-a-tool"}],
+                observer=Mock(),
+                max_workers=2,
+            )
+
+
 class TestSpecificationDeterminism(unittest.TestCase):
     def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):
         def malformed_spec(x, ctx):
@@ -6179,6 +6421,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
                 base_ctx=base_ctx,
                 inputs=[],
                 schedule=[{"tool": "simplify"}],
+                max_workers=1,
             )
 
         self.assertFalse(result["proved"])

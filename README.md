@@ -78,6 +78,16 @@ classification cases so finite values, zeros, infinities, and NaNs are compared
 with the appropriate semantics. Both checks accept an optional solver schedule
 and return `{"proved": bool, "proof_traces": [...]}`.
 
+Classification cases run concurrently by default. Pass `max_workers=1` to
+`check_equivalence()`, `check_spec()`, or `check_determinism()` for serial
+verification, or pass a positive integer to bound the spawn-based process
+pool. The default uses the process-affinity CPU count when available, then
+falls back to `os.cpu_count()` and finally one worker. Cases are still returned
+in classification-generation order, while streaming observer notifications
+arrive in completion order. Parallel verification can create up to
+`max_workers` active solver child processes in addition to the case-worker
+processes; solver budgets and per-tool timeouts remain unchanged.
+
 ## Repository layout
 
 - `zolotone/spec/` — the math-level specification AST, `SpecContext`, and

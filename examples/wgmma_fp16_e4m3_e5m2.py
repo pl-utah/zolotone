@@ -10,7 +10,7 @@ N = 4
 
 def spec_wgmma_fp16_e4m3_e5m2(
     a0: e4m3fn, a1: e4m3fn, a2: e4m3fn, a3: e4m3fn,
-    b0: e5m2,   b1: e5m2,   b2: e5m2,   b3: e5m2,
+    b0: e5m2, b1: e5m2, b2: e5m2, b3: e5m2,
     c: fp16, ctx
 ):
     A = (a0, a1, a2, a3)

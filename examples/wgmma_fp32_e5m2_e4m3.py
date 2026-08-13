@@ -9,7 +9,9 @@ N = 4
 
 
 def spec_wgmma_fp32_e5m2_e4m3(
-    a0, a1, a2, a3, b0, b1, b2, b3, c, ctx
+    a0: e5m2, a1: e5m2, a2: e5m2, a3: e5m2,
+    b0: e4m3fn, b1: e4m3fn, b2: e4m3fn, b3: e4m3fn,
+    c: fp32, ctx
 ):
     A = (a0, a1, a2, a3)
     B = (b0, b1, b2, b3)
