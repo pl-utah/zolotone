@@ -317,13 +317,15 @@ def _run_design_subprocess(
         )
         try:
             returncode = process.wait(timeout=timeout_s)
-            status = "passed" if returncode == 0 else "failed"
+            status = None
         except subprocess.TimeoutExpired:
             _terminate_process_group(process)
             status = "timeout"
+            returncode = process.returncode
         except KeyboardInterrupt:
             _terminate_process_group(process)
             status = "interrupted"
+            returncode = process.returncode
         elapsed_s = time.perf_counter() - started_at
         if result_path.exists():
             design_result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -336,6 +338,14 @@ def _run_design_subprocess(
             }
         if status in {"timeout", "interrupted"}:
             check_result.update(status=status, proved=False)
+        elif (
+            returncode == 0
+            and check_result.get("status") == "passed"
+            and check_result.get("proved") is True
+        ):
+            status = "passed"
+        else:
+            status = "failed"
         check_result["elapsed_s"] = elapsed_s
         return status, check_result
 
@@ -480,6 +490,5 @@ def main(argv: list[str] | None = None) -> int:
         ) else 1
     return run_designs(report_path=args.report)
 
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

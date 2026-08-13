@@ -300,6 +300,13 @@ class TestMakeDesignsHtml(unittest.TestCase):
 
 
 class TestRunDesigns(unittest.TestCase):
+    def test_cli_does_not_raise_system_exit_for_unsuccessful_results(self):
+        with patch.object(design_runner, "main", return_value=1) as main:
+            result = design_runner.cli(["--report", "unused.json"])
+
+        self.assertIsNone(result)
+        main.assert_called_once_with(["--report", "unused.json"])
+
     def test_completed_case_journal_recovers_only_complete_cases(self):
         case_event = {
             "case_name": "complete-case",
@@ -829,6 +836,42 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(status, "timeout")
         terminate.assert_called_once_with(process)
         process.wait.assert_called_once_with(timeout=17.0)
+
+    def test_completed_worker_uses_report_status_instead_of_process_exit(self):
+        process = Mock(pid=1234, returncode=0)
+        process.wait.return_value = 0
+        failed_result = {
+            "checks": {
+                "specification": {
+                    "status": "failed",
+                    "proved": False,
+                    "cases": {},
+                }
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "result.json").write_text(
+                json.dumps(failed_result),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(
+                    design_runner.tempfile,
+                    "TemporaryDirectory",
+                    return_value=contextlib.nullcontext(temp_dir),
+                ),
+                patch.object(design_runner.subprocess, "Popen", return_value=process),
+            ):
+                status, result = design_runner._run_design_subprocess(
+                    "CSA_tree4",
+                    "specification",
+                    17.0,
+                )
+
+        self.assertEqual(status, "failed")
+        self.assertFalse(result["proved"])
 
 class TestEgglogRewriteRules(unittest.TestCase):
     def test_rewrite_rules_are_sound(self):
