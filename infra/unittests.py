@@ -66,10 +66,6 @@ from examples.converters import (
     fp32_to_ue4m3,
     ue4m3_to_fp32,
 )
-from examples.e4m3fnx2_e2m1x2_mult_fp32 import (
-    e4m3fnx2_e2m1x2_mult_fp32,
-    spec_e4m3fnx2_e2m1x2_mult_fp32,
-)
 from examples.ue4m3x2_e2m1x2_mult_fp32 import (
     spec_ue4m3x2_e2m1x2_mult_fp32,
     ue4m3x2_e2m1x2_mult_fp32,
@@ -79,6 +75,19 @@ from examples.bf16x8_dot_fp32_conventional import (
     dot_product_spec as bf16x8_dot_fp32_spec,
 )
 from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.wgmma import WGMMA_REGISTRY
+from examples.wgmma_fp16_e4m3_e5m2 import (
+    spec_wgmma_fp16_e4m3_e5m2,
+    wgmma_fp16_e4m3_e5m2,
+)
+from examples.wgmma_fp32_e4m3_e4m3 import (
+    spec_wgmma_fp32_e4m3_e4m3,
+    wgmma_fp32_e4m3_e4m3,
+)
+from examples.wgmma_fp32_e5m2_e4m3 import (
+    spec_wgmma_fp32_e5m2_e4m3,
+    wgmma_fp32_e5m2_e4m3,
+)
 
 from infra.compile_cpp import jit_compile, nonjit_compile
 from infra import make_designs_html
@@ -389,10 +398,12 @@ class TestRunDesigns(unittest.TestCase):
             *CONVERTER_REGISTRY,
             "fp32_add",
             "fp32_mult",
-            "e4m3fnx2_e2m1x2_mult_fp32",
             "ue4m3x2_e2m1x2_mult_fp32",
             "bf16x8_dot_fp32_conventional",
             "bf16x8_dot_fp32_optimized",
+            "wgmma_fp32_e4m3_e4m3",
+            "wgmma_fp32_e5m2_e4m3",
+            "wgmma_fp16_e4m3_e5m2",
         ]
 
         self.assertEqual(
@@ -408,15 +419,6 @@ class TestRunDesigns(unittest.TestCase):
             [arg.node_type for arg in csa.inner_args],
             [QT(10, 10)] * 4,
         )
-
-        mixed_multiplier = design_runner._find_design(
-            "e4m3fnx2_e2m1x2_mult_fp32"
-        ).build()
-        self.assertEqual(
-            [arg.node_type for arg in mixed_multiplier.inner_args],
-            [E4M3FNT(), E4M3FNT(), E2M1T(), E2M1T()],
-        )
-        self.assertEqual(mixed_multiplier.node_type, Float32T())
 
         unsigned_mixed_multiplier = design_runner._find_design(
             "ue4m3x2_e2m1x2_mult_fp32"
@@ -1068,6 +1070,69 @@ class TestConstantFolding(unittest.TestCase):
                     Const(UQ.from_int(amount_val)),
                 )
                 self.assert_folded_value(folded, UQ, expected)
+
+    def test_q_rshift_jam_is_sign_symmetric_and_handles_minimum(self):
+        value = Var(name="value", sign=QT(5, 0))
+        amount = Var(name="amount", sign=UQT(4, 0))
+        design = q_rshift_jam(value, amount)
+        self.assertIs(design.spec, q_rshift_jam_spec)
+        self.assertEqual(design.node_type, QT(5, 0))
+
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        cases = (
+            # input bits, shift, expected bits
+            (0b01000, 1, 0b00100),  # exact positive
+            (0b01001, 1, 0b00101),  # positive sticky
+            (0b11000, 1, 0b11100),  # exact negative
+            (0b10111, 1, 0b11011),  # negative sticky: -9 -> -5
+            (0b10000, 0, 0b10000),  # minimum value survives shift zero
+            (0b10000, 1, 0b11000),  # minimum value shifts to -8
+            (0b00100, 15, 0b00001),  # oversized positive shift jams
+            (0b11100, 15, 0b11111),  # oversized negative shift jams
+            (0b00000, 15, 0b00000),
+        )
+        try:
+            for input_bits, shift, expected_bits in cases:
+                value.load_val(Q(input_bits, 5, 0))
+                amount.load_val(UQ(shift, 4, 0))
+                with self.subTest(input_bits=input_bits, shift=shift):
+                    self.assertEqual(design.evaluate().val, expected_bits)
+                    self.assertEqual(compiled_jit(input_bits, shift), expected_bits)
+                    self.assertEqual(
+                        compiled_no_jit(input_bits, shift), expected_bits
+                    )
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
+
+    def test_q_resize_exactly_widens_signed_values(self):
+        value = Var(name="value", sign=QT(4, 2))
+        design = q_resize(value, 6, 5)
+        self.assertIs(design.spec, q_resize_spec)
+        self.assertEqual(design.node_type, QT(6, 5))
+
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        try:
+            for input_bits in range(1 << 6):
+                expected_bits = (
+                    (input_bits - (1 << 6) if input_bits & (1 << 5) else input_bits)
+                    << 3
+                ) & ((1 << 11) - 1)
+                value.load_val(Q(input_bits, 4, 2))
+                with self.subTest(input_bits=input_bits):
+                    self.assertEqual(design.evaluate().val, expected_bits)
+                    self.assertEqual(compiled_jit(input_bits), expected_bits)
+                    self.assertEqual(compiled_no_jit(input_bits), expected_bits)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
+
+        with self.assertRaisesRegex(ValueError, "integer field"):
+            q_resize(value, 3, 2)
+        with self.assertRaisesRegex(ValueError, "fractional field"):
+            q_resize(value, 4, 1)
 
     def test_conventional_and_optimized_match_on_cancellation_regression(self):
         vals = [43160, 10458, 11062, 10989, 10589, 10469, 11020, 11013]
@@ -4482,182 +4547,354 @@ class TestBFloat16Mult(unittest.TestCase):
             tempdir_no_jit.cleanup()
 
 
-class TestE4M3FNx2E2M1x2MultFP32(unittest.TestCase):
-    @staticmethod
-    def _reference_bits(a0, a1, b0, b1):
-        if a0.is_nan or a1.is_nan:
-            return Float32.NaN().val
-
-        sign = a0.sign ^ a1.sign ^ b0.sign ^ b1.sign
-        values = (a0, a1, b0, b1)
-        if any(value.exponent == 0 and value.mantissa == 0 for value in values):
-            return Float32.nZero().val if sign else Float32.Zero().val
-
-        product = a0.to_val() * a1.to_val() * b0.to_val() * b1.to_val()
-        return struct.unpack(">I", struct.pack(">f", product))[0]
-
-    @staticmethod
-    def _cases():
-        return (
-            ("identity", 0x38, 0x38, 0x2, 0x2, 0x3F800000),
-            ("mixed-signs", 0xB8, 0x40, 0x3, 0x1, 0xBFC00000),
-            ("subnormal-and-normal", 0x03, 0x40, 0x1, 0x4, 0x3C400000),
-            ("minimum-nonzero", 0x01, 0x01, 0x1, 0x1, 0x35800000),
-            ("maximum", 0x7E, 0x7E, 0x7, 0x7, 0x4ADC8000),
-            ("a0-negative-zero", 0x80, 0x38, 0x2, 0x2, 0x80000000),
-            ("a1-negative-zero", 0x38, 0x80, 0x2, 0x2, 0x80000000),
-            ("b0-negative-zero", 0x38, 0x38, 0x8, 0x2, 0x80000000),
-            ("b1-negative-zero", 0x38, 0x38, 0x2, 0x8, 0x80000000),
-            ("even-negative-zero", 0x80, 0xB8, 0x2, 0x2, 0x00000000),
-            ("positive-zero-odd-sign", 0x00, 0xB8, 0x2, 0x2, 0x80000000),
-            ("nan-precedes-zero", 0x7F, 0x00, 0x8, 0x2, 0x7FC00000),
-            ("negative-nan-is-canonical", 0xFF, 0x38, 0x2, 0x2, 0x7FC00000),
-        )
-
-    def _make_design(self):
-        a0 = Var(name="a0", sign=E4M3FNT())
-        a1 = Var(name="a1", sign=E4M3FNT())
-        b0 = Var(name="b0", sign=E2M1T())
-        b1 = Var(name="b1", sign=E2M1T())
-        return (a0, a1, b0, b1), e4m3fnx2_e2m1x2_mult_fp32(
-            a0, a1, b0, b1
-        )
+class TestReducedWGMMA(unittest.TestCase):
+    CONFIGURATIONS = {
+        "wgmma_fp32_e4m3_e4m3": (
+            wgmma_fp32_e4m3_e4m3,
+            [E4M3FN] * 8,
+            [E4M3FNT()] * 8 + [Float32T()],
+            Float32,
+            34,
+        ),
+        "wgmma_fp32_e5m2_e4m3": (
+            wgmma_fp32_e5m2_e4m3,
+            [E5M2] * 4 + [E4M3FN] * 4,
+            [E5M2T()] * 4 + [E4M3FNT()] * 4 + [Float32T()],
+            Float32,
+            48,
+        ),
+        "wgmma_fp16_e4m3_e5m2": (
+            wgmma_fp16_e4m3_e5m2,
+            [E4M3FN] * 4 + [E5M2] * 4,
+            [E4M3FNT()] * 4 + [E5M2T()] * 4 + [Float16T()],
+            Float16,
+            48,
+        ),
+    }
 
     @staticmethod
-    def _load(variables, bits):
-        variables[0].load_val(E4M3FN(bits[0]))
-        variables[1].load_val(E4M3FN(bits[1]))
-        variables[2].load_val(E2M1(bits[2]))
-        variables[3].load_val(E2M1(bits[3]))
+    def _make_design(function, static_types):
+        variables = [
+            Var(name=f"x{index}", sign=type_.copy())
+            for index, type_ in enumerate(static_types)
+        ]
+        return variables, function(*variables)
 
-    def test_golden_spec_returns_fp32(self):
-        ctx = SpecContext("e4m3fnx2-e2m1x2-mult-fp32-spec")
-        values = (
-            E4M3FNT().to_spec("a0", ctx),
-            E4M3FNT().to_spec("a1", ctx),
-            E2M1T().to_spec("b0", ctx),
-            E2M1T().to_spec("b1", ctx),
+    @staticmethod
+    def _finite_fraction(value):
+        if isinstance(value, E4M3FN):
+            mantissa_bits, bias = 3, 7
+        elif isinstance(value, E5M2):
+            mantissa_bits, bias = 2, 15
+        elif isinstance(value, Float32):
+            mantissa_bits, bias = 23, 127
+        else:
+            mantissa_bits, bias = 10, 15
+
+        if value.exponent == 0:
+            significand = value.mantissa
+            exponent = 1 - bias - mantissa_bits
+        else:
+            significand = (1 << mantissa_bits) + value.mantissa
+            exponent = value.exponent - bias - mantissa_bits
+        scale = (
+            Fraction(1 << exponent)
+            if exponent >= 0
+            else Fraction(1, 1 << -exponent)
         )
+        result = significand * scale
+        return -result if value.sign else result
 
-        result = spec_e4m3fnx2_e2m1x2_mult_fp32(*values, ctx)
-
-        self.assertIsInstance(result, fp32)
-
-    def test_default_schedule_proves_all_normal_output_case(self):
-        _, design = self._make_design()
-        target_name = (
-            "e4m3fnx2_e2m1x2_mult_fp32["
-            "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
-        )
-        split_classification_cases = ast_nodes._split_classification_cases
-
-        def select_target_case(*args, **kwargs):
-            cases = split_classification_cases(*args, **kwargs)
-            return [next(case for case in cases if case.name == target_name)]
-
-        with (
-            patch.object(
-                ast_nodes,
-                "_split_classification_cases",
-                side_effect=select_target_case,
-            ),
-            contextlib.redirect_stdout(io.StringIO()),
+    @staticmethod
+    def _round_even(value):
+        quotient, remainder = divmod(value.numerator, value.denominator)
+        if 2 * remainder > value.denominator or (
+            2 * remainder == value.denominator and quotient & 1
         ):
-            result = design.check_spec()
+            quotient += 1
+        return quotient
 
-        self.assertTrue(result["proved"])
-        proof_trace = result["case_results"][0]["proof_trace"]
-        self.assertEqual(proof_trace[-1]["status"], "unsat")
-        self.assertNotIn("z3", [report["tool"] for report in proof_trace])
+    @classmethod
+    def _encode_fraction(cls, value, destination):
+        sign = int(value < 0)
+        magnitude = abs(value)
+        if magnitude == 0:
+            return destination.Zero().val
 
-    def test_default_schedule_proves_e4m3fn_subnormal_output_case(self):
-        _, design = self._make_design()
-        target_name = (
-            "e4m3fnx2_e2m1x2_mult_fp32["
-            "arg0=norm,arg1=sub,arg2=norm,arg3=norm,output=norm]"
+        mantissa_bits = destination.mantissa_bits
+        minimum_quantum_exponent = (
+            1 - destination.exponent_bias - mantissa_bits
         )
-        split_classification_cases = ast_nodes._split_classification_cases
+        if minimum_quantum_exponent < 0:
+            subnormal_units = magnitude * (1 << -minimum_quantum_exponent)
+        else:
+            subnormal_units = magnitude / (1 << minimum_quantum_exponent)
+        significand = cls._round_even(subnormal_units)
+        if significand < (1 << mantissa_bits):
+            return destination.from_fields(sign, 0, significand).val
 
-        def select_target_case(*args, **kwargs):
-            cases = split_classification_cases(*args, **kwargs)
-            return [next(case for case in cases if case.name == target_name)]
+        exponent = (
+            magnitude.numerator.bit_length()
+            - magnitude.denominator.bit_length()
+        )
+        power = (
+            Fraction(1 << exponent)
+            if exponent >= 0
+            else Fraction(1, 1 << -exponent)
+        )
+        if power > magnitude:
+            exponent -= 1
+        shift = exponent - mantissa_bits
+        scaled = (
+            magnitude / (1 << shift)
+            if shift >= 0
+            else magnitude * (1 << -shift)
+        )
+        significand = cls._round_even(scaled)
+        if significand == (1 << (mantissa_bits + 1)):
+            significand >>= 1
+            exponent += 1
 
-        with (
-            patch.object(
-                ast_nodes,
-                "_split_classification_cases",
-                side_effect=select_target_case,
-            ),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            result = design.check_spec()
+        biased_exponent = exponent + destination.exponent_bias
+        if biased_exponent >= destination.inf_code:
+            return destination.nInf().val if sign else destination.Inf().val
+        return destination.from_fields(
+            sign,
+            biased_exponent,
+            significand - (1 << mantissa_bits),
+        ).val
 
-        self.assertTrue(result["proved"])
-        proof_trace = result["case_results"][0]["proof_trace"]
-        self.assertEqual(proof_trace[-1]["status"], "unsat")
-        self.assertNotIn("z3", [report["tool"] for report in proof_trace])
-
-    def test_exact_boundaries_signs_zeros_and_nan_precedence(self):
-        variables, design = self._make_design()
-        for name, a0, a1, b0, b1, expected in self._cases():
-            with self.subTest(case=name):
-                self._load(variables, (a0, a1, b0, b1))
-                self.assertEqual(design.evaluate().val, expected)
-
-    def test_random_finite_inputs_match_host_fp32_bits(self):
-        variables, design = self._make_design()
-        finite_e4m3fn = [bits for bits in range(256) if bits & 0x7F != 0x7F]
-        rng = random.Random(0)
-
-        for _ in range(500):
-            values = (
-                E4M3FN(rng.choice(finite_e4m3fn)),
-                E4M3FN(rng.choice(finite_e4m3fn)),
-                E2M1(rng.randrange(16)),
-                E2M1(rng.randrange(16)),
-            )
-            for variable, value in zip(variables, values):
-                variable.load_val(value)
-
-            with self.subTest(inputs=tuple(value.val for value in values)):
-                self.assertEqual(
-                    design.evaluate().val,
-                    self._reference_bits(*values),
-                )
-
-    def test_jit_and_nonjit_cpp_match_reference(self):
-        variables, design = self._make_design()
-        tempdir_jit, compiled_jit = jit_compile(design)
-        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
-        finite_e4m3fn = [bits for bits in range(256) if bits & 0x7F != 0x7F]
-        rng = random.Random(1)
-        inputs = [case[1:5] for case in self._cases()]
-        inputs.extend(
+    @classmethod
+    def _finite_reference(cls, values, destination):
+        exact = cls._finite_fraction(values[-1])
+        exact += sum(
             (
-                rng.choice(finite_e4m3fn),
-                rng.choice(finite_e4m3fn),
-                rng.randrange(16),
-                rng.randrange(16),
-            )
-            for _ in range(100)
+                cls._finite_fraction(values[index])
+                * cls._finite_fraction(values[index + 4])
+                for index in range(4)
+            ),
+            Fraction(),
         )
-        try:
-            for bits in inputs:
-                values = (
-                    E4M3FN(bits[0]),
-                    E4M3FN(bits[1]),
-                    E2M1(bits[2]),
-                    E2M1(bits[3]),
+        return cls._encode_fraction(exact, destination)
+
+    @staticmethod
+    def _load(variables, values):
+        for variable, value in zip(variables, values):
+            variable.load_val(value)
+
+    def test_public_registry_signatures_and_topology(self):
+        self.assertEqual(set(WGMMA_REGISTRY), set(self.CONFIGURATIONS))
+        for name, (function, _runtime_types, static_types, _destination, width) in (
+            self.CONFIGURATIONS.items()
+        ):
+            variables, design = self._make_design(function, static_types)
+            with self.subTest(model=name):
+                self.assertEqual(
+                    [variable.node_type for variable in variables], static_types
                 )
-                expected = self._reference_bits(*values)
-                self._load(variables, bits)
-                with self.subTest(inputs=bits):
-                    self.assertEqual(design.evaluate().val, expected)
-                    self.assertEqual(compiled_jit(*bits), expected)
-                    self.assertEqual(compiled_no_jit(*bits), expected)
-        finally:
-            tempdir_jit.cleanup()
-            tempdir_no_jit.cleanup()
+                self.assertEqual(design.node_type, static_types[-1])
+
+                visited = set()
+                nodes = []
+
+                def visit(node):
+                    if node in visited:
+                        return
+                    visited.add(node)
+                    nodes.append(node)
+                    for argument in getattr(node, "args", ()):
+                        visit(argument)
+
+                visit(design.inner_tree)
+                names = [node.name for node in nodes if hasattr(node, "name")]
+                self.assertNotIn("CSA_tree4", names)
+                self.assertIn("q_add", names)
+                self.assertIn("uq_max", names)
+                exact_product_resizes = [
+                    node
+                    for node in nodes
+                    if getattr(node, "name", None) == "uq_resize"
+                    and isinstance(node.node_type, UQT)
+                    and node.node_type.int_bits == 2
+                    and node.node_type.frac_bits == width
+                ]
+                self.assertEqual(len(exact_product_resizes), 4)
+
+    def test_golden_specs_return_destination_types(self):
+        configurations = (
+            (
+                spec_wgmma_fp32_e4m3_e4m3,
+                [E4M3FNT()] * 8 + [Float32T()],
+                fp32,
+            ),
+            (
+                spec_wgmma_fp32_e5m2_e4m3,
+                [E5M2T()] * 4 + [E4M3FNT()] * 4 + [Float32T()],
+                fp32,
+            ),
+            (
+                spec_wgmma_fp16_e4m3_e5m2,
+                [E4M3FNT()] * 4 + [E5M2T()] * 4 + [Float16T()],
+                fp16,
+            ),
+        )
+        for index, (spec, types, expected_type) in enumerate(configurations):
+            ctx = SpecContext(f"wgmma-spec-type-{index}")
+            values = [
+                type_.to_spec(f"x{position}", ctx)
+                for position, type_ in enumerate(types)
+            ]
+            self.assertIsInstance(spec(*values, ctx), expected_type)
+
+    def test_finite_subnormal_cancellation_and_passthrough_cases(self):
+        one = {E4M3FN: 0x38, E5M2: 0x3C}
+        for name, (function, runtime_types, static_types, destination, _width) in (
+            self.CONFIGURATIONS.items()
+        ):
+            variables, design = self._make_design(function, static_types)
+            destination_zero = destination.Zero()
+            cases = []
+            cases.append([runtime_type(one[runtime_type]) for runtime_type in runtime_types] + [destination_zero])
+            cases.append(
+                [
+                    runtime_type(one[runtime_type] | (0x80 if index == 0 else 0))
+                    for index, runtime_type in enumerate(runtime_types)
+                ]
+                + [destination_zero]
+            )
+            # Every FP8 lane position participates correctly when subnormal.
+            for position in range(8):
+                cases.append(
+                    [
+                        runtime_type(0x01 if index == position else one[runtime_type])
+                        for index, runtime_type in enumerate(runtime_types)
+                    ]
+                    + [destination_zero]
+                )
+            # Exact product cancellation must leave C unchanged.
+            cancel = [runtime_type(one[runtime_type]) for runtime_type in runtime_types]
+            cancel[0] = runtime_types[0](one[runtime_types[0]] | 0x80)
+            cancel[1] = runtime_types[1](one[runtime_types[1]] | 0x80)
+            c_value = destination.from_fields(0, destination.exponent_bias - 3, 1)
+            cases.append(cancel + [c_value])
+
+            for values in cases:
+                self._load(variables, values)
+                with self.subTest(model=name, inputs=[value.val for value in values]):
+                    self.assertEqual(
+                        design.evaluate().val,
+                        self._finite_reference(values, destination),
+                    )
+
+    def test_nan_infinity_zero_product_and_overflow(self):
+        one4 = E4M3FN(0x38)
+        one5 = E5M2(0x3C)
+
+        variables, mixed = self._make_design(
+            wgmma_fp32_e5m2_e4m3,
+            [E5M2T()] * 4 + [E4M3FNT()] * 4 + [Float32T()],
+        )
+        cases = (
+            ([E5M2.NaN(), one5, one5, one5] + [one4] * 4 + [Float32.Zero()], Float32.NaN()),
+            ([E5M2.Inf(), one5, one5, one5] + [E4M3FN.Zero(), one4, one4, one4] + [Float32.Zero()], Float32.NaN()),
+            ([E5M2.Inf(), E5M2.nInf(), one5, one5] + [one4] * 4 + [Float32.Zero()], Float32.NaN()),
+            ([E5M2.Inf(), one5, one5, one5] + [one4] * 4 + [Float32.nInf()], Float32.NaN()),
+            ([E5M2.nInf(), one5, one5, one5] + [one4] * 4 + [Float32.nInf()], Float32.nInf()),
+            ([one5] * 4 + [one4] * 4 + [Float32.NaN()], Float32.NaN()),
+            ([one5] * 4 + [one4] * 4 + [Float32.Inf()], Float32.Inf()),
+        )
+        for values, expected in cases:
+            self._load(variables, values)
+            self.assertEqual(mixed.evaluate().val, expected.val)
+
+        variables, half = self._make_design(
+            wgmma_fp16_e4m3_e5m2,
+            [E4M3FNT()] * 4 + [E5M2T()] * 4 + [Float16T()],
+        )
+        overflow_values = [E4M3FN(0x7E)] * 4 + [E5M2(0x7B)] * 4 + [Float16.Zero()]
+        self._load(variables, overflow_values)
+        self.assertEqual(half.evaluate().val, Float16.Inf().val)
+
+        nan_accumulator_values = [one4] * 4 + [one5] * 4 + [Float16.NaN()]
+        self._load(variables, nan_accumulator_values)
+        self.assertEqual(half.evaluate().val, Float16.NaN().val)
+
+    def test_accumulation_is_fused_instead_of_staged(self):
+        configurations = (
+            (
+                wgmma_fp16_e4m3_e5m2,
+                [E4M3FNT()] * 4 + [E5M2T()] * 4 + [Float16T()],
+                [
+                    E4M3FN(0x7B),
+                    E4M3FN(0x9A),
+                    E4M3FN(0x54),
+                    E4M3FN(0x69),
+                    E5M2(0x3C),
+                    E5M2(0xD2),
+                    E5M2(0xC9),
+                    E5M2(0xAC),
+                    Float16(0xAFD0),
+                ],
+                0x5B39,
+                0x5B3A,
+            ),
+            (
+                wgmma_fp32_e5m2_e4m3,
+                [E5M2T()] * 4 + [E4M3FNT()] * 4 + [Float32T()],
+                [
+                    E5M2(0x35),
+                    E5M2(0xE5),
+                    E5M2(0x88),
+                    E5M2(0xC9),
+                    E4M3FN(0x79),
+                    E4M3FN(0x2A),
+                    E4M3FN(0xB6),
+                    E4M3FN(0x39),
+                    Float32(0xCF39B00F),
+                ],
+                0xCF39B010,
+                0xCF39B011,
+            ),
+        )
+        for function, types, values, fused, staged in configurations:
+            variables, design = self._make_design(function, types)
+            self._load(variables, values)
+            self.assertNotEqual(fused, staged)
+            self.assertEqual(design.evaluate().val, fused)
+
+    def test_random_finite_python_jit_and_nonjit_match_exact_reference(self):
+        rng = random.Random(314159)
+        for name, (function, runtime_types, static_types, destination, _width) in (
+            self.CONFIGURATIONS.items()
+        ):
+            variables, design = self._make_design(function, static_types)
+            tempdir_jit, compiled_jit = jit_compile(design)
+            tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+            try:
+                for _ in range(24):
+                    values = []
+                    for runtime_type in [*runtime_types, destination]:
+                        bits = 32 if runtime_type is Float32 else 16 if runtime_type is Float16 else 8
+                        while True:
+                            value = runtime_type(rng.getrandbits(bits))
+                            exponent_is_special = (
+                                hasattr(runtime_type, "inf_code")
+                                and value.exponent == runtime_type.inf_code
+                            )
+                            e4m3_nan = isinstance(value, E4M3FN) and value.is_nan
+                            if not exponent_is_special and not e4m3_nan:
+                                break
+                        values.append(value)
+                    expected = self._finite_reference(values, destination)
+                    packed = [value.val for value in values]
+                    self._load(variables, values)
+                    with self.subTest(model=name, inputs=packed):
+                        self.assertEqual(design.evaluate().val, expected)
+                        self.assertEqual(compiled_jit(*packed), expected)
+                        self.assertEqual(compiled_no_jit(*packed), expected)
+            finally:
+                tempdir_jit.cleanup()
+                tempdir_no_jit.cleanup()
 
 
 class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):

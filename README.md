@@ -89,8 +89,8 @@ and return `{"proved": bool, "proof_traces": [...]}`.
 - `zolotone/solver/`, `zolotone/smt/`, and `zolotone/egglog/` — proof scheduling
   and solver integrations.
 - `zolotone/codegen/` — C++ generation for implementation models.
-- `examples/` — FP32 arithmetic, FP32 format converters, and
-  conventional/optimized BF16 dot-product implementations with golden
+- `examples/` — FP32 arithmetic, FP32 format converters, conventional/optimized
+  BF16 dot products, and reduced WGMMA dot-accumulate models with golden
   specifications. See `examples/converters/README.md` for converter semantics.
 - `docs/operators.md` — available implementation operators and primitives.
 
@@ -117,6 +117,27 @@ To inspect and verify the example designs directly:
 
 Each command builds the typed implementation model, prints its structure,
 checks it against the golden specification, and emits a C++ header.
+
+## Reduced WGMMA examples
+
+`examples.wgmma` provides deterministic scalar models of
+`fp32.e4m3.e4m3`, `fp32.e5m2.e4m3`, and `fp16.e4m3.e5m2`. Each computes
+
+```text
+D = C + a0*b0 + a1*b1 + a2*b2 + a3*b3
+```
+
+as an ideal fused operation: FP8 products and accumulation are exact, followed
+by one round-to-nearest-even encoding to FP32 or FP16. PTX does not prescribe
+the hardware WGMMA accumulation order, rounding, or subnormal behavior, so
+these reduced models intentionally define a deterministic contract rather than
+the literal K=32 hardware instruction shape. They do not model transpose,
+operand scaling, or an optional accumulator enable.
+
+Run any model module directly—for example,
+`python -m examples.wgmma_fp32_e4m3_e4m3`—to check it and emit its JIT and
+non-JIT headers under `examples/c_models/`. Generated headers are ignored by
+Git.
 
 ## Rival3 bridge
 

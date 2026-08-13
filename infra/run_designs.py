@@ -37,11 +37,24 @@ from examples.converters import (
     CONVERTER_REGISTRY,
     FORMAT_STATIC_TYPES,
 )
-from examples.e4m3fnx2_e2m1x2_mult_fp32 import e4m3fnx2_e2m1x2_mult_fp32
 from examples.ue4m3x2_e2m1x2_mult_fp32 import ue4m3x2_e2m1x2_mult_fp32
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
-from zolotone import BFloat16T, E2M1T, E4M3FNT, Float32T, Node, QT, UE4M3T, Var
+from examples.wgmma_fp16_e4m3_e5m2 import wgmma_fp16_e4m3_e5m2
+from examples.wgmma_fp32_e4m3_e4m3 import wgmma_fp32_e4m3_e4m3
+from examples.wgmma_fp32_e5m2_e4m3 import wgmma_fp32_e5m2_e4m3
+from zolotone import (
+    BFloat16T,
+    E2M1T,
+    E4M3FNT,
+    E5M2T,
+    Float16T,
+    Float32T,
+    Node,
+    QT,
+    UE4M3T,
+    Var,
+)
 from zolotone.solver import CaseVerificationResult
 
 
@@ -98,15 +111,6 @@ def _build_fp32_mult() -> Node:
     )
 
 
-def _build_e4m3fnx2_e2m1x2_mult_fp32() -> Node:
-    return e4m3fnx2_e2m1x2_mult_fp32(
-        Var(name="a0", sign=E4M3FNT()),
-        Var(name="a1", sign=E4M3FNT()),
-        Var(name="b0", sign=E2M1T()),
-        Var(name="b1", sign=E2M1T()),
-    )
-
-
 def _build_ue4m3x2_e2m1x2_mult_fp32() -> Node:
     return ue4m3x2_e2m1x2_mult_fp32(
         Var(name="a0", sign=UE4M3T()),
@@ -131,6 +135,30 @@ def _build_optimized_dot_product() -> Node:
     return bf16x8_dot_fp32_optimized(*_dot_product_args())
 
 
+def _build_wgmma_fp32_e4m3_e4m3() -> Node:
+    return wgmma_fp32_e4m3_e4m3(
+        *[Var(name=f"a{index}", sign=E4M3FNT()) for index in range(4)],
+        *[Var(name=f"b{index}", sign=E4M3FNT()) for index in range(4)],
+        Var(name="c", sign=Float32T()),
+    )
+
+
+def _build_wgmma_fp32_e5m2_e4m3() -> Node:
+    return wgmma_fp32_e5m2_e4m3(
+        *[Var(name=f"a{index}", sign=E5M2T()) for index in range(4)],
+        *[Var(name=f"b{index}", sign=E4M3FNT()) for index in range(4)],
+        Var(name="c", sign=Float32T()),
+    )
+
+
+def _build_wgmma_fp16_e4m3_e5m2() -> Node:
+    return wgmma_fp16_e4m3_e5m2(
+        *[Var(name=f"a{index}", sign=E4M3FNT()) for index in range(4)],
+        *[Var(name=f"b{index}", sign=E5M2T()) for index in range(4)],
+        Var(name="c", sign=Float16T()),
+    )
+
+
 DESIGNS = (
     DesignCase("CSA_tree4", _build_csa_tree4),
     DesignCase("bf16_add", _build_bf16_add),
@@ -140,15 +168,14 @@ DESIGNS = (
     DesignCase("fp32_add", _build_fp32_add),
     DesignCase("fp32_mult", _build_fp32_mult),
     DesignCase(
-        "e4m3fnx2_e2m1x2_mult_fp32",
-        _build_e4m3fnx2_e2m1x2_mult_fp32,
-    ),
-    DesignCase(
         "ue4m3x2_e2m1x2_mult_fp32",
         _build_ue4m3x2_e2m1x2_mult_fp32,
     ),
     DesignCase("bf16x8_dot_fp32_conventional", _build_conventional_dot_product),
     DesignCase("bf16x8_dot_fp32_optimized", _build_optimized_dot_product),
+    DesignCase("wgmma_fp32_e4m3_e4m3", _build_wgmma_fp32_e4m3_e4m3),
+    DesignCase("wgmma_fp32_e5m2_e4m3", _build_wgmma_fp32_e5m2_e4m3),
+    DesignCase("wgmma_fp16_e4m3_e5m2", _build_wgmma_fp16_e4m3_e5m2),
 )
 
 

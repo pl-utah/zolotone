@@ -80,6 +80,7 @@
 | `q_aligner` | Primitive | `Q<I1,F1> -> Q<I2,F2> -> int_aggr<int -> int -> int> -> frac_aggr<int -> int -> int> -> (Q<int_aggr(I1,I2), frac_aggr(F1,F2)> x Q<int_aggr(I1,I2), frac_aggr(F1,F2)>)` | Align two Qs to a common width. |
 | `q_sign_bit` | Primitive | `Q<I,F> -> UQ<1,0>` | MSB of two's complement value. |
 | `q_sign_extend` | Primitive | `Q<I,F> -> n<int> -> Q<I+n, F>` | Extend sign into high bits. |
+| `q_resize` | Primitive | `Q<I,F> -> I2<int> -> F2<int> -> Q<I2,F2>` | Exact signed widening; rejects integer or fractional narrowing. |
 | `q_neg` | Primitive | `Q<I,F> -> Q<I,F>` | Two's complement negate (special-case overflow at min). |
 | `q_signs_xor` | Primitive | `Q<I1,F1> -> Q<I2,F2> -> Bool<1>` | Sign mismatch (xor of sign bits). |
 | `q_add` | Primitive | `Q<I1,F1> -> Q<I2,F2> -> Q<max(I1,I2)+1, max(F1,F2)>` | Signed addition with alignment. |
@@ -93,6 +94,7 @@
 | `q_not_equal` | Primitive | `Q<I1,F1> -> Q<I2,F2> -> Bool<1>` | Signed inequality. |
 | `q_lshift` | Primitive | `Q<I,F> -> Any -> Q<I,F>` | Logical left shift without resize. |
 | `q_rshift` | Primitive | `Q<I,F> -> Any -> Q<I,F>` | Arithmetic right shift without resize. |
+| `q_rshift_jam` | Primitive | `Q<I,F> -> Any -> Q<I,F>` | Sign-symmetric right shift; jams discarded magnitude bits into the low bit and safely handles the minimum two's-complement input. |
 | `q_to_uq` | Primitive | `Q<I,F> -> UQ<I-1, F>` | Drop sign bit (assumes non-negative). |
 | `q_add_sign` | Primitive | `Q<I,F> -> UQ<1,0> -> Q<I,F>` | Apply sign bit to unsigned magnitude. |
 | `q_abs` | Primitive | `Q<I,F> -> Q<I,F>` | Absolute value (safe at min). |
