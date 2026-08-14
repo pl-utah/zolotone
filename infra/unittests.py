@@ -13,7 +13,7 @@ import tempfile
 import time
 from fractions import Fraction
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import dreal
 import math
@@ -360,6 +360,28 @@ class TestRunDesigns(unittest.TestCase):
         )
         self.assertEqual(worker_args.design, "bf16_relu")
         self.assertEqual(worker_args.check, "specification")
+
+    def test_worker_main_returns_zero_without_running_full_suite(self):
+        with (
+            patch.object(design_runner, "check_design", return_value=False) as check,
+            patch.object(design_runner, "run_designs") as run_all,
+        ):
+            status = design_runner.main(
+                [
+                    "--design",
+                    "bf16_relu",
+                    "--check",
+                    "specification",
+                    "--result-file",
+                    "result.json",
+                    "--completed-cases-file",
+                    "completed.jsonl",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        check.assert_called_once()
+        run_all.assert_not_called()
 
     def test_runner_supports_direct_script_execution(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -830,6 +852,65 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(status, "timeout")
         terminate.assert_called_once_with(process)
         process.wait.assert_called_once_with(timeout=17.0)
+
+    def test_unexpected_worker_wait_error_terminates_process_group(self):
+        process = Mock(pid=1234)
+        process.wait.side_effect = RuntimeError("wait failed")
+
+        with (
+            patch.object(design_runner.subprocess, "Popen", return_value=process),
+            patch.object(design_runner, "_terminate_process_group") as terminate,
+            self.assertRaisesRegex(RuntimeError, "wait failed"),
+        ):
+            design_runner._run_design_subprocess(
+                "CSA_tree4",
+                "determinism",
+                17.0,
+            )
+
+        terminate.assert_called_once_with(process)
+
+    def test_terminal_signals_manage_detached_design_group(self):
+        process = Mock(pid=1234)
+        process.poll.return_value = None
+        installed_handlers = {}
+
+        def install(signum, handler):
+            installed_handlers.setdefault(signum, handler)
+
+        with (
+            patch.object(design_runner.signal, "getsignal", return_value=Mock()),
+            patch.object(design_runner.signal, "signal", side_effect=install),
+            patch.object(design_runner.os, "killpg") as killpg,
+            patch.object(design_runner.os, "kill") as kill,
+        ):
+            with design_runner._manage_design_process_signals(process):
+                installed_handlers[signal.SIGTSTP](signal.SIGTSTP, None)
+                for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+                    with self.assertRaises(KeyboardInterrupt):
+                        installed_handlers[signum](signum, None)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                call(1234, signal.SIGSTOP),
+                call(1234, signal.SIGCONT),
+            ],
+        )
+        kill.assert_called_once_with(os.getpid(), signal.SIGSTOP)
+
+    def test_process_group_exit_race_still_reaps_child(self):
+        process = Mock(pid=1234)
+        process.poll.return_value = None
+
+        with patch.object(
+            design_runner.os,
+            "killpg",
+            side_effect=ProcessLookupError,
+        ):
+            design_runner._terminate_process_group(process)
+
+        process.wait.assert_called_once_with()
 
 class TestEgglogRewriteRules(unittest.TestCase):
     def test_rewrite_rules_are_sound(self):
@@ -6883,6 +6964,34 @@ class TestSolverApis(unittest.TestCase):
 
         self.assertEqual(reports[0]["status"], "unknown")
         self.assertEqual(reports[0]["wall_clock_timeout_s"], 0.01)
+
+    def test_run_tool_reaps_child_when_wait_is_interrupted(self):
+        ctx = SpecContext("interrupted-tool")
+        parent_pipe = Mock()
+        child_pipe = Mock()
+        process = Mock(sentinel=object())
+        process.is_alive.return_value = True
+        process_ctx = Mock()
+        process_ctx.Pipe.return_value = (parent_pipe, child_pipe)
+        process_ctx.Process.return_value = process
+
+        with (
+            patch.object(
+                solver_engine.multiprocessing,
+                "get_context",
+                return_value=process_ctx,
+            ),
+            patch.object(solver_engine, "wait", side_effect=KeyboardInterrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            solver_engine._run_tool(
+                ctx,
+                {"tool": "z3", "timeout_ms": 1},
+            )
+
+        process.terminate.assert_called_once_with()
+        process.join.assert_called_once_with()
+        parent_pipe.close.assert_called_once_with()
 
     def test_spec_context_is_pickleable(self):
         ctx = SpecContext("pickle-context")

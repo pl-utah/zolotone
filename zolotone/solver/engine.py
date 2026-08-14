@@ -140,37 +140,44 @@ def _run_tool(ctx: SpecContext, step: dict[str, Any], timeout=DEFAULT_TOOL_TIMEO
     )
 
     started_at = perf_counter()
-    process.start()
-    child_pipe.close()
-    ready = wait([parent_pipe, process.sentinel], timeout=timeout)
+    started = False
+    try:
+        process.start()
+        started = True
+        child_pipe.close()
+        ready = wait([parent_pipe, process.sentinel], timeout=timeout)
 
-    if not ready:
-        process.terminate()
+        if not ready:
+            process.terminate()
+            process.join()
+            return [
+                build_proof_report(
+                    ctx,
+                    ctx.copy(),
+                    tool=tool,
+                    runtime_s=perf_counter() - started_at,
+                    status="unknown",
+                    wall_clock_timeout_s=timeout,
+                    **kwargs,
+                )
+            ]
+
+        if not parent_pipe.poll():
+            process.join()
+            raise RuntimeError(f"{tool} worker exited without returning a result")
+
+        status, result = pickle.loads(parent_pipe.recv_bytes())
         process.join()
+        if status == "error":
+            raise RuntimeError(f"{tool} worker failed: {result}")
+        return result
+    finally:
+        child_pipe.close()
         parent_pipe.close()
-        return [
-            build_proof_report(
-                ctx,
-                ctx.copy(),
-                tool=tool,
-                runtime_s=perf_counter() - started_at,
-                status="unknown",
-                wall_clock_timeout_s=timeout,
-                **kwargs,
-            )
-        ]
-
-    if not parent_pipe.poll():
-        process.join()
-        parent_pipe.close()
-        raise RuntimeError(f"{tool} worker exited without returning a result")
-
-    status, result = pickle.loads(parent_pipe.recv_bytes())
-    process.join()
-    parent_pipe.close()
-    if status == "error":
-        raise RuntimeError(f"{tool} worker failed: {result}")
-    return result
+        if started:
+            if process.is_alive():
+                process.terminate()
+            process.join()
 
 
 def _normalize_tool_reports(

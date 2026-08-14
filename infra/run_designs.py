@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -259,6 +260,7 @@ def _terminate_process_group(process: subprocess.Popen) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
+        process.wait()
         return
 
     try:
@@ -272,6 +274,48 @@ def _terminate_process_group(process: subprocess.Popen) -> None:
     except ProcessLookupError:
         pass
     process.wait()
+
+
+def _signal_process_group(
+    process: subprocess.Popen,
+    signum: signal.Signals,
+) -> None:
+    """Signal a live design group, tolerating an exit racing the signal."""
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        process.poll()
+
+
+@contextmanager
+def _manage_design_process_signals(process: subprocess.Popen):
+    """Keep a detached design group aligned with terminal job control."""
+    previous_handlers = {}
+
+    def interrupt_run(_signum, _frame) -> None:
+        raise KeyboardInterrupt
+
+    def suspend_run(_signum, _frame) -> None:
+        _signal_process_group(process, signal.SIGSTOP)
+        os.kill(os.getpid(), signal.SIGSTOP)
+        _signal_process_group(process, signal.SIGCONT)
+
+    handlers = {
+        signal.SIGTERM: interrupt_run,
+        signal.SIGHUP: interrupt_run,
+        signal.SIGQUIT: interrupt_run,
+        signal.SIGTSTP: suspend_run,
+    }
+    try:
+        for signum, handler in handlers.items():
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, handler)
+        yield
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def _read_completed_cases(path: Path) -> dict[str, Any]:
@@ -316,7 +360,8 @@ def _run_design_subprocess(
             start_new_session=True,
         )
         try:
-            returncode = process.wait(timeout=timeout_s)
+            with _manage_design_process_signals(process):
+                returncode = process.wait(timeout=timeout_s)
             status = "passed" if returncode == 0 else "failed"
         except subprocess.TimeoutExpired:
             _terminate_process_group(process)
@@ -324,6 +369,9 @@ def _run_design_subprocess(
         except KeyboardInterrupt:
             _terminate_process_group(process)
             status = "interrupted"
+        except BaseException:
+            _terminate_process_group(process)
+            raise
         elapsed_s = time.perf_counter() - started_at
         if result_path.exists():
             design_result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -478,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
             result_path=args.result_file,
             completed_cases_path=args.completed_cases_file,
         )
+        return 0
     return run_designs(report_path=args.report)
 
 
