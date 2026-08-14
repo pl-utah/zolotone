@@ -67,6 +67,10 @@ from examples.converters import (
     fp32_to_ue4m3,
     ue4m3_to_fp32,
 )
+from examples.ue4m3x2_e2m1x2_add_fp32 import (
+    spec_ue4m3x2_e2m1x2_add_fp32,
+    ue4m3x2_e2m1x2_add_fp32,
+)
 from examples.ue4m3x2_e2m1x2_mult_fp32 import (
     spec_ue4m3x2_e2m1x2_mult_fp32,
     ue4m3x2_e2m1x2_mult_fp32,
@@ -428,6 +432,7 @@ class TestRunDesigns(unittest.TestCase):
             *CONVERTER_REGISTRY,
             "fp32_add",
             "fp32_mult",
+            "ue4m3x2_e2m1x2_add_fp32",
             "ue4m3x2_e2m1x2_mult_fp32",
             "bf16x8_dot_fp32_conventional",
             "bf16x8_dot_fp32_optimized",
@@ -458,6 +463,15 @@ class TestRunDesigns(unittest.TestCase):
             [UE4M3T(), UE4M3T(), E2M1T(), E2M1T()],
         )
         self.assertEqual(unsigned_mixed_multiplier.node_type, Float32T())
+
+        scaled_add = design_runner._find_design(
+            "ue4m3x2_e2m1x2_add_fp32"
+        ).build()
+        self.assertEqual(
+            [arg.node_type for arg in scaled_add.inner_args],
+            [UE4M3T(), UE4M3T(), E2M1T(), E2M1T()],
+        )
+        self.assertEqual(scaled_add.node_type, Float32T())
 
     def test_check_design_runs_the_selected_check(self):
         design = design_runner._build_bf16_relu()
@@ -4925,6 +4939,169 @@ class TestReducedWGMMA(unittest.TestCase):
             finally:
                 tempdir_jit.cleanup()
                 tempdir_no_jit.cleanup()
+
+
+class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(scale0, scale1, x0, x1):
+        if scale0.is_nan or scale1.is_nan:
+            return Float32.NaN().val
+
+        value = scale0.to_val() * x0.to_val() + scale1.to_val() * x1.to_val()
+        return struct.unpack(">I", struct.pack(">f", value))[0]
+
+    @staticmethod
+    def _cases():
+        return (
+            ("ordinary-normal", 0x38, 0x40, 0x2, 0x3, 0x40800000),
+            ("ue4m3-subnormal", 0x01, 0x00, 0x1, 0x2, 0x3A800000),
+            ("e2m1-subnormal", 0x38, 0x38, 0x1, 0x2, 0x3FC00000),
+            ("unequal-scales", 0x7E, 0x01, 0x7, 0x1, 0x45280004),
+            ("exact-cancellation", 0x40, 0x40, 0x3, 0xB, 0x00000000),
+            ("both-negative-zero", 0x00, 0x38, 0xF, 0x8, 0x80000000),
+            ("mixed-sign-zeros", 0x00, 0x38, 0xF, 0x0, 0x00000000),
+            ("both-positive-zero", 0x00, 0x38, 0x7, 0x0, 0x00000000),
+            ("maximum-positive", 0x7E, 0x7E, 0x7, 0x7, 0x45A80000),
+            ("maximum-negative", 0x7E, 0x7E, 0xF, 0xF, 0xC5A80000),
+            ("nan0-precedes-negative-zero", 0x7F, 0x00, 0xF, 0x8, 0x7FC00000),
+            ("nan1-precedes-cancellation", 0x38, 0x7F, 0x2, 0xA, 0x7FC00000),
+        )
+
+    def _make_design(self):
+        scale0 = Var(name="scale0", sign=UE4M3T())
+        scale1 = Var(name="scale1", sign=UE4M3T())
+        x0 = Var(name="x0", sign=E2M1T())
+        x1 = Var(name="x1", sign=E2M1T())
+        return (scale0, scale1, x0, x1), ue4m3x2_e2m1x2_add_fp32(
+            scale0, scale1, x0, x1
+        )
+
+    @staticmethod
+    def _load(variables, bits):
+        variables[0].load_val(UE4M3(bits[0]))
+        variables[1].load_val(UE4M3(bits[1]))
+        variables[2].load_val(E2M1(bits[2]))
+        variables[3].load_val(E2M1(bits[3]))
+
+    def test_golden_spec_returns_fp32(self):
+        ctx = SpecContext("ue4m3x2-e2m1x2-add-fp32-spec")
+        values = (
+            UE4M3T().to_spec("scale0", ctx),
+            UE4M3T().to_spec("scale1", ctx),
+            E2M1T().to_spec("x0", ctx),
+            E2M1T().to_spec("x1", ctx),
+        )
+        result = spec_ue4m3x2_e2m1x2_add_fp32(*values, ctx)
+        self.assertIsInstance(result, fp32)
+
+    def _assert_spec_case_proves(self, target_name):
+        _, design = self._make_design()
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_spec()
+
+        self.assertTrue(result["proved"])
+        proof_trace = result["case_results"][0]["proof_trace"]
+        self.assertEqual(proof_trace[-1]["status"], "unsat")
+
+    def test_default_schedule_proves_normal_and_subnormal_cases(self):
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_add_fp32["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
+        )
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_add_fp32["
+            "arg0=sub,arg1=norm,arg2=sub,arg3=norm,output=norm]"
+        )
+
+    def test_determinism(self):
+        _, design = self._make_design()
+        target_name = (
+            "ue4m3x2_e2m1x2_add_fp32_determinism["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
+        )
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_determinism()
+        self.assertTrue(result["proved"])
+
+    def test_curated_exact_results_zeros_and_nan_precedence(self):
+        variables, design = self._make_design()
+        for name, scale0, scale1, x0, x1, expected in self._cases():
+            with self.subTest(case=name):
+                self._load(variables, (scale0, scale1, x0, x1))
+                self.assertEqual(design.evaluate().val, expected)
+
+    def test_random_inputs_match_exact_fused_reference(self):
+        variables, design = self._make_design()
+        rng = random.Random(20260814)
+        for _ in range(500):
+            values = (
+                UE4M3(rng.randrange(0x80)),
+                UE4M3(rng.randrange(0x80)),
+                E2M1(rng.randrange(16)),
+                E2M1(rng.randrange(16)),
+            )
+            for variable, value in zip(variables, values):
+                variable.load_val(value)
+            self.assertEqual(design.evaluate().val, self._reference_bits(*values))
+
+    def test_jit_and_nonjit_cpp_match_reference(self):
+        variables, design = self._make_design()
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        rng = random.Random(20260815)
+        inputs = [case[1:5] for case in self._cases()]
+        inputs.extend(
+            (
+                rng.randrange(0x80),
+                rng.randrange(0x80),
+                rng.randrange(16),
+                rng.randrange(16),
+            )
+            for _ in range(100)
+        )
+        try:
+            for bits in inputs:
+                values = (
+                    UE4M3(bits[0]),
+                    UE4M3(bits[1]),
+                    E2M1(bits[2]),
+                    E2M1(bits[3]),
+                )
+                expected = self._reference_bits(*values)
+                self._load(variables, bits)
+                with self.subTest(inputs=bits):
+                    self.assertEqual(design.evaluate().val, expected)
+                    self.assertEqual(compiled_jit(*bits), expected)
+                    self.assertEqual(compiled_no_jit(*bits), expected)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
 
 
 class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):

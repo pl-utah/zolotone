@@ -38,6 +38,7 @@ from examples.converters import (
     CONVERTER_REGISTRY,
     FORMAT_STATIC_TYPES,
 )
+from examples.ue4m3x2_e2m1x2_add_fp32 import ue4m3x2_e2m1x2_add_fp32
 from examples.ue4m3x2_e2m1x2_mult_fp32 import ue4m3x2_e2m1x2_mult_fp32
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
@@ -121,6 +122,15 @@ def _build_ue4m3x2_e2m1x2_mult_fp32() -> Node:
     )
 
 
+def _build_ue4m3x2_e2m1x2_add_fp32() -> Node:
+    return ue4m3x2_e2m1x2_add_fp32(
+        Var(name="scale0", sign=UE4M3T()),
+        Var(name="scale1", sign=UE4M3T()),
+        Var(name="x0", sign=E2M1T()),
+        Var(name="x1", sign=E2M1T()),
+    )
+
+
 def _dot_product_args() -> list[Var]:
     return [
         *[Var(name=f"a_{index}", sign=BFloat16T()) for index in range(4)],
@@ -168,6 +178,10 @@ DESIGNS = (
     *(_converter_design_case(name) for name in CONVERTER_REGISTRY),
     DesignCase("fp32_add", _build_fp32_add),
     DesignCase("fp32_mult", _build_fp32_mult),
+    DesignCase(
+        "ue4m3x2_e2m1x2_add_fp32",
+        _build_ue4m3x2_e2m1x2_add_fp32,
+    ),
     DesignCase(
         "ue4m3x2_e2m1x2_mult_fp32",
         _build_ue4m3x2_e2m1x2_mult_fp32,
