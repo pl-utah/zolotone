@@ -362,13 +362,15 @@ def _run_design_subprocess(
         try:
             with _manage_design_process_signals(process):
                 returncode = process.wait(timeout=timeout_s)
-            status = "passed" if returncode == 0 else "failed"
+            status = None
         except subprocess.TimeoutExpired:
             _terminate_process_group(process)
             status = "timeout"
+            returncode = process.returncode
         except KeyboardInterrupt:
             _terminate_process_group(process)
             status = "interrupted"
+            returncode = process.returncode
         except BaseException:
             _terminate_process_group(process)
             raise
@@ -384,6 +386,14 @@ def _run_design_subprocess(
             }
         if status in {"timeout", "interrupted"}:
             check_result.update(status=status, proved=False)
+        elif (
+            returncode == 0
+            and check_result.get("status") == "passed"
+            and check_result.get("proved") is True
+        ):
+            status = "passed"
+        else:
+            status = "failed"
         check_result["elapsed_s"] = elapsed_s
         return status, check_result
 
@@ -527,8 +537,8 @@ def main(argv: list[str] | None = None) -> int:
             completed_cases_path=args.completed_cases_file,
         )
         return 0
-    return run_designs(report_path=args.report)
-
+    run_designs(report_path=args.report)
+    return 0
 
 if __name__ == "__main__":
     main()

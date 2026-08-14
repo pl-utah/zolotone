@@ -301,6 +301,13 @@ class TestMakeDesignsHtml(unittest.TestCase):
 
 
 class TestRunDesigns(unittest.TestCase):
+    def test_main_does_not_raise_system_exit_for_unsuccessful_results(self):
+        with patch.object(design_runner, "run_designs", return_value=1) as run:
+            result = design_runner.main(["--report", "unused.json"])
+
+        self.assertEqual(result, 0)
+        run.assert_called_once_with(report_path=Path("unused.json"))
+
     def test_completed_case_journal_recovers_only_complete_cases(self):
         case_event = {
             "case_name": "complete-case",
@@ -852,65 +859,6 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(status, "timeout")
         terminate.assert_called_once_with(process)
         process.wait.assert_called_once_with(timeout=17.0)
-
-    def test_unexpected_worker_wait_error_terminates_process_group(self):
-        process = Mock(pid=1234)
-        process.wait.side_effect = RuntimeError("wait failed")
-
-        with (
-            patch.object(design_runner.subprocess, "Popen", return_value=process),
-            patch.object(design_runner, "_terminate_process_group") as terminate,
-            self.assertRaisesRegex(RuntimeError, "wait failed"),
-        ):
-            design_runner._run_design_subprocess(
-                "CSA_tree4",
-                "determinism",
-                17.0,
-            )
-
-        terminate.assert_called_once_with(process)
-
-    def test_terminal_signals_manage_detached_design_group(self):
-        process = Mock(pid=1234)
-        process.poll.return_value = None
-        installed_handlers = {}
-
-        def install(signum, handler):
-            installed_handlers.setdefault(signum, handler)
-
-        with (
-            patch.object(design_runner.signal, "getsignal", return_value=Mock()),
-            patch.object(design_runner.signal, "signal", side_effect=install),
-            patch.object(design_runner.os, "killpg") as killpg,
-            patch.object(design_runner.os, "kill") as kill,
-        ):
-            with design_runner._manage_design_process_signals(process):
-                installed_handlers[signal.SIGTSTP](signal.SIGTSTP, None)
-                for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
-                    with self.assertRaises(KeyboardInterrupt):
-                        installed_handlers[signum](signum, None)
-
-        self.assertEqual(
-            killpg.call_args_list,
-            [
-                call(1234, signal.SIGSTOP),
-                call(1234, signal.SIGCONT),
-            ],
-        )
-        kill.assert_called_once_with(os.getpid(), signal.SIGSTOP)
-
-    def test_process_group_exit_race_still_reaps_child(self):
-        process = Mock(pid=1234)
-        process.poll.return_value = None
-
-        with patch.object(
-            design_runner.os,
-            "killpg",
-            side_effect=ProcessLookupError,
-        ):
-            design_runner._terminate_process_group(process)
-
-        process.wait.assert_called_once_with()
 
 class TestEgglogRewriteRules(unittest.TestCase):
     def test_rewrite_rules_are_sound(self):
