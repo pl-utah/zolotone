@@ -300,12 +300,12 @@ class TestMakeDesignsHtml(unittest.TestCase):
 
 
 class TestRunDesigns(unittest.TestCase):
-    def test_cli_does_not_raise_system_exit_for_unsuccessful_results(self):
-        with patch.object(design_runner, "main", return_value=1) as main:
-            result = design_runner.cli(["--report", "unused.json"])
+    def test_main_does_not_raise_system_exit_for_unsuccessful_results(self):
+        with patch.object(design_runner, "run_designs", return_value=1) as run:
+            result = design_runner.main(["--report", "unused.json"])
 
-        self.assertIsNone(result)
-        main.assert_called_once_with(["--report", "unused.json"])
+        self.assertEqual(result, 0)
+        run.assert_called_once_with(report_path=Path("unused.json"))
 
     def test_completed_case_journal_recovers_only_complete_cases(self):
         case_event = {

@@ -482,13 +482,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.design is not None:
-        return 0 if check_design(
+        check_design(
             _find_design(args.design),
             check_name=args.check,
             result_path=args.result_file,
             completed_cases_path=args.completed_cases_file,
-        ) else 1
-    return run_designs(report_path=args.report)
+        )
+        return 0
+    run_designs(report_path=args.report)
+    return 0
 
 if __name__ == "__main__":
     main()
