@@ -2279,6 +2279,27 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             BoolLit(True),
         )
 
+    def test_implies_lowers_directly_to_existing_boolean_ast(self):
+        lhs = BoolVar("lhs")
+        rhs = BoolVar("rhs")
+
+        expression = lhs.implies(rhs)
+
+        self.assertEqual(expression, (~lhs) | rhs)
+        self.assertEqual(from_egglog(expression.to_egglog()), (~lhs) | rhs)
+        self.assertEqual(
+            BoolLit(True).implies(BoolLit(False)).constant_fold(),
+            BoolLit(False),
+        )
+        self.assertEqual(
+            BoolLit(False).implies(BoolLit(False)).constant_fold(),
+            BoolLit(True),
+        )
+
+    def test_implies_rejects_non_boolean_operands(self):
+        with self.assertRaisesRegex(TypeError, "Expected BoolExpr"):
+            BoolLit(True).implies(RealLit(0))
+
     def test_if_rejects_mixed_bool_and_real_branches(self):
         with self.assertRaisesRegex(TypeError, "If branches"):
             If(BoolVar("condition"), BoolVar("on_true"), RealLit(0))
