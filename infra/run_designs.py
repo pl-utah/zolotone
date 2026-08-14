@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DESIGN_TIMEOUT_S = 30 * 60
+DEFAULT_DESIGN_TIMEOUT_S = 5
 DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
 CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5
@@ -28,23 +28,27 @@ if __package__ in {None, ""}:
 
 
 from examples.CSA import CSA_tree4
-from examples.bf16_add import bf16_add
-from examples.bf16_mult import bf16_mult
-from examples.bf16_relu import bf16_relu
-from examples.bf16x8_dot_fp32_conventional import bf16x8_dot_fp32_conventional
-from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.arithmetic.bf16_add import bf16_add
+from examples.arithmetic.bf16_mult import bf16_mult
+from examples.arithmetic.bf16_relu import bf16_relu
+from examples.arithmetic.fp32_add import fp32_add
+from examples.arithmetic.fp32_mult import fp32_mult
+from examples.arithmetic.ue4m3x2_e2m1x2_add_fp32 import ue4m3x2_e2m1x2_add_fp32
+from examples.arithmetic.ue4m3x2_e2m1x2_mult_fp32 import (
+    ue4m3x2_e2m1x2_mult_fp32,
+)
 from examples.converters import (
     CONVERTER_FORMATS,
     CONVERTER_REGISTRY,
     FORMAT_STATIC_TYPES,
 )
-from examples.ue4m3x2_e2m1x2_add_fp32 import ue4m3x2_e2m1x2_add_fp32
-from examples.ue4m3x2_e2m1x2_mult_fp32 import ue4m3x2_e2m1x2_mult_fp32
-from examples.fp32_add import fp32_add
-from examples.fp32_mult import fp32_mult
-from examples.wgmma_fp16_e4m3_e5m2 import wgmma_fp16_e4m3_e5m2
-from examples.wgmma_fp32_e4m3_e4m3 import wgmma_fp32_e4m3_e4m3
-from examples.wgmma_fp32_e5m2_e4m3 import wgmma_fp32_e5m2_e4m3
+from examples.dot_product.bf16x8_dot_fp32_conventional import (
+    bf16x8_dot_fp32_conventional,
+)
+from examples.dot_product.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.dot_product.wgmma_fp16_e4m3_e5m2 import wgmma_fp16_e4m3_e5m2
+from examples.dot_product.wgmma_fp32_e4m3_e4m3 import wgmma_fp32_e4m3_e4m3
+from examples.dot_product.wgmma_fp32_e5m2_e4m3 import wgmma_fp32_e5m2_e4m3
 from zolotone import (
     BFloat16T,
     E2M1T,
@@ -64,6 +68,7 @@ from zolotone.solver import CaseVerificationResult
 class DesignCase:
     name: str
     build: Callable[[], Node]
+    category: str = "arithmetic"
 
 
 def _build_csa_tree4() -> Node:
@@ -96,7 +101,11 @@ def _build_converter(name: str) -> Node:
 
 
 def _converter_design_case(name: str) -> DesignCase:
-    return DesignCase(name, lambda name=name: _build_converter(name))
+    return DesignCase(
+        name,
+        lambda name=name: _build_converter(name),
+        category="converter",
+    )
 
 
 def _build_fp32_add() -> Node:
@@ -186,11 +195,31 @@ DESIGNS = (
         "ue4m3x2_e2m1x2_mult_fp32",
         _build_ue4m3x2_e2m1x2_mult_fp32,
     ),
-    DesignCase("bf16x8_dot_fp32_conventional", _build_conventional_dot_product),
-    DesignCase("bf16x8_dot_fp32_optimized", _build_optimized_dot_product),
-    DesignCase("wgmma_fp32_e4m3_e4m3", _build_wgmma_fp32_e4m3_e4m3),
-    DesignCase("wgmma_fp32_e5m2_e4m3", _build_wgmma_fp32_e5m2_e4m3),
-    DesignCase("wgmma_fp16_e4m3_e5m2", _build_wgmma_fp16_e4m3_e5m2),
+    DesignCase(
+        "bf16x8_dot_fp32_conventional",
+        _build_conventional_dot_product,
+        category="dot_product",
+    ),
+    DesignCase(
+        "bf16x8_dot_fp32_optimized",
+        _build_optimized_dot_product,
+        category="dot_product",
+    ),
+    DesignCase(
+        "wgmma_fp32_e4m3_e4m3",
+        _build_wgmma_fp32_e4m3_e4m3,
+        category="dot_product",
+    ),
+    DesignCase(
+        "wgmma_fp32_e5m2_e4m3",
+        _build_wgmma_fp32_e5m2_e4m3,
+        category="dot_product",
+    ),
+    DesignCase(
+        "wgmma_fp16_e4m3_e5m2",
+        _build_wgmma_fp16_e4m3_e5m2,
+        category="dot_product",
+    ),
 )
 
 
@@ -446,7 +475,11 @@ def run_designs(
     for design_case in designs:
         total += 1
         design_started_at = time.perf_counter()
-        design_result = {"name": design_case.name, "checks": {}}
+        design_result = {
+            "name": design_case.name,
+            "category": design_case.category,
+            "checks": {},
+        }
 
         for check_name in CHECK_NAMES:
             print(

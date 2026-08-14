@@ -1,6 +1,6 @@
 from zolotone import *
-from .CSA import CSA_tree4
-from .max_exponent import *
+from ..CSA import CSA_tree4
+from ..max_exponent import *
 
 s = 2
 N = 4

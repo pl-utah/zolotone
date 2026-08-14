@@ -47,11 +47,11 @@ from zolotone.rival import (
 )
 from zolotone.spec.spec_context import simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
-from examples.fp32_add import fp32_add
-from examples.fp32_mult import fp32_mult
-from examples.bf16_add import bf16_add
-from examples.bf16_mult import bf16_mult
-from examples.bf16_relu import bf16_relu
+from examples.arithmetic.fp32_add import fp32_add
+from examples.arithmetic.fp32_mult import fp32_mult
+from examples.arithmetic.bf16_add import bf16_add
+from examples.arithmetic.bf16_mult import bf16_mult
+from examples.arithmetic.bf16_relu import bf16_relu
 from examples.converters import (
     CONVERTER_FORMATS,
     CONVERTER_REGISTRY,
@@ -67,29 +67,29 @@ from examples.converters import (
     fp32_to_ue4m3,
     ue4m3_to_fp32,
 )
-from examples.ue4m3x2_e2m1x2_add_fp32 import (
+from examples.arithmetic.ue4m3x2_e2m1x2_add_fp32 import (
     spec_ue4m3x2_e2m1x2_add_fp32,
     ue4m3x2_e2m1x2_add_fp32,
 )
-from examples.ue4m3x2_e2m1x2_mult_fp32 import (
+from examples.arithmetic.ue4m3x2_e2m1x2_mult_fp32 import (
     spec_ue4m3x2_e2m1x2_mult_fp32,
     ue4m3x2_e2m1x2_mult_fp32,
 )
-from examples.bf16x8_dot_fp32_conventional import (
+from examples.dot_product.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
     dot_product_spec as bf16x8_dot_fp32_spec,
 )
-from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
-from examples.wgmma import WGMMA_REGISTRY
-from examples.wgmma_fp16_e4m3_e5m2 import (
+from examples.dot_product.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.dot_product.wgmma import WGMMA_REGISTRY
+from examples.dot_product.wgmma_fp16_e4m3_e5m2 import (
     spec_wgmma_fp16_e4m3_e5m2,
     wgmma_fp16_e4m3_e5m2,
 )
-from examples.wgmma_fp32_e4m3_e4m3 import (
+from examples.dot_product.wgmma_fp32_e4m3_e4m3 import (
     spec_wgmma_fp32_e4m3_e4m3,
     wgmma_fp32_e4m3_e4m3,
 )
-from examples.wgmma_fp32_e5m2_e4m3 import (
+from examples.dot_product.wgmma_fp32_e5m2_e4m3 import (
     spec_wgmma_fp32_e5m2_e4m3,
     wgmma_fp32_e5m2_e4m3,
 )
@@ -142,6 +142,7 @@ class TestMakeDesignsHtml(unittest.TestCase):
             "finished_at": "2026-08-04T01:03:03Z",
             "designs": {
                 "first <design>": {
+                    "category": "arithmetic",
                     "elapsed_s": 1.25,
                     "checks": {
                         "determinism": {
@@ -172,7 +173,11 @@ class TestMakeDesignsHtml(unittest.TestCase):
                         },
                     },
                 },
-                "second": {"elapsed_s": 0.5, "checks": {}},
+                "second": {
+                    "category": "dot_product",
+                    "elapsed_s": 0.5,
+                    "checks": {},
+                },
             },
         }
 
@@ -192,6 +197,17 @@ class TestMakeDesignsHtml(unittest.TestCase):
         )
         self.assertIn('aria-controls="design-details-1">second</button>', html)
         self.assertIn('id="design-details-1"', html)
+        self.assertIn(
+            '<tr class="category-row"><th scope="colgroup" '
+            'colspan="6">Arithmetic</th></tr>',
+            html,
+        )
+        self.assertIn(
+            '<tr class="category-row"><th scope="colgroup" '
+            'colspan="6">Dot product</th></tr>',
+            html,
+        )
+        self.assertNotIn('<th scope="col">Category</th>', html)
         for heading in (
             "Case name",
             "Status",
@@ -268,6 +284,46 @@ class TestMakeDesignsHtml(unittest.TestCase):
         self.assertIn('<td class="elapsed">1.500 s</td>', html)
         self.assertIn("<h2>Determinism cases</h2>", html)
         self.assertIn("<h2>Specification cases</h2>", html)
+
+    def test_designs_are_grouped_in_category_order(self):
+        report = {
+            "started_at": "2026-08-04T01:02:03Z",
+            "finished_at": "2026-08-04T01:03:03Z",
+            "designs": {
+                "legacy": {"elapsed_s": 0.1, "checks": {}},
+                "convert": {
+                    "category": "converter",
+                    "elapsed_s": 0.1,
+                    "checks": {},
+                },
+                "dot": {
+                    "category": "dot_product",
+                    "elapsed_s": 0.1,
+                    "checks": {},
+                },
+                "add": {
+                    "category": "arithmetic",
+                    "elapsed_s": 0.1,
+                    "checks": {},
+                },
+            },
+        }
+
+        html = make_designs_html.build_html(
+            report,
+            Path("reports/run_designs.json"),
+        )
+
+        headings = [
+            html.index(f'colspan="6">{label}</th>')
+            for label in ("Arithmetic", "Dot product", "Converter", "Uncategorized")
+        ]
+        self.assertEqual(headings, sorted(headings))
+        self.assertLess(html.index(">Arithmetic</th>"), html.index(">add</button>"))
+        self.assertLess(
+            html.index(">Uncategorized</th>"),
+            html.index(">legacy</button>"),
+        )
 
     def test_timeout_displays_only_completed_cases(self):
         report = {
@@ -445,6 +501,22 @@ class TestRunDesigns(unittest.TestCase):
             [design_case.name for design_case in design_runner.DESIGNS],
             expected_names,
         )
+        self.assertEqual(
+            {design.category for design in design_runner.DESIGNS},
+            {"arithmetic", "dot_product", "converter"},
+        )
+        self.assertEqual(
+            {
+                design.name: design.category
+                for design in design_runner.DESIGNS
+                if design.name.startswith("wgmma")
+            },
+            {
+                "wgmma_fp32_e4m3_e4m3": "dot_product",
+                "wgmma_fp32_e5m2_e4m3": "dot_product",
+                "wgmma_fp16_e4m3_e5m2": "dot_product",
+            },
+        )
         for design_case in design_runner.DESIGNS:
             with self.subTest(design=design_case.name):
                 self.assertIsInstance(design_case.build(), Node)
@@ -611,6 +683,7 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(observed_designs, [{}, {}])
         self.assertEqual(report["designs"]["demo"]["status"], "passed")
+        self.assertEqual(report["designs"]["demo"]["category"], "arithmetic")
         self.assertNotIn("running", json.dumps(report))
 
     def test_json_report_preserves_case_tool_sequence_and_metrics(self):
@@ -2610,7 +2683,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             shift_if_subnormal(mantissa, exponent, subnormal_extra_bits=-1)
 
     def test_fp32_multiplier_spec_zero_handling(self):
-        from examples.fp32_mult import spec_fp32_mult
+        from examples.arithmetic.fp32_mult import spec_fp32_mult
 
         cases = (
             ("+0 * +0", 0x00000000, 0x00000000, "is_pzero"),
@@ -2644,7 +2717,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_multiplier_spec_preserves_underflow_zero_sign(self):
-        from examples.fp32_mult import spec_fp32_mult
+        from examples.arithmetic.fp32_mult import spec_fp32_mult
 
         cases = (
             ("positive half-minimum tie", 0x00000001, 0x3f000000, "is_pzero"),
@@ -2670,7 +2743,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_adder_spec_preserves_single_infinity(self):
-        from examples.fp32_add import spec_fp32_add
+        from examples.arithmetic.fp32_add import spec_fp32_add
 
         ctx = SpecContext("fp32-adder-single-infinity")
         cases = (
