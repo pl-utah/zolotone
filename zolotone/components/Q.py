@@ -229,6 +229,37 @@ def q_sign_extend(x: Node, n: int) -> Node:
     return impl(x)
 
 
+def q_resize_spec(x, ctx):
+    return x
+
+
+def q_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
+    """Exactly widen a signed fixed-point value to the requested shape."""
+    
+    if not isinstance(int_bits, int) or not isinstance(frac_bits, int):
+        raise TypeError("int_bits and frac_bits must be integers")
+    if int_bits < x.node_type.int_bits:
+        raise ValueError("q_resize cannot narrow the integer field")
+    if frac_bits < x.node_type.frac_bits:
+        raise ValueError("q_resize cannot narrow the fractional field")
+    if int_bits + frac_bits < 1:
+        raise ValueError("q_resize requires at least one total bit")
+    
+    @Primitive(name="q_resize", spec=q_resize_spec)
+    def impl(x: Node) -> Node:
+        resized = q_sign_extend(x, int_bits - x.node_type.int_bits)
+        fractional_extension = frac_bits - x.node_type.frac_bits
+        if fractional_extension == 0:
+            return resized
+        return basic_lshift(
+            resized,
+            Const(UQ.from_int(fractional_extension)),
+            Const(Q(0, int_bits, frac_bits)),
+        )
+    
+    return impl(x)
+
+
 @Primitive(name="q_neg", spec=lambda x, ctx: -x)
 def q_neg(x: Node) -> Node:
     x_inv = basic_invert(x, x.copy())
@@ -289,6 +320,38 @@ def q_to_uq(x: Node) -> Node:
 @Primitive(name="q_rshift", spec=lambda x, n, ctx: x * (ctx.two() ** (-n)))
 def q_rshift(x: Node, n: Node) -> Node:
     return basic_rshift(x=x, amount=n, out=x.copy())
+
+
+def q_rshift_jam_spec(x, n, ctx):
+    """Ideal signed scaling represented by a sign-symmetric jammed shift."""
+
+    return x * (ctx.two() ** (-n))
+
+
+@Primitive(name="q_rshift_jam", spec=q_rshift_jam_spec)
+def q_rshift_jam(x: Node, n: Node) -> Node:
+    """Right-shift a signed value and jam discarded magnitude bits.
+
+    Jamming is performed on the absolute magnitude and the original sign is
+    restored afterward.  This avoids both a logical shift of the packed
+    two's-complement value and the negative-infinity bias of an arithmetic
+    shift.  Sign-extending before taking the absolute value also makes the
+    minimum representable two's-complement input safe.
+    """
+
+    # UQ imports q_alloc from this module, so keep this reverse dependency
+    # local to avoid a module-import cycle.
+    from .UQ import uq_rshift_jam, uq_to_q
+
+    widened = q_sign_extend(x, 1)
+    sign = q_sign_bit(widened)
+    magnitude = q_to_uq(q_abs(widened))
+    shifted_magnitude = uq_rshift_jam(magnitude, n)
+    signed_result = q_add_sign(uq_to_q(shifted_magnitude), sign)
+    return basic_identity(
+        signed_result,
+        Const(Q(0, x.node_type.int_bits, x.node_type.frac_bits)),
+    )
 
 
 def q_add_sign_spec(x, s, ctx):

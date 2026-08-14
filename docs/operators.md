@@ -3,6 +3,9 @@
 - `Float16`, `BFloat16`, `Float32`: IEEE754 formats; `E4M3FN` is the
   finite-only 8-bit `S.EEEE.MMM` format (bias 7, signed zeros, subnormals,
   finite values through ±448, and the reserved `x.1111.111` NaN codes).
+- `UE4M3`: NVIDIA/PTX unsigned scale format in an 8-bit ABI container, with
+  exponent in bits 6–3, mantissa in bits 2–0, bias 7, subnormals, positive
+  zero, finite values through 448, and canonical NaN `0x7f`.
 - `E5M2`: OCP 8-bit `S.EEEEE.MM` (bias 15), with signed zeros,
   subnormals from `2^-16`, signed infinities, six NaN encodings, and finite
   values through ±57,344.
@@ -77,6 +80,7 @@
 | `q_aligner` | Primitive | `Q<I1,F1> -> Q<I2,F2> -> int_aggr<int -> int -> int> -> frac_aggr<int -> int -> int> -> (Q<int_aggr(I1,I2), frac_aggr(F1,F2)> x Q<int_aggr(I1,I2), frac_aggr(F1,F2)>)` | Align two Qs to a common width. |
 | `q_sign_bit` | Primitive | `Q<I,F> -> UQ<1,0>` | MSB of two's complement value. |
 | `q_sign_extend` | Primitive | `Q<I,F> -> n<int> -> Q<I+n, F>` | Extend sign into high bits. |
+| `q_resize` | Primitive | `Q<I,F> -> I2<int> -> F2<int> -> Q<I2,F2>` | Exact signed widening; rejects integer or fractional narrowing. |
 | `q_neg` | Primitive | `Q<I,F> -> Q<I,F>` | Two's complement negate (special-case overflow at min). |
 | `q_signs_xor` | Primitive | `Q<I1,F1> -> Q<I2,F2> -> Bool<1>` | Sign mismatch (xor of sign bits). |
 | `q_add` | Primitive | `Q<I1,F1> -> Q<I2,F2> -> Q<max(I1,I2)+1, max(F1,F2)>` | Signed addition with alignment. |
@@ -90,6 +94,7 @@
 | `q_not_equal` | Primitive | `Q<I1,F1> -> Q<I2,F2> -> Bool<1>` | Signed inequality. |
 | `q_lshift` | Primitive | `Q<I,F> -> Any -> Q<I,F>` | Logical left shift without resize. |
 | `q_rshift` | Primitive | `Q<I,F> -> Any -> Q<I,F>` | Arithmetic right shift without resize. |
+| `q_rshift_jam` | Primitive | `Q<I,F> -> Any -> Q<I,F>` | Sign-symmetric right shift; jams discarded magnitude bits into the low bit and safely handles the minimum two's-complement input. |
 | `q_to_uq` | Primitive | `Q<I,F> -> UQ<I-1, F>` | Drop sign bit (assumes non-negative). |
 | `q_add_sign` | Primitive | `Q<I,F> -> UQ<1,0> -> Q<I,F>` | Apply sign bit to unsigned magnitude. |
 | `q_abs` | Primitive | `Q<I,F> -> Q<I,F>` | Absolute value (safe at min). |
@@ -118,6 +123,14 @@
 | `e4m3fn_pack` | Primitive | `UQ<1,0> -> UQ<4,0> -> UQ<3,0> -> E4M3FN` | Assemble the packed `S.EEEE.MMM` byte. |
 | `e4m3fn_decode` | Primitive | `E4M3FN -> DecodedE4M3FN` | Split fields and produce normal/subnormal/zero/NaN flags; there is no infinity flag. |
 | `e4m3fn_encode` | Composite | `UQ<1,0> -> Q<E,0> -> UQ<I,F> -> E4M3FN` | Normalize, stage three G/R/S bits for subnormals, round with RNE, canonicalize exact zero to `+0`, retain the sign of nonzero underflow, and saturate overflow or the reserved NaN code to ±448. |
+
+## UE4M3 helpers (`zolotone/components/UE4M3.py`)
+
+| Name | Kind | Type | Purpose/Notes |
+| --- | --- | --- | --- |
+| `ue4m3_pack` | Primitive | `UQ<4,0> -> UQ<3,0> -> UE4M3` | Assemble the packed `EEEE.MMM` value in the low seven bits of an 8-bit ABI container. |
+| `ue4m3_decode` | Primitive | `UE4M3 -> DecodedUE4M3` | Split fields and produce normal/subnormal/positive-zero/NaN flags. |
+| `ue4m3_encode` | Composite | `Q<E,0> -> UQ<I,F> -> UE4M3` | Normalize, round magnitudes with RNE, canonicalize underflow to positive zero, and saturate overflow or the reserved NaN code to 448. |
 
 ## E5M2 helpers (`zolotone/components/E5M2.py`)
 

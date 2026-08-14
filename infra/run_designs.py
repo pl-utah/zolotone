@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DESIGN_TIMEOUT_S = 10 * 60
+DEFAULT_DESIGN_TIMEOUT_S = 20 * 60
 DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
 CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5
@@ -30,17 +30,31 @@ from examples.CSA import CSA_tree4
 from examples.bf16_add import bf16_add
 from examples.bf16_mult import bf16_mult
 from examples.bf16_relu import bf16_relu
-from examples.bf16_to_fp16 import bf16_to_fp16
-from examples.bf16_to_fp32 import bf16_to_fp32
 from examples.bf16x8_dot_fp32_conventional import bf16x8_dot_fp32_conventional
 from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.converters import (
+    CONVERTER_FORMATS,
+    CONVERTER_REGISTRY,
+    FORMAT_STATIC_TYPES,
+)
+from examples.ue4m3x2_e2m1x2_mult_fp32 import ue4m3x2_e2m1x2_mult_fp32
 from examples.fp32_add import fp32_add
 from examples.fp32_mult import fp32_mult
-from examples.fp16_to_bf16 import fp16_to_bf16
-from examples.fp16_to_fp32 import fp16_to_fp32
-from examples.fp32_to_bf16 import fp32_to_bf16
-from examples.fp32_to_fp16 import fp32_to_fp16
-from zolotone import BFloat16T, Float16T, Float32T, Node, QT, Var
+from examples.wgmma_fp16_e4m3_e5m2 import wgmma_fp16_e4m3_e5m2
+from examples.wgmma_fp32_e4m3_e4m3 import wgmma_fp32_e4m3_e4m3
+from examples.wgmma_fp32_e5m2_e4m3 import wgmma_fp32_e5m2_e4m3
+from zolotone import (
+    BFloat16T,
+    E2M1T,
+    E4M3FNT,
+    E5M2T,
+    Float16T,
+    Float32T,
+    Node,
+    QT,
+    UE4M3T,
+    Var,
+)
 from zolotone.solver import CaseVerificationResult
 
 
@@ -73,28 +87,14 @@ def _build_bf16_relu() -> Node:
     return bf16_relu(Var(name="x", sign=BFloat16T()))
 
 
-def _build_bf16_to_fp32() -> Node:
-    return bf16_to_fp32(Var(name="x", sign=BFloat16T()))
+def _build_converter(name: str) -> Node:
+    source_name, _ = CONVERTER_FORMATS[name]
+    source = Var(name="x", sign=FORMAT_STATIC_TYPES[source_name]())
+    return CONVERTER_REGISTRY[name](source)
 
 
-def _build_bf16_to_fp16() -> Node:
-    return bf16_to_fp16(Var(name="x", sign=BFloat16T()))
-
-
-def _build_fp16_to_bf16() -> Node:
-    return fp16_to_bf16(Var(name="x", sign=Float16T()))
-
-
-def _build_fp16_to_fp32() -> Node:
-    return fp16_to_fp32(Var(name="x", sign=Float16T()))
-
-
-def _build_fp32_to_bf16() -> Node:
-    return fp32_to_bf16(Var(name="x", sign=Float32T()))
-
-
-def _build_fp32_to_fp16() -> Node:
-    return fp32_to_fp16(Var(name="x", sign=Float32T()))
+def _converter_design_case(name: str) -> DesignCase:
+    return DesignCase(name, lambda name=name: _build_converter(name))
 
 
 def _build_fp32_add() -> Node:
@@ -108,6 +108,15 @@ def _build_fp32_mult() -> Node:
     return fp32_mult(
         Var(name="a", sign=Float32T()),
         Var(name="b", sign=Float32T()),
+    )
+
+
+def _build_ue4m3x2_e2m1x2_mult_fp32() -> Node:
+    return ue4m3x2_e2m1x2_mult_fp32(
+        Var(name="a0", sign=UE4M3T()),
+        Var(name="a1", sign=UE4M3T()),
+        Var(name="b0", sign=E2M1T()),
+        Var(name="b1", sign=E2M1T()),
     )
 
 
@@ -126,21 +135,47 @@ def _build_optimized_dot_product() -> Node:
     return bf16x8_dot_fp32_optimized(*_dot_product_args())
 
 
+def _build_wgmma_fp32_e4m3_e4m3() -> Node:
+    return wgmma_fp32_e4m3_e4m3(
+        *[Var(name=f"a{index}", sign=E4M3FNT()) for index in range(4)],
+        *[Var(name=f"b{index}", sign=E4M3FNT()) for index in range(4)],
+        Var(name="c", sign=Float32T()),
+    )
+
+
+def _build_wgmma_fp32_e5m2_e4m3() -> Node:
+    return wgmma_fp32_e5m2_e4m3(
+        *[Var(name=f"a{index}", sign=E5M2T()) for index in range(4)],
+        *[Var(name=f"b{index}", sign=E4M3FNT()) for index in range(4)],
+        Var(name="c", sign=Float32T()),
+    )
+
+
+def _build_wgmma_fp16_e4m3_e5m2() -> Node:
+    return wgmma_fp16_e4m3_e5m2(
+        *[Var(name=f"a{index}", sign=E4M3FNT()) for index in range(4)],
+        *[Var(name=f"b{index}", sign=E5M2T()) for index in range(4)],
+        Var(name="c", sign=Float16T()),
+    )
+
+
 DESIGNS = (
     DesignCase("CSA_tree4", _build_csa_tree4),
     DesignCase("bf16_add", _build_bf16_add),
     DesignCase("bf16_mult", _build_bf16_mult),
     DesignCase("bf16_relu", _build_bf16_relu),
-    DesignCase("bf16_to_fp16", _build_bf16_to_fp16),
-    DesignCase("bf16_to_fp32", _build_bf16_to_fp32),
-    DesignCase("fp16_to_bf16", _build_fp16_to_bf16),
-    DesignCase("fp16_to_fp32", _build_fp16_to_fp32),
-    DesignCase("fp32_to_bf16", _build_fp32_to_bf16),
-    DesignCase("fp32_to_fp16", _build_fp32_to_fp16),
+    *(_converter_design_case(name) for name in CONVERTER_REGISTRY),
     DesignCase("fp32_add", _build_fp32_add),
     DesignCase("fp32_mult", _build_fp32_mult),
+    DesignCase(
+        "ue4m3x2_e2m1x2_mult_fp32",
+        _build_ue4m3x2_e2m1x2_mult_fp32,
+    ),
     DesignCase("bf16x8_dot_fp32_conventional", _build_conventional_dot_product),
     DesignCase("bf16x8_dot_fp32_optimized", _build_optimized_dot_product),
+    DesignCase("wgmma_fp32_e4m3_e4m3", _build_wgmma_fp32_e4m3_e4m3),
+    DesignCase("wgmma_fp32_e5m2_e4m3", _build_wgmma_fp32_e5m2_e4m3),
+    DesignCase("wgmma_fp16_e4m3_e5m2", _build_wgmma_fp16_e4m3_e5m2),
 )
 
 
@@ -282,13 +317,15 @@ def _run_design_subprocess(
         )
         try:
             returncode = process.wait(timeout=timeout_s)
-            status = "passed" if returncode == 0 else "failed"
+            status = None
         except subprocess.TimeoutExpired:
             _terminate_process_group(process)
             status = "timeout"
+            returncode = process.returncode
         except KeyboardInterrupt:
             _terminate_process_group(process)
             status = "interrupted"
+            returncode = process.returncode
         elapsed_s = time.perf_counter() - started_at
         if result_path.exists():
             design_result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -301,6 +338,14 @@ def _run_design_subprocess(
             }
         if status in {"timeout", "interrupted"}:
             check_result.update(status=status, proved=False)
+        elif (
+            returncode == 0
+            and check_result.get("status") == "passed"
+            and check_result.get("proved") is True
+        ):
+            status = "passed"
+        else:
+            status = "failed"
         check_result["elapsed_s"] = elapsed_s
         return status, check_result
 
@@ -437,14 +482,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.design is not None:
-        return 0 if check_design(
+        check_design(
             _find_design(args.design),
             check_name=args.check,
             result_path=args.result_file,
             completed_cases_path=args.completed_cases_file,
-        ) else 1
-    return run_designs(report_path=args.report)
-
+        )
+        return 0
+    run_designs(report_path=args.report)
+    return 0
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

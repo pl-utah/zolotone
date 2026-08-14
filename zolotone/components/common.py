@@ -23,6 +23,34 @@ def add_implicit_bit(x: Node) -> Primitive:
     return impl(x)
 
 
+def effective_significand(value) -> Node:
+    """Return a decoded floating-point value's effective significand."""
+
+    from .UQ import uq_integer_to_fraction, uq_resize
+
+    assert hasattr(value, "is_sub")
+    assert value.mantissa.node_type.frac_bits == 0
+    fraction = uq_integer_to_fraction(value.mantissa)
+    return if_then_else(
+        value.is_norm,
+        add_implicit_bit(fraction),
+        uq_resize(fraction, 1, value.mantissa.node_type.int_bits),
+    )
+
+
+def effective_exponent(value) -> Node:
+    """Return a decoded floating-point value's effective stored exponent."""
+
+    assert hasattr(value, "is_sub")
+    exponent_type = value.exponent.node_type
+    assert exponent_type.frac_bits == 0
+    return if_then_else(
+        value.is_sub,
+        Const(UQ(1, exponent_type.int_bits, exponent_type.frac_bits)),
+        value.exponent,
+    )
+
+
 def and_spec(x, y, ctx):
     return If(
         x.eq(ctx.one()) & y.eq(ctx.one()),

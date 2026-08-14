@@ -164,7 +164,7 @@ def rewrite_rules():
     ]
 
 
-def constant_rules():
+def constant_rules(fold_base_two_powers: bool = True):
     m, n = vars_("m n", BigRat)
     a, b = vars_("a b", Math)
     cond = var("cond", MathBool)
@@ -178,6 +178,10 @@ def constant_rules():
     a_is_bit = MathBool.Or(Math.Eq(a, zero), Math.Eq(a, one))
     b_is_bit = MathBool.Or(Math.Eq(b, zero), Math.Eq(b, one))
     bit_result = var("bit_result", Math)
+    bit_result_is_bit = MathBool.Or(
+        Math.Eq(bit_result, zero),
+        Math.Eq(bit_result, one),
+    )
 
     and_conditional = Math.If(
         MathBool.And(Math.Eq(a, one), Math.Eq(b, one)),
@@ -217,7 +221,7 @@ def constant_rules():
     def sign_multiplier(value):
         return Math.If(Math.Eq(value, one), minus_one, one)
 
-    return [
+    rules = [
         # Equivalent bit-operator representations share e-classes only when
         # their real-valued operands are known to be bits. Requiring the
         # canonical conditional to exist avoids generating every operator for
@@ -229,6 +233,7 @@ def constant_rules():
         ).then(
             union(bit_result).with_(and_product),
             union(bit_result).with_(and_min),
+            union(bit_result_is_bit).with_(MathBool.True_()),
         ),
         rule(
             eq(bit_result).to(or_conditional),
@@ -237,6 +242,7 @@ def constant_rules():
         ).then(
             union(bit_result).with_(or_polynomial),
             union(bit_result).with_(or_max),
+            union(bit_result_is_bit).with_(MathBool.True_()),
         ),
         rule(
             eq(bit_result).to(xor_conditional),
@@ -245,6 +251,7 @@ def constant_rules():
         ).then(
             union(bit_result).with_(xor_max_product),
             union(bit_result).with_(xor_polynomial),
+            union(bit_result_is_bit).with_(MathBool.True_()),
             union(sign_multiplier(bit_result)).with_(
                 Math.Mul(sign_multiplier(a), sign_multiplier(b))
             ),
@@ -257,6 +264,7 @@ def constant_rules():
             union(bit_result).with_(neg_zero_conditional),
             union(bit_result).with_(neg_not_zero_conditional),
             union(bit_result).with_(neg_not_one_conditional),
+            union(bit_result_is_bit).with_(MathBool.True_()),
         ),
         # Reflect a proven object-language equality into egglog's native
         # equality so conditional assumptions can merge their operands.
@@ -273,9 +281,19 @@ def constant_rules():
         rewrite(Math.Mul(Math.Num(m), Math.Num(n))).to(Math.Num(m * n)),
         rewrite(Math.Pow(Math.Num(m), Math.Num(BigRat(2, 1)))).to(Math.Num(m * m)),
         rewrite(Math.Pow(Math.Num(BigRat(-1, 1)), Math.Num(m))).to(Math.Num(BigRat(-1, 1) ** m), eq(m.denom).to(1)),
-        # TODO: possible lose of accuracy due to this rule: 2^-1024 will be extracted as zero
-        rewrite(Math.Pow(Math.Num(BigRat(2, 1)), Math.Num(m))).to(Math.Num(BigRat(2, 1) ** m), eq(m.denom).to(1)),  # power works only with integers in egglog
     ]
+    if fold_base_two_powers:
+        # Proof e-graphs disable this fold so dyadic scales remain visible to
+        # symbolic exponent-combination rules.
+        rules.append(
+            rewrite(
+                Math.Pow(Math.Num(BigRat(2, 1)), Math.Num(m))
+            ).to(
+                Math.Num(BigRat(2, 1) ** m),
+                eq(m.denom).to(1),
+            )
+        )
+    return rules
 
 
 # This lowering is particularly for rules, because we need to walk expressions and replace Var with var(name, Math) - rewrite syntax
@@ -400,11 +418,14 @@ def check_rules(rules, z3_timeout_ms: int = 10000):
     return results
 
 
-def load_rules(egraph: EGraph, simplify=False) -> None:
+def load_rules(
+    egraph: EGraph,
+    fold_base_two_powers: bool = True,
+) -> None:
     rewrites = rewrite_rules()
+    constants = constant_rules(
+        fold_base_two_powers=fold_base_two_powers,
+    )
 
-    if simplify:
-        rules = lower_rules(rewrites) + constant_rules()
-    else:
-        rules = constant_rules() + lower_rules(rewrites)
+    rules = lower_rules(rewrites) + constants
     egraph.register(*rules)

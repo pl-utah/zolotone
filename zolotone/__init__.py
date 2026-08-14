@@ -11,6 +11,7 @@ from .components.BFloat16 import *
 from .components.common import *
 from .components.rounding_routines import *
 from .components.E4M3FN import *
+from .components.UE4M3 import *
 from .components.E5M2 import *
 from .components.E5M2FNUZ import *
 from .components.E2M1 import *

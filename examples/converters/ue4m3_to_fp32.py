@@ -1,0 +1,67 @@
+from zolotone import *
+
+
+def spec_ue4m3_to_fp32(x: ue4m3, ctx):
+    return Cases(
+        case(x.is_nan, fp32.nan(ctx)),
+        case(x.is_finite, fp32.encode(x.value, ctx)),
+        ctx=ctx,
+    )
+
+
+@Composite(name="ue4m3_to_fp32", spec=spec_ue4m3_to_fp32)
+def ue4m3_to_fp32(x: Node) -> Node:
+    X = ue4m3_decode(x)
+
+    mantissa_fraction = uq_integer_to_fraction(X.mantissa)
+    significand = if_then_else(
+        X.is_norm,
+        add_implicit_bit(mantissa_fraction),
+        uq_resize(mantissa_fraction, 1, UE4M3.mantissa_bits),
+    )
+    significand = uq_resize(
+        significand,
+        1,
+        max(UE4M3.mantissa_bits, Float32.mantissa_bits),
+    )
+
+    subnormal_exponent = Const(
+        UQ(
+            1,
+            X.exponent.node_type.int_bits,
+            X.exponent.node_type.frac_bits,
+        )
+    )
+    effective_exponent = if_then_else(
+        X.is_sub,
+        subnormal_exponent,
+        X.exponent,
+    )
+    target_exponent = q_add(
+        uq_to_q(effective_exponent),
+        Const(Q.from_int(Float32.exponent_bias - UE4M3.exponent_bias)),
+    )
+
+    result = fp32_encode(
+        Const(UQ(0, 1, 0)),
+        target_exponent,
+        significand,
+    )
+    return if_then_else(
+        X.is_nan,
+        Const(Float32.NaN()),
+        result,
+    )
+
+
+if __name__ == "__main__":
+    cast = ue4m3_to_fp32(Var(name="x", sign=UE4M3T()))
+
+    cast.check_determinism()
+    cast.check_spec()
+
+    with open("examples/c_models/ue4m3_to_fp32_jit.hpp", "w") as file:
+        file.write(cast.to_cpp(jittable=True))
+
+    with open("examples/c_models/ue4m3_to_fp32_no_jit.hpp", "w") as file:
+        file.write(cast.to_cpp(jittable=False))
