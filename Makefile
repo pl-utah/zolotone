@@ -7,7 +7,7 @@ REPORTS_DIR ?= reports
 DESIGNS_REPORT := $(REPORTS_DIR)/run_designs.json
 DESIGNS_HTML := $(REPORTS_DIR)/index.html
 DESIGN_TIMEOUT_S ?= 600
-DESIGN_MAX_WORKERS ?= 10
+DESIGN_MAX_WORKERS ?= 8
 
 DREAL_REPO ?= https://github.com/dreal/dreal4
 

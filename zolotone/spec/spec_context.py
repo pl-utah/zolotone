@@ -416,7 +416,6 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
             break
     else:
         warnings.warn(f"Simplification did not saturate after {max_passes} passes for {ctx.name!r}", RuntimeWarning)
-
     return current
 
 

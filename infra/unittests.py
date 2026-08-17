@@ -931,6 +931,20 @@ class TestEgglogRewriteRules(unittest.TestCase):
 
         self.assertEqual(invalid_rules, {})
 
+    def test_nonnegative_absolute_value_is_discharged(self):
+        ctx = SpecContext("egglog-nonnegative-abs")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.real_val(1 / 64))
+        ctx.check(abs(x).eq(x))
+
+        report = egglog_rewrite(
+            ctx,
+            iterations=6,
+            scheduler={"match_limit": 500_000, "ban_length": 1},
+        )
+
+        self.assertEqual(report["status"], "unsat")
+
 
 class TestConstantFolding(unittest.TestCase):
     def assert_folded_value(self, node, runtime_type, expected_val):
@@ -3513,6 +3527,31 @@ class TestUE4M3Spec(unittest.TestCase):
                     self.assertEqual(compiled(source_bits), expected)
         finally:
             tempdir.cleanup()
+
+    def test_fp32_converter_default_schedule_proves_normal_output(self):
+        source = Var("source", Float32T())
+        design = fp32_to_ue4m3(source)
+        target_name = "fp32_to_ue4m3[arg0=norm,output=norm]"
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_spec(max_workers=1)
+
+        case_result = result["case_results"][0]
+        self.assertTrue(case_result["proved"])
+        self.assertEqual(case_result["proof_trace"][-1]["tool"], "egglog-rewrite")
+        self.assertEqual(case_result["proof_trace"][-1]["status"], "unsat")
 
 
 class TestE5M2Spec(unittest.TestCase):

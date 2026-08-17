@@ -91,6 +91,12 @@ def rewrite_rules():
         ("const_9", (zero + x).eq(x)),
         ("const_10", (- zero).eq(zero)),
         ("const_11", zero.eq(-zero)),
+
+        # Absolute value
+        ("abs_neg", abs(-a).eq(abs(a))),
+        ("abs_abs", abs(abs(a)).eq(abs(a))),
+        ("abs_mul", abs(a * b).eq(abs(a) * abs(b))),
+        ("abs_if", abs(If(bool_var, a, b)).eq(If(bool_var, abs(a), abs(b)))),
         
         # Equality
         ("eq_1", (a.eq(a)).eq(true)),
@@ -274,13 +280,50 @@ def constant_rules(fold_base_two_powers: bool = True):
         rewrite(Math.Eq(Math.Num(m), Math.Num(n))).to(MathBool.False_(), ne(m).to(n)),
         rewrite(Math.NotEq(Math.Num(m), Math.Num(n))).to(MathBool.True_(), ne(m).to(n)),
         rewrite(Math.NotEq(Math.Num(m), Math.Num(n))).to(MathBool.False_(), eq(m).to(n)),
+        rewrite(Math.Ge(Math.Num(m), Math.Num(n))).to(
+            MathBool.True_(), m >= n
+        ),
+        rewrite(Math.Ge(Math.Num(m), Math.Num(n))).to(
+            MathBool.False_(), m < n
+        ),
         # arithmetic
         rewrite(Math.Num(m)).to(Math.Neg(Math.Num(-m))),
         rewrite(Math.Add(Math.Num(m), Math.Num(n))).to(Math.Num(m + n)),
         rewrite(Math.Neg(Math.Num(m))).to(Math.Num(-m)),
         rewrite(Math.Mul(Math.Num(m), Math.Num(n))).to(Math.Num(m * n)),
+        rewrite(Math.Abs(Math.Num(m))).to(Math.Num(abs(m))),
         rewrite(Math.Pow(Math.Num(m), Math.Num(BigRat(2, 1)))).to(Math.Num(m * m)),
         rewrite(Math.Pow(Math.Num(BigRat(-1, 1)), Math.Num(m))).to(Math.Num(BigRat(-1, 1) ** m), eq(m.denom).to(1)),
+        # Turn known signs into absolute-value equalities. The bound-weakening
+        # rules make nonnegative literal bounds, such as x >= 1/64, usable by
+        # the x >= 0 rule without requiring a general inequality solver.
+        rule(eq(Math.Ge(a, zero)).to(MathBool.True_())).then(
+            union(Math.Abs(a)).with_(a)
+        ),
+        rule(eq(Math.Le(a, zero)).to(MathBool.True_())).then(
+            union(Math.Abs(a)).with_(Math.Neg(a))
+        ),
+        rewrite(Math.Ge(Math.Pow(two, a), zero)).to(MathBool.True_()),
+        rewrite(Math.Gt(Math.Pow(two, a), zero)).to(MathBool.True_()),
+        rule(eq(a).to(Math.Pow(two, b))).then(
+            union(Math.Ge(a, zero)).with_(MathBool.True_())
+        ),
+        rule(
+            eq(Math.Ge(a, b)).to(MathBool.True_()),
+            eq(Math.Ge(b, zero)).to(MathBool.True_()),
+        ).then(union(Math.Ge(a, zero)).with_(MathBool.True_())),
+        rule(
+            eq(Math.Gt(a, b)).to(MathBool.True_()),
+            eq(Math.Ge(b, zero)).to(MathBool.True_()),
+        ).then(union(Math.Ge(a, zero)).with_(MathBool.True_())),
+        rule(
+            eq(Math.Ge(a, Math.Num(m))).to(MathBool.True_()),
+            m >= BigRat(0, 1),
+        ).then(union(Math.Ge(a, zero)).with_(MathBool.True_())),
+        rule(
+            eq(Math.Gt(a, Math.Num(m))).to(MathBool.True_()),
+            m >= BigRat(0, 1),
+        ).then(union(Math.Ge(a, zero)).with_(MathBool.True_())),
     ]
     if fold_base_two_powers:
         # Proof e-graphs disable this fold so dyadic scales remain visible to
