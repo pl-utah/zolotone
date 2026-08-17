@@ -8,6 +8,9 @@ DESIGNS_REPORT := $(REPORTS_DIR)/run_designs.json
 DESIGNS_HTML := $(REPORTS_DIR)/index.html
 DESIGN_TIMEOUT_S ?= 600
 DESIGN_MAX_WORKERS ?= 8
+DOCKER_IMAGE ?= zolotone
+DOCKER_PLATFORM ?= linux/amd64
+DOCKER_TIMEOUT_S ?= 1800
 
 DREAL_REPO ?= https://github.com/dreal/dreal4
 
@@ -18,7 +21,7 @@ RUSTUP_HOME ?= $(HOME)/.rustup
 RUST_PATH := $(CARGO_HOME)/bin:$(PATH)
 RUST_MIN_VERSION ?= 1.85.0
 
-.PHONY: nightly install install-prereqs unit-tests clean
+.PHONY: nightly install install-prereqs unit-tests clean run-docker
 .PHONY: _check-python _venv _python-deps _install-dreal
 .PHONY: _install-rust _install-rival _download_ac_int _bazelisk
 
@@ -85,6 +88,16 @@ install-prereqs:
 
 clean:
 	rm -f "$(DESIGNS_REPORT)" "$(DESIGNS_HTML)"
+
+run-docker:
+	docker build --platform "$(DOCKER_PLATFORM)" --tag "$(DOCKER_IMAGE)" .
+	mkdir -p "$(abspath $(REPORTS_DIR))"
+	docker run --rm --init \
+		--platform "$(DOCKER_PLATFORM)" \
+		--user "$$(id -u):$$(id -g)" \
+		--mount type=bind,source="$(abspath $(REPORTS_DIR))",target=/reports \
+		--env DESIGN_TIMEOUT_S="$(DOCKER_TIMEOUT_S)" \
+		"$(DOCKER_IMAGE)"
 
 _python-deps: _venv
 	@echo "Installing Python dependencies into $(VENV_DIR)"

@@ -134,6 +134,49 @@ To inspect and verify the example designs directly:
 Each command builds the typed implementation model, prints its structure,
 checks it against the golden specification, and emits a C++ header.
 
+## Docker design reports
+
+The repository includes an image that runs `infra/run_designs.py`, converts
+its JSON report to HTML, and writes both files to a host directory. Build it
+from the repository root:
+
+```sh
+docker build --platform linux/amd64 --tag zolotone .
+```
+
+The pinned dReal Python package is available for Linux x86-64. Both commands
+explicitly select that platform, so Docker uses x86-64 emulation on ARM hosts.
+
+To build the image and run it with the complete configuration below in one
+command, use the Makefile target:
+
+```sh
+make run-docker
+```
+
+Create the output directory and bind-mount it at `/reports`. Running with the
+host user's UID and GID keeps the generated files owned by that user:
+
+```sh
+docker run --rm --init \
+  --platform linux/amd64 \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,source="$(pwd)/reports",target=/reports \
+  --env DESIGN_TIMEOUT_S=1800 \
+  zolotone
+```
+
+The image defaults to a 600-second timeout for each check; the command above
+and `make run-docker` override it to 1800 seconds. When `DESIGN_MAX_WORKERS` is
+omitted, verification uses all CPUs available to the container. Set
+`DESIGN_MAX_WORKERS` only when you want to cap parallelism. The Make target's
+timeout can be changed with, for example,
+`make run-docker DOCKER_TIMEOUT_S=900`.
+
+The report is updated after every completed design, so the mounted JSON file
+also retains partial progress if a long run is interrupted. Reusing the same
+host directory replaces `run_designs.json` and `index.html` on the next run.
+
 ## Reduced WGMMA examples
 
 `examples.wgmma` provides deterministic scalar models of
