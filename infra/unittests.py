@@ -306,7 +306,34 @@ class TestRunDesigns(unittest.TestCase):
             result = design_runner.main(["--report", "unused.json"])
 
         self.assertEqual(result, 0)
-        run.assert_called_once_with(report_path=Path("unused.json"))
+        run.assert_called_once_with(
+            timeout_s=design_runner.DEFAULT_DESIGN_TIMEOUT_S,
+            report_path=Path("unused.json"),
+        )
+
+    def test_main_applies_timeout_and_worker_overrides(self):
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch.object(design_runner, "run_designs", return_value=0) as run,
+        ):
+            result = design_runner.main(
+                [
+                    "--report",
+                    "unused.json",
+                    "--timeout",
+                    "12.5",
+                    "--max-workers",
+                    "2",
+                ]
+            )
+            configured_workers = os.environ[parallel_runner.MAX_WORKERS_ENV]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(configured_workers, "2")
+        run.assert_called_once_with(
+            timeout_s=12.5,
+            report_path=Path("unused.json"),
+        )
 
     def test_completed_case_journal_recovers_only_complete_cases(self):
         case_event = {
@@ -353,6 +380,33 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["result"]["status"], "unsat")
 
+    def test_check_design_records_worker_errors_without_crashing(self):
+        design = Mock(node_type="Demo")
+        design.check_determinism.side_effect = RuntimeError("pool broke")
+        design_case = design_runner.DesignCase("demo", Mock(return_value=design))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            journal_path = Path(temp_dir) / "completed_cases.jsonl"
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                proved = design_runner.check_design(
+                    design_case,
+                    check_name="determinism",
+                    result_path=result_path,
+                    completed_cases_path=journal_path,
+                )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(proved)
+        self.assertEqual(result["status"], "error")
+        check_result = result["checks"]["determinism"]
+        self.assertEqual(check_result["status"], "error")
+        self.assertEqual(check_result["cases"], {})
+        self.assertEqual(check_result["error"], "RuntimeError: pool broke")
+
     def test_report_cli_uses_default_and_accepts_override(self):
         self.assertEqual(
             design_runner.parse_args([]).report,
@@ -362,6 +416,11 @@ class TestRunDesigns(unittest.TestCase):
             design_runner.parse_args(["--report", "custom/result.json"]).report,
             Path("custom/result.json"),
         )
+        configured_args = design_runner.parse_args(
+            ["--timeout", "30.5", "--max-workers", "3"]
+        )
+        self.assertEqual(configured_args.timeout, 30.5)
+        self.assertEqual(configured_args.max_workers, 3)
         worker_args = design_runner.parse_args(
             ["--design", "bf16_relu", "--check", "specification"]
         )
@@ -6134,7 +6193,25 @@ class TestParallelClassificationVerification(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     parallel_runner.resolve_max_workers(invalid)
 
-    def test_parallel_submission_keeps_only_two_cases_per_worker_in_flight(self):
+    def test_worker_count_can_be_bounded_by_environment(self):
+        with patch.dict(
+            os.environ,
+            {parallel_runner.MAX_WORKERS_ENV: "3"},
+        ):
+            self.assertEqual(parallel_runner.resolve_max_workers(None), 3)
+
+        for invalid in ("invalid", "0"):
+            with (
+                self.subTest(invalid=invalid),
+                patch.dict(
+                    os.environ,
+                    {parallel_runner.MAX_WORKERS_ENV: invalid},
+                ),
+                self.assertRaises(ValueError),
+            ):
+                parallel_runner.resolve_max_workers(None)
+
+    def test_parallel_submission_keeps_only_one_case_per_worker_in_flight(self):
         generated_count = 0
         completed_count = 0
         generation_leads = []
@@ -6195,7 +6272,7 @@ class TestParallelClassificationVerification(unittest.TestCase):
             [result["name"] for result in results],
             [f"bounded-{index}" for index in range(11)],
         )
-        self.assertLessEqual(max(generation_leads), 4)
+        self.assertLessEqual(max(generation_leads), 2)
 
     def test_parallel_worker_exception_propagates(self):
         ctx = SpecContext("parallel-worker-error")

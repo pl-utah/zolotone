@@ -56,6 +56,7 @@ from zolotone import (
     UE4M3T,
     Var,
 )
+from zolotone.ast.parallel_verification import MAX_WORKERS_ENV
 from zolotone.solver import CaseVerificationResult
 
 
@@ -231,7 +232,31 @@ def check_design(
     observer = CompletedCaseJournal(completed_cases_path)
     print(f"Checking {design_case.name} {check_name}...", flush=True)
     try:
-        result = checks[check_name](observer=observer)
+        try:
+            result = checks[check_name](observer=observer)
+        except Exception as exc:
+            elapsed_s = time.perf_counter() - started_at
+            error_result = {
+                "name": design_case.name,
+                "status": "error",
+                "elapsed_s": elapsed_s,
+                "checks": {
+                    check_name: {
+                        "status": "error",
+                        "proved": False,
+                        "cases": _read_completed_cases(completed_cases_path),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                },
+            }
+            _write_json(result_path, error_result)
+            print(
+                f"[ERROR] {design_case.name} {check_name}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
     finally:
         observer.close()
 
@@ -505,6 +530,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"JSON report path (default: {DEFAULT_REPORT_PATH})",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_DESIGN_TIMEOUT_S,
+        help=(
+            "wall-clock timeout in seconds for each determinism/specification "
+            f"check (default: {DEFAULT_DESIGN_TIMEOUT_S})"
+        ),
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        help=(
+            "maximum parallel classification workers; defaults to "
+            f"${MAX_WORKERS_ENV}, then available CPUs"
+        ),
+    )
+    parser.add_argument(
         "--design",
         choices=[design_case.name for design_case in DESIGNS],
         help=argparse.SUPPRESS,
@@ -524,11 +566,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help=argparse.SUPPRESS,
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.timeout <= 0:
+        parser.error("--timeout must be greater than zero")
+    if args.max_workers is not None and args.max_workers < 1:
+        parser.error("--max-workers must be at least one")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.max_workers is not None:
+        os.environ[MAX_WORKERS_ENV] = str(args.max_workers)
     if args.design is not None:
         check_design(
             _find_design(args.design),
@@ -537,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
             completed_cases_path=args.completed_cases_file,
         )
         return 0
-    run_designs(report_path=args.report)
+    run_designs(timeout_s=args.timeout, report_path=args.report)
     return 0
 
 if __name__ == "__main__":

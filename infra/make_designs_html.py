@@ -227,7 +227,6 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
     <p class="metadata">
       Source: {escape(str(source_path))}<br>
       Report started: {escape(report["started_at"])}<br>
-      Report finished: {escape(report["finished_at"])}<br>
       Generated at: {generated_at}
     </p>
     <div class="table-wrap">

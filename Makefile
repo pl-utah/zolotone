@@ -6,6 +6,8 @@ VENV_PIP := $(VENV_PYTHON) -m pip
 REPORTS_DIR ?= reports
 DESIGNS_REPORT := $(REPORTS_DIR)/run_designs.json
 DESIGNS_HTML := $(REPORTS_DIR)/index.html
+DESIGN_TIMEOUT_S ?= 600
+DESIGN_MAX_WORKERS ?= 10
 
 DREAL_REPO ?= https://github.com/dreal/dreal4
 
@@ -162,6 +164,9 @@ _bazelisk:
 
 nightly: clean _bazelisk install
 	@echo "Running design checks..."; \
-	$(VENV_PYTHON) infra/run_designs.py --report "$(DESIGNS_REPORT)"; \
+	$(VENV_PYTHON) infra/run_designs.py \
+		--report "$(DESIGNS_REPORT)" \
+		--timeout "$(DESIGN_TIMEOUT_S)" \
+		--max-workers "$(DESIGN_MAX_WORKERS)"; \
 	$(VENV_PYTHON) infra/make_designs_html.py --report-dir "$(REPORTS_DIR)"; \
 	echo "Reports written to $(REPORTS_DIR)"; \

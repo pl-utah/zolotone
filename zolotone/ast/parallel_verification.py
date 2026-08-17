@@ -12,6 +12,7 @@ from ..spec import SpecContext
 
 
 CaseVerifier = Callable[..., CaseVerificationResult]
+MAX_WORKERS_ENV = "ZOLOTONE_MAX_WORKERS"
 
 
 def automatic_max_workers() -> int:
@@ -31,7 +32,15 @@ def automatic_max_workers() -> int:
 
 def resolve_max_workers(max_workers: int | None) -> int:
     if max_workers is None:
-        return automatic_max_workers()
+        configured_workers = os.environ.get(MAX_WORKERS_ENV)
+        if configured_workers is None:
+            return automatic_max_workers()
+        try:
+            max_workers = int(configured_workers)
+        except ValueError as exc:
+            raise ValueError(
+                f"{MAX_WORKERS_ENV} must be a positive integer"
+            ) from exc
     if isinstance(max_workers, bool) or not isinstance(max_workers, int):
         raise TypeError("max_workers must be an integer or None")
     if max_workers < 1:
@@ -88,7 +97,10 @@ def _run_in_parallel(
 ) -> list[CaseVerificationResult]:
     """Run a lazy, bounded case stream and restore generation order."""
     indexed_cases = enumerate(cases)
-    in_flight_limit = 2 * max_workers
+    # SpecContext objects can be large. Keeping one submitted case per worker
+    # preserves full worker utilization without retaining a second full set in
+    # the executor's call queue.
+    in_flight_limit = max_workers
     results_by_index: dict[int, CaseVerificationResult] = {}
     process_ctx = multiprocessing.get_context("spawn")
 

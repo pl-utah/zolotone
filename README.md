@@ -82,11 +82,17 @@ Classification cases run concurrently by default. Pass `max_workers=1` to
 `check_equivalence()`, `check_spec()`, or `check_determinism()` for serial
 verification, or pass a positive integer to bound the spawn-based process
 pool. The default uses the process-affinity CPU count when available, then
-falls back to `os.cpu_count()` and finally one worker. Cases are still returned
-in classification-generation order, while streaming observer notifications
-arrive in completion order. Parallel verification can create up to
+falls back to `os.cpu_count()` and finally one worker. Set
+`ZOLOTONE_MAX_WORKERS` to give command-line verification a machine-wide cap.
+Cases are still returned in classification-generation order, while streaming
+observer notifications arrive in completion order. Parallel verification can create up to
 `max_workers` active solver child processes in addition to the case-worker
 processes; solver budgets and per-tool timeouts remain unchanged.
+
+`infra/run_designs.py` also accepts `--max-workers` and a per-check `--timeout`.
+The `make nightly` defaults are deliberately bounded to two workers and 600
+seconds per check so the suite fits memory- and time-limited batch jobs; set
+`DESIGN_MAX_WORKERS` and `DESIGN_TIMEOUT_S` to override them.
 
 ## Repository layout
 
