@@ -52,27 +52,10 @@ def bf16_add(x: Node, y: Node) -> Node:
     )
 
     # 3. Format and align significands.
-    x_mantissa_fraction = uq_integer_to_fraction(X.mantissa)
-    y_mantissa_fraction = uq_integer_to_fraction(Y.mantissa)
-
-    # Implicit bit
-    x_significand = if_then_else(
-        X.is_norm,
-        add_implicit_bit(x_mantissa_fraction),
-        uq_resize(x_mantissa_fraction, 1, BFloat16.mantissa_bits),
-    )
-    y_significand = if_then_else(
-        Y.is_norm,
-        add_implicit_bit(y_mantissa_fraction),
-        uq_resize(y_mantissa_fraction, 1, BFloat16.mantissa_bits),
-    )
-
-    # Resolving subnormal exponent
-    subnormal_exponent = Const(
-        UQ(1, X.exponent.node_type.int_bits, X.exponent.node_type.frac_bits))
-
-    x_effective_exponent = if_then_else(X.is_sub, subnormal_exponent, X.exponent)
-    y_effective_exponent = if_then_else(Y.is_sub, subnormal_exponent, Y.exponent)
+    x_significand = effective_significand(X)
+    y_significand = effective_significand(Y)
+    x_effective_exponent = effective_exponent(X)
+    y_effective_exponent = effective_exponent(Y)
 
     # Aligning exponents
     aligned_exponent = uq_max(x_effective_exponent, y_effective_exponent)

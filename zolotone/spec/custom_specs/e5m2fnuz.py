@@ -6,11 +6,6 @@ from typing import ClassVar
 from ..spec_ast import BoolExpr, BoolLit, FPExpr, If, RealExpr, RealLit
 from .fp32 import sign_multiplier
 
-
-def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
-    return (~lhs) | rhs
-
-
 @dataclass(frozen=True)
 class e5m2fnuz(FPExpr):
     """Symbolic AMD E5M2FNUZ value (bias 16, unsigned zero)."""
@@ -76,17 +71,15 @@ class e5m2fnuz(FPExpr):
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
         out._assume_exclusive_classification(ctx)
-        ctx.assume(_implies(is_norm, exponent >= one))
-        ctx.assume(_implies(is_sub, exponent.eq(zero) & (mantissa >= one)))
+        ctx.assume(is_norm.implies(exponent >= one))
+        ctx.assume(is_sub.implies(exponent.eq(zero) & (mantissa >= one)))
         ctx.assume(
-            _implies(
-                is_zero,
+            is_zero.implies(
                 sign.eq(zero) & exponent.eq(zero) & mantissa.eq(zero),
             )
         )
         ctx.assume(
-            _implies(
-                is_nan,
+            is_nan.implies(
                 sign.eq(one) & exponent.eq(zero) & mantissa.eq(zero),
             )
         )
@@ -147,21 +140,19 @@ class e5m2fnuz(FPExpr):
 
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
-        ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
-        ctx.assume(_implies(is_sub, (mantissa >= one) & (mantissa <= max_mantissa)))
+        ctx.assume(is_zero.implies(exponent.eq(zero) & mantissa.eq(zero)))
+        ctx.assume(is_sub.implies((mantissa >= one) & (mantissa <= max_mantissa)))
         ctx.assume(
-            _implies(
-                is_norm & (magnitude > max_finite),
+            (is_norm & (magnitude > max_finite)).implies(
                 exponent.eq(max_exponent) & mantissa.eq(max_mantissa),
             )
         )
         ctx.assume(
-            _implies(
-                is_norm & (magnitude <= max_finite),
+            (is_norm & (magnitude <= max_finite)).implies(
                 magnitude.eq(normal_magnitude),
             )
         )
-        ctx.assume(_implies(is_sub, magnitude.eq(subnormal_magnitude)))
+        ctx.assume(is_sub.implies(magnitude.eq(subnormal_magnitude)))
         return out
 
     @classmethod

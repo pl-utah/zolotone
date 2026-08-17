@@ -106,9 +106,13 @@ bounded to eight workers and 600 seconds per check; set
 - `zolotone/solver/`, `zolotone/smt/`, and `zolotone/egglog/` — proof scheduling
   and solver integrations.
 - `zolotone/codegen/` — C++ generation for implementation models.
-- `examples/` — FP32 arithmetic, FP32 format converters, conventional/optimized
-  BF16 dot products, and reduced WGMMA dot-accumulate models with golden
-  specifications. See `examples/converters/README.md` for converter semantics.
+- `examples/arithmetic/` — ReLU, addition, and multiplication examples.
+- `examples/dot_product/` — Conventional/optimized BF16 dot products and
+  reduced WGMMA dot-accumulate models with golden specifications.
+- `examples/converters/` — floating-point format converters. See
+  `examples/converters/README.md` for converter semantics.
+- `examples/` — shared and standalone components, including CSA and optimized
+  max exponent.
 - `docs/operators.md` — available implementation operators and primitives.
 
 ## Quick start
@@ -128,8 +132,8 @@ suitable Cargo installation is not available.
 To inspect and verify the example designs directly:
 
 ```sh
-.venv/bin/python -m examples.conventional
-.venv/bin/python -m examples.optimized
+.venv/bin/python -m examples.dot_product.bf16x8_dot_fp32_conventional
+.venv/bin/python -m examples.dot_product.bf16x8_dot_fp32_optimized
 ```
 
 Each command builds the typed implementation model, prints its structure,
@@ -186,7 +190,7 @@ status 130. Reusing the same host directory replaces `run_designs.json` and
 
 ## Reduced WGMMA examples
 
-`examples.wgmma` provides deterministic scalar models of
+`examples.dot_product.wgmma` provides deterministic scalar models of
 `fp32.e4m3.e4m3`, `fp32.e5m2.e4m3`, and `fp16.e4m3.e5m2`. Each computes
 
 ```text
@@ -201,7 +205,7 @@ the literal K=32 hardware instruction shape. They do not model transpose,
 operand scaling, or an optional accumulator enable.
 
 Run any model module directly—for example,
-`python -m examples.wgmma_fp32_e4m3_e4m3`—to check it and emit its JIT and
+`python -m examples.dot_product.wgmma_fp32_e4m3_e4m3`—to check it and emit its JIT and
 non-JIT headers under `examples/c_models/`. Generated headers are ignored by
 Git.
 

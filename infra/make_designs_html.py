@@ -16,6 +16,12 @@ EMPTY_TABLE_ROW = (
     '<tr><td class="empty" colspan="6">No designs in this report.</td></tr>'
 )
 
+CATEGORY_LABELS = {
+    "arithmetic": "Arithmetic",
+    "dot_product": "Dot product",
+    "converter": "Converter",
+}
+
 STATUS_LABELS = {
     "passed": "PASSED",
     "failed": "FAILED",
@@ -156,12 +162,33 @@ def _render_design_rows(
     return summary_row + detail_row
 
 
+def _render_design_groups(designs: dict[str, dict[str, Any]]) -> str:
+    grouped = {category: [] for category in CATEGORY_LABELS}
+    grouped["uncategorized"] = []
+    for name, result in designs.items():
+        category = result.get("category")
+        key = category if category in CATEGORY_LABELS else "uncategorized"
+        grouped[key].append((name, result))
+
+    sections = []
+    index = 0
+    for category, entries in grouped.items():
+        if not entries:
+            continue
+        label = CATEGORY_LABELS.get(category, "Uncategorized")
+        sections.append(
+            '<tr class="category-row">'
+            f'<th scope="colgroup" colspan="6">{label}</th></tr>'
+        )
+        for name, result in entries:
+            sections.append(_render_design_rows(name, result, index))
+            index += 1
+    return "".join(sections)
+
+
 def build_html(report: dict[str, Any], source_path: Path) -> str:
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    rows = "".join(
-        _render_design_rows(name, result, index)
-        for index, (name, result) in enumerate(report["designs"].items())
-    ) or EMPTY_TABLE_ROW
+    rows = _render_design_groups(report["designs"]) or EMPTY_TABLE_ROW
 
     return f"""<!doctype html>
 <html lang="en">
@@ -196,6 +223,14 @@ def build_html(report: dict[str, Any], source_path: Path) -> str:
     .badge-unsat {{ color: #16733c; }}
     .badge-sat {{ color: #b42318; }}
     .badge-not-run, .badge-unknown, .empty {{ color: #666; }}
+    .category-row th {{
+      padding: .5rem .75rem;
+      color: #334155;
+      background: #e8eef5;
+      font-size: .85rem;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }}
     .empty {{ text-align: center; }}
     .design-toggle {{
       display: inline-flex;

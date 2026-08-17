@@ -14,32 +14,16 @@ def spec_e4m3fn_to_fp32(x: e4m3fn, ctx):
 def e4m3fn_to_fp32(x: Node) -> Node:
     X = e4m3fn_decode(x)
 
-    mantissa_fraction = uq_integer_to_fraction(X.mantissa)
-    significand = if_then_else(
-        X.is_norm,
-        add_implicit_bit(mantissa_fraction),
-        uq_resize(mantissa_fraction, 1, E4M3FN.mantissa_bits),
-    )
+    significand = effective_significand(X)
     significand = uq_resize(
         significand,
         1,
         max(E4M3FN.mantissa_bits, Float32.mantissa_bits),
     )
 
-    subnormal_exponent = Const(
-        UQ(
-            1,
-            X.exponent.node_type.int_bits,
-            X.exponent.node_type.frac_bits,
-        )
-    )
-    effective_exponent = if_then_else(
-        X.is_sub,
-        subnormal_exponent,
-        X.exponent,
-    )
+    source_exponent = effective_exponent(X)
     target_exponent = q_add(
-        uq_to_q(effective_exponent),
+        uq_to_q(source_exponent),
         Const(Q.from_int(Float32.exponent_bias - E4M3FN.exponent_bias)),
     )
 
