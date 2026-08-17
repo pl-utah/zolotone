@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import multiprocessing
-import pickle
-from multiprocessing.connection import wait
-from time import perf_counter
 from typing import Any
 
 from ..spec import SpecContext
 from ..spec.spec_context import simplify_ctx
-from .report import ProofReport, build_proof_report, validate_proof_status
+from .report import ProofReport, validate_proof_status
 from ..egglog import egglog_rewrite
 from ..smt import z3_check_eq, dreal_check_eq
 

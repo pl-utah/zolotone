@@ -17,7 +17,6 @@ COUNT_FIELDS: Final = (
 )
 TOOL_METADATA_FIELDS: Final = (
     "timeout_ms",
-    "wall_clock_timeout_s",
     "precision",
     "iterations_used",
     "egraph_size",

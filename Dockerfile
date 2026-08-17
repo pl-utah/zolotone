@@ -39,6 +39,7 @@ RUN apt-get update \
         python3.11 \
         python3.11-dev \
         python3.11-venv \
+        tini \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -74,10 +75,9 @@ RUN --mount=type=cache,target=/opt/cargo/registry \
 
 COPY . .
 
-RUN chmod +x /app/infra/docker-run-designs.sh \
-    && mkdir -p /reports \
+RUN mkdir -p /reports \
     && chmod 0777 /reports \
     && python -c "import _rival3, dreal, egglog, z3"
 
 VOLUME ["/reports"]
-ENTRYPOINT ["/app/infra/docker-run-designs.sh"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "python", "/app/infra/docker_run_designs.py"]

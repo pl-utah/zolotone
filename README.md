@@ -85,13 +85,14 @@ pool. The default uses the process-affinity CPU count when available, then
 falls back to `os.cpu_count()` and finally one worker. Set
 `ZOLOTONE_MAX_WORKERS` to give command-line verification a machine-wide cap.
 Cases are still returned in classification-generation order, while streaming
-observer notifications arrive in completion order. Parallel verification can create up to
-`max_workers` active solver child processes in addition to the case-worker
-processes; solver budgets and per-tool timeouts remain unchanged.
+observer notifications arrive in completion order. Each case worker runs its
+solver schedule directly and sequentially; solver-specific budgets such as the
+Z3 timeout remain unchanged.
 
 `infra/run_designs.py` also accepts `--max-workers` and a per-check `--timeout`.
-The `make nightly` defaults are deliberately bounded to two workers and 600
-seconds per check so the suite fits memory- and time-limited batch jobs; set
+Designs and their determinism/specification checks run sequentially, and each
+whole check receives one timeout. The `make nightly` defaults are deliberately
+bounded to eight workers and 600 seconds per check; set
 `DESIGN_MAX_WORKERS` and `DESIGN_TIMEOUT_S` to override them.
 
 ## Repository layout
@@ -158,13 +159,17 @@ Create the output directory and bind-mount it at `/reports`. Running with the
 host user's UID and GID keeps the generated files owned by that user:
 
 ```sh
-docker run --rm --init \
+docker run --rm \
   --platform linux/amd64 \
   --user "$(id -u):$(id -g)" \
   --mount type=bind,source="$(pwd)/reports",target=/reports \
   --env DESIGN_TIMEOUT_S=1800 \
   zolotone
 ```
+
+The image includes `tini` as PID 1, so `docker run --init` is unnecessary.
+Signals are forwarded to the Python report coordinator and orphaned check
+descendants are reaped inside the container.
 
 The image defaults to a 600-second timeout for each check; the command above
 and `make run-docker` override it to 1800 seconds. When `DESIGN_MAX_WORKERS` is
@@ -174,8 +179,10 @@ timeout can be changed with, for example,
 `make run-docker DOCKER_TIMEOUT_S=900`.
 
 The report is updated after every completed design, so the mounted JSON file
-also retains partial progress if a long run is interrupted. Reusing the same
-host directory replaces `run_designs.json` and `index.html` on the next run.
+also retains partial progress if a long run is interrupted. The coordinator
+generates partial HTML whenever that JSON report exists before exiting with
+status 130. Reusing the same host directory replaces `run_designs.json` and
+`index.html` on the next run.
 
 ## Reduced WGMMA examples
 

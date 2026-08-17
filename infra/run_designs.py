@@ -279,35 +279,49 @@ def check_design(
 
 
 def _terminate_process_group(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
-
+    process_group_id = process.pid
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(process_group_id, signal.SIGTERM)
     except ProcessLookupError:
         process.wait()
         return
 
-    try:
-        process.wait(timeout=PROCESS_TERMINATION_GRACE_S)
-        return
-    except subprocess.TimeoutExpired:
-        pass
+    deadline = time.monotonic() + PROCESS_TERMINATION_GRACE_S
+    while _process_group_exists(process_group_id):
+        # Reap the leader as soon as it exits, but keep watching its process
+        # group: a descendant may outlive the leader after SIGTERM.
+        process.poll()
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            break
+        time.sleep(min(0.05, remaining_s))
 
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    if _process_group_exists(process_group_id):
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    # wait() is safe after poll() has already observed the exit and guarantees
+    # that this coordinator reaps its direct child on every cleanup path.
     process.wait()
+
+
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _signal_process_group(
     process: subprocess.Popen,
     signum: signal.Signals,
 ) -> None:
-    """Signal a live design group, tolerating an exit racing the signal."""
-    if process.poll() is not None:
-        return
+    """Signal a design group, even if its original leader has exited."""
     try:
         os.killpg(process.pid, signum)
     except ProcessLookupError:
@@ -360,6 +374,27 @@ def _read_completed_cases(path: Path) -> dict[str, Any]:
     return cases
 
 
+def _wait_for_design_process(
+    process: subprocess.Popen,
+    timeout_s: float,
+) -> tuple[str | None, int]:
+    """Wait for one check and clean up its complete process group on failure."""
+    try:
+        with _manage_design_process_signals(process):
+            try:
+                return None, process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                status = "timeout"
+            except KeyboardInterrupt:
+                status = "interrupted"
+            _terminate_process_group(process)
+    except BaseException:
+        _terminate_process_group(process)
+        raise
+
+    return status, process.returncode
+
+
 def _run_design_subprocess(
     name: str,
     check_name: str,
@@ -384,21 +419,7 @@ def _run_design_subprocess(
             ],
             start_new_session=True,
         )
-        try:
-            with _manage_design_process_signals(process):
-                returncode = process.wait(timeout=timeout_s)
-            status = None
-        except subprocess.TimeoutExpired:
-            _terminate_process_group(process)
-            status = "timeout"
-            returncode = process.returncode
-        except KeyboardInterrupt:
-            _terminate_process_group(process)
-            status = "interrupted"
-            returncode = process.returncode
-        except BaseException:
-            _terminate_process_group(process)
-            raise
+        status, returncode = _wait_for_design_process(process, timeout_s)
         elapsed_s = time.perf_counter() - started_at
         if result_path.exists():
             design_result = json.loads(result_path.read_text(encoding="utf-8"))

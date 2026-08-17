@@ -91,6 +91,7 @@ from examples.wgmma_fp32_e5m2_e4m3 import (
 )
 
 from infra.compile_cpp import jit_compile, nonjit_compile
+from infra import docker_run_designs
 from infra import make_designs_html
 from infra import run_designs as design_runner
 
@@ -112,23 +113,6 @@ def _flat_trace_tool(ctx, timeout_ms):
         status="unsat",
     )
     return [report1, report2]
-
-
-def _slow_tool(_ctx, timeout_ms):
-    del timeout_ms
-    time.sleep(1)
-
-
-def _large_report_tool(ctx, timeout_ms):
-    del timeout_ms
-    return build_proof_report(
-        ctx,
-        ctx.copy(),
-        tool="z3",
-        runtime_s=0.0,
-        status="unknown",
-        supplementary_info=b"x" * 2048,
-    )
 
 
 class TestMakeDesignsHtml(unittest.TestCase):
@@ -918,6 +902,192 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(status, "timeout")
         terminate.assert_called_once_with(process)
         process.wait.assert_called_once_with(timeout=17.0)
+
+    def test_unexpected_wait_error_terminates_active_process_group(self):
+        process = Mock(pid=1234)
+        process.wait.side_effect = RuntimeError("coordinator broke")
+
+        with (
+            patch.object(design_runner, "_terminate_process_group") as terminate,
+            self.assertRaisesRegex(RuntimeError, "coordinator broke"),
+        ):
+            design_runner._wait_for_design_process(process, 17.0)
+
+        terminate.assert_called_once_with(process)
+
+    def test_cleanup_kills_descendant_after_group_leader_exits(self):
+        process = Mock(pid=1234)
+        process.poll.return_value = 0
+
+        with (
+            patch.object(design_runner.os, "killpg") as killpg,
+            patch.object(
+                design_runner,
+                "_process_group_exists",
+                side_effect=(True, True),
+            ),
+            patch.object(design_runner.time, "monotonic", side_effect=(10.0, 15.0)),
+        ):
+            design_runner._terminate_process_group(process)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [call(1234, signal.SIGTERM), call(1234, signal.SIGKILL)],
+        )
+        process.poll.assert_called_once_with()
+        process.wait.assert_called_once_with()
+
+    def test_cleanup_reaps_child_when_group_exits_during_grace(self):
+        process = Mock(pid=1234)
+
+        with (
+            patch.object(design_runner.os, "killpg") as killpg,
+            patch.object(
+                design_runner,
+                "_process_group_exists",
+                side_effect=(False, False),
+            ),
+        ):
+            design_runner._terminate_process_group(process)
+
+        killpg.assert_called_once_with(1234, signal.SIGTERM)
+        process.wait.assert_called_once_with()
+
+
+class TestDockerRunDesigns(unittest.TestCase):
+    @staticmethod
+    def _report(status="passed"):
+        return {
+            "started_at": "2026-08-17T00:00:00Z",
+            "finished_at": "2026-08-17T00:00:01Z",
+            "status": status,
+            "designs": {},
+        }
+
+    def test_environment_defaults_and_explicit_cli_overrides(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            explicit_report = Path(temp_dir) / "custom.json"
+            environment = {
+                "REPORT_DIR": temp_dir,
+                "DESIGN_TIMEOUT_S": "41",
+                "DESIGN_MAX_WORKERS": "5",
+            }
+            defaults = design_runner.parse_args(
+                docker_run_designs._runner_args([], environment)
+            )
+            overrides = design_runner.parse_args(
+                docker_run_designs._runner_args(
+                    [
+                        "--report",
+                        str(explicit_report),
+                        "--timeout",
+                        "2.5",
+                        "--max-workers",
+                        "3",
+                    ],
+                    environment,
+                )
+            )
+
+        self.assertEqual(defaults.report, Path(temp_dir) / "run_designs.json")
+        self.assertEqual(defaults.timeout, 41.0)
+        self.assertEqual(defaults.max_workers, 5)
+        self.assertEqual(overrides.report, explicit_report)
+        self.assertEqual(overrides.timeout, 2.5)
+        self.assertEqual(overrides.max_workers, 3)
+
+    def test_completed_failed_checks_still_generate_report_and_return_zero(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "run_designs.json"
+
+            def run(_args):
+                report_path.write_text(
+                    json.dumps(self._report("failed")),
+                    encoding="utf-8",
+                )
+                return 0
+
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(docker_run_designs.run_designs, "main", side_effect=run),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = docker_run_designs.main([])
+
+            html_path = Path(temp_dir) / "index.html"
+            self.assertEqual(status, 0)
+            self.assertTrue(html_path.is_file())
+
+    def test_interruption_generates_partial_html_and_returns_130(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "run_designs.json"
+
+            def interrupt(_args):
+                report_path.write_text(
+                    json.dumps(self._report("interrupted")),
+                    encoding="utf-8",
+                )
+                raise KeyboardInterrupt
+
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(
+                    docker_run_designs.run_designs,
+                    "main",
+                    side_effect=interrupt,
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = docker_run_designs.main([])
+
+            self.assertEqual(status, 130)
+            self.assertTrue((Path(temp_dir) / "index.html").is_file())
+
+    def test_missing_json_is_an_infrastructure_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(
+                    docker_run_designs.run_designs,
+                    "main",
+                    return_value=0,
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                status = docker_run_designs.main([])
+
+        self.assertEqual(status, 1)
+
+    def test_verification_and_html_failures_return_one(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(
+                    docker_run_designs.run_designs,
+                    "main",
+                    side_effect=RuntimeError("broken runner"),
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(docker_run_designs.main([]), 1)
+
+            report_path = Path(temp_dir) / "run_designs.json"
+            report_path.write_text(json.dumps(self._report()), encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(
+                    docker_run_designs.run_designs,
+                    "main",
+                    return_value=0,
+                ),
+                patch.object(
+                    docker_run_designs,
+                    "_generate_html",
+                    side_effect=OSError("disk full"),
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(docker_run_designs.main([]), 1)
 
 class TestEgglogRewriteRules(unittest.TestCase):
     def test_rewrite_rules_are_sound(self):
@@ -6129,9 +6299,9 @@ class TestParallelClassificationVerification(unittest.TestCase):
         )
         self.assertEqual({pid for pid, _ in observer.calls}, {os.getpid()})
 
-    def test_parallel_worker_can_launch_nested_z3_process(self):
+    def test_parallel_worker_can_run_z3_directly(self):
         def run(max_workers):
-            ctx = SpecContext("parallel-nested-z3")
+            ctx = SpecContext("parallel-direct-z3")
             value = ctx.real("value")
             return ast_nodes.check_equivalence(
                 ast_nodes._Spec("first", lambda _ctx: value),
@@ -6312,6 +6482,94 @@ class TestParallelClassificationVerification(unittest.TestCase):
             [f"bounded-{index}" for index in range(11)],
         )
         self.assertLessEqual(max(generation_leads), 2)
+
+    def test_parallel_observes_completion_order_but_returns_generation_order(self):
+        class ImmediateFuture:
+            def __init__(self, index):
+                self.index = index
+
+            def result(self):
+                return CaseVerificationResult(
+                    name=f"case-{self.index}",
+                    proved=True,
+                    status="unsat",
+                    feasibility_status="feasible",
+                    proof_trace=[],
+                    side_feasibility_reports=[],
+                )
+
+        class FakeExecutor:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def submit(self, _fn, case_ctx, *_args):
+                return ImmediateFuture(int(case_ctx.name.rsplit("-", 1)[1]))
+
+        completion_order = iter((1, 2, 0, 3))
+
+        def complete_expected(futures, return_when):
+            self.assertEqual(return_when, parallel_runner.FIRST_COMPLETED)
+            expected = next(completion_order)
+            completed = next(future for future in futures if future.index == expected)
+            return {completed}, set(futures) - {completed}
+
+        observer = Mock()
+        with (
+            patch.object(parallel_runner, "ProcessPoolExecutor", FakeExecutor),
+            patch.object(parallel_runner, "wait", side_effect=complete_expected),
+        ):
+            results = parallel_runner._run_in_parallel(
+                (SpecContext(f"case-{index}") for index in range(4)),
+                verify_case=lambda case_ctx: case_ctx,
+                verification_args=(),
+                observer=observer,
+                max_workers=2,
+            )
+
+        self.assertEqual(
+            [result["name"] for result in results],
+            ["case-0", "case-1", "case-2", "case-3"],
+        )
+        self.assertEqual(
+            [event.args[0]["name"] for event in observer.case_completed.call_args_list],
+            ["case-1", "case-2", "case-0", "case-3"],
+        )
+
+    def test_max_workers_one_runs_serially_without_an_executor(self):
+        cases = [SpecContext("first"), SpecContext("second")]
+        observer = Mock()
+
+        def verify(case_ctx):
+            return CaseVerificationResult(
+                name=case_ctx.name,
+                proved=True,
+                status="unsat",
+                feasibility_status="feasible",
+                proof_trace=[],
+                side_feasibility_reports=[],
+            )
+
+        with patch.object(parallel_runner, "ProcessPoolExecutor") as executor:
+            results = parallel_runner.run_verification_cases(
+                cases,
+                verify_case=verify,
+                verification_args=(),
+                observer=observer,
+                max_workers=1,
+            )
+
+        executor.assert_not_called()
+        self.assertEqual([result["name"] for result in results], ["first", "second"])
+        self.assertEqual(
+            [event.args[0]["name"] for event in observer.case_completed.call_args_list],
+            ["first", "second"],
+        )
 
     def test_parallel_worker_exception_propagates(self):
         ctx = SpecContext("parallel-worker-error")
@@ -7016,47 +7274,6 @@ class TestSolverApis(unittest.TestCase):
         self.assertIsInstance(proof_trace[0], dict)
         self.assertEqual(proof_trace[0]["tool"], "branch-b")
 
-    def test_run_tool_has_hard_wall_clock_timeout(self):
-        ctx = SpecContext("tool-timeout")
-
-        with patch.dict(solver_engine.TOOL_FNS, {"z3": _slow_tool}):
-            reports = solver_engine._run_tool(
-                ctx,
-                {"tool": "z3", "timeout_ms": 1},
-                timeout=0.01,
-            )
-
-        self.assertEqual(reports[0]["status"], "unknown")
-        self.assertEqual(reports[0]["wall_clock_timeout_s"], 0.01)
-
-    def test_run_tool_reaps_child_when_wait_is_interrupted(self):
-        ctx = SpecContext("interrupted-tool")
-        parent_pipe = Mock()
-        child_pipe = Mock()
-        process = Mock(sentinel=object())
-        process.is_alive.return_value = True
-        process_ctx = Mock()
-        process_ctx.Pipe.return_value = (parent_pipe, child_pipe)
-        process_ctx.Process.return_value = process
-
-        with (
-            patch.object(
-                solver_engine.multiprocessing,
-                "get_context",
-                return_value=process_ctx,
-            ),
-            patch.object(solver_engine, "wait", side_effect=KeyboardInterrupt),
-            self.assertRaises(KeyboardInterrupt),
-        ):
-            solver_engine._run_tool(
-                ctx,
-                {"tool": "z3", "timeout_ms": 1},
-            )
-
-        process.terminate.assert_called_once_with()
-        process.join.assert_called_once_with()
-        parent_pipe.close.assert_called_once_with()
-
     def test_spec_context_is_pickleable(self):
         ctx = SpecContext("pickle-context")
         x = ctx.real("x")
@@ -7068,16 +7285,6 @@ class TestSolverApis(unittest.TestCase):
         for transported_ctx in (restored, restored.copy()):
             with self.assertRaisesRegex(RuntimeError, "spec_cache was discarded"):
                 transported_ctx.spec_of(object())
-
-    def test_run_tool_rejects_large_report(self):
-        ctx = SpecContext("large-report")
-
-        with (
-            patch.dict(solver_engine.TOOL_FNS, {"z3": _large_report_tool}),
-            patch.object(solver_engine, "MAX_TOOL_REPORT_BYTES", 1024),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "maximum is 1024 bytes"):
-                solver_engine._run_tool(ctx, {"tool": "z3", "timeout_ms": 1})
 
     def test_check_equivalence_rejects_rival_feasibility_as_proof_tool(self):
         ctx = SpecContext("rival-schedule")

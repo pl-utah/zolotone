@@ -92,7 +92,7 @@ clean:
 run-docker:
 	docker build --platform "$(DOCKER_PLATFORM)" --tag "$(DOCKER_IMAGE)" .
 	mkdir -p "$(abspath $(REPORTS_DIR))"
-	docker run --rm --init \
+	docker run --rm \
 		--platform "$(DOCKER_PLATFORM)" \
 		--user "$$(id -u):$$(id -g)" \
 		--mount type=bind,source="$(abspath $(REPORTS_DIR))",target=/reports \
