@@ -1,0 +1,10 @@
+.git
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+reports
+**/target
+infra/ac_types
+examples/c_models

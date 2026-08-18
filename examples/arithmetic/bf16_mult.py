@@ -52,28 +52,10 @@ def bf16_mult(x: Node, y: Node) -> Node:
         bit_and(bit_or(X.is_zero, Y.is_zero), sign_bit),
     )
 
-    # UQ<7, 0> -> UQ<0, 7>.
-    x_m_fraction = uq_integer_to_fraction(X.mantissa)
-    y_m_fraction = uq_integer_to_fraction(Y.mantissa)
-
-    # Normal values have an implicit leading bit; subnormals and zeros do not.
-    x_m_formatted = if_then_else(
-        X.is_norm,
-        add_implicit_bit(x_m_fraction),
-        uq_resize(x_m_fraction, 1, BFloat16.mantissa_bits),
-    )
-    y_m_formatted = if_then_else(
-        Y.is_norm,
-        add_implicit_bit(y_m_fraction),
-        uq_resize(y_m_fraction, 1, BFloat16.mantissa_bits),
-    )
-
-    # Subnormals have exponent field 0 but effective exponent 1-bias.
-    subnormal_exponent = Const(
-        UQ(1, X.exponent.node_type.int_bits, X.exponent.node_type.frac_bits)
-    )
-    x_effective_e = if_then_else(X.is_sub, subnormal_exponent, X.exponent)
-    y_effective_e = if_then_else(Y.is_sub, subnormal_exponent, Y.exponent)
+    x_m_formatted = effective_significand(X)
+    y_m_formatted = effective_significand(Y)
+    x_effective_e = effective_exponent(X)
+    y_effective_e = effective_exponent(Y)
 
     # Keep the full 8x8-bit significand product exact and let bf16_encode
     # handle normalization, subnormal shifting, and final IEEE rounding.

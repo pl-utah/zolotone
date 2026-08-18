@@ -78,6 +78,23 @@ classification cases so finite values, zeros, infinities, and NaNs are compared
 with the appropriate semantics. Both checks accept an optional solver schedule
 and return `{"proved": bool, "proof_traces": [...]}`.
 
+Classification cases run concurrently by default. Pass `max_workers=1` to
+`check_equivalence()`, `check_spec()`, or `check_determinism()` for serial
+verification, or pass a positive integer to bound the spawn-based process
+pool. The default uses the process-affinity CPU count when available, then
+falls back to `os.cpu_count()` and finally one worker. Set
+`ZOLOTONE_MAX_WORKERS` to give command-line verification a machine-wide cap.
+Cases are still returned in classification-generation order, while streaming
+observer notifications arrive in completion order. Each case worker runs its
+solver schedule directly and sequentially; solver-specific budgets such as the
+Z3 timeout remain unchanged.
+
+`infra/run_designs.py` also accepts `--max-workers` and a per-check `--timeout`.
+Designs and their determinism/specification checks run sequentially, and each
+whole check receives one timeout. The `make nightly` defaults are deliberately
+bounded to eight workers and 600 seconds per check; set
+`DESIGN_MAX_WORKERS` and `DESIGN_TIMEOUT_S` to override them.
+
 ## Repository layout
 
 - `zolotone/spec/` — the math-level specification AST, `SpecContext`, and
@@ -89,9 +106,13 @@ and return `{"proved": bool, "proof_traces": [...]}`.
 - `zolotone/solver/`, `zolotone/smt/`, and `zolotone/egglog/` — proof scheduling
   and solver integrations.
 - `zolotone/codegen/` — C++ generation for implementation models.
-- `examples/` — FP32 arithmetic, FP32 format converters, conventional/optimized
-  BF16 dot products, and reduced WGMMA dot-accumulate models with golden
-  specifications. See `examples/converters/README.md` for converter semantics.
+- `examples/arithmetic/` — ReLU, addition, and multiplication examples.
+- `examples/dot_product/` — Conventional/optimized BF16 dot products and
+  reduced WGMMA dot-accumulate models with golden specifications.
+- `examples/converters/` — floating-point format converters. See
+  `examples/converters/README.md` for converter semantics.
+- `examples/` — shared and standalone components, including CSA and optimized
+  max exponent.
 - `docs/operators.md` — available implementation operators and primitives.
 
 ## Quick start
@@ -111,16 +132,65 @@ suitable Cargo installation is not available.
 To inspect and verify the example designs directly:
 
 ```sh
-.venv/bin/python -m examples.conventional
-.venv/bin/python -m examples.optimized
+.venv/bin/python -m examples.dot_product.bf16x8_dot_fp32_conventional
+.venv/bin/python -m examples.dot_product.bf16x8_dot_fp32_optimized
 ```
 
 Each command builds the typed implementation model, prints its structure,
 checks it against the golden specification, and emits a C++ header.
 
+## Docker design reports
+
+The repository includes an image that runs `infra/run_designs.py`, converts
+its JSON report to HTML, and writes both files to a host directory. Build it
+from the repository root:
+
+```sh
+docker build --platform linux/amd64 --tag zolotone .
+```
+
+The pinned dReal Python package is available for Linux x86-64. Both commands
+explicitly select that platform, so Docker uses x86-64 emulation on ARM hosts.
+
+To build the image and run it with the complete configuration below in one
+command, use the Makefile target:
+
+```sh
+make run-docker
+```
+
+Create the output directory and bind-mount it at `/reports`. Running with the
+host user's UID and GID keeps the generated files owned by that user:
+
+```sh
+docker run --rm \
+  --platform linux/amd64 \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,source="$(pwd)/reports",target=/reports \
+  --env DESIGN_TIMEOUT_S=1800 \
+  zolotone
+```
+
+The image includes `tini` as PID 1, so `docker run --init` is unnecessary.
+Signals are forwarded to the Python report coordinator and orphaned check
+descendants are reaped inside the container.
+
+The image defaults to a 600-second timeout for each check; the command above
+and `make run-docker` override it to 1800 seconds. When `DESIGN_MAX_WORKERS` is
+omitted, verification uses all CPUs available to the container. Set
+`DESIGN_MAX_WORKERS` only when you want to cap parallelism. The Make target's
+timeout can be changed with, for example,
+`make run-docker DOCKER_TIMEOUT_S=900`.
+
+The report is updated after every completed design, so the mounted JSON file
+also retains partial progress if a long run is interrupted. The coordinator
+generates partial HTML whenever that JSON report exists before exiting with
+status 130. Reusing the same host directory replaces `run_designs.json` and
+`index.html` on the next run.
+
 ## Reduced WGMMA examples
 
-`examples.wgmma` provides deterministic scalar models of
+`examples.dot_product.wgmma` provides deterministic scalar models of
 `fp32.e4m3.e4m3`, `fp32.e5m2.e4m3`, and `fp16.e4m3.e5m2`. Each computes
 
 ```text
@@ -135,7 +205,7 @@ the literal K=32 hardware instruction shape. They do not model transpose,
 operand scaling, or an optional accumulator enable.
 
 Run any model module directly—for example,
-`python -m examples.wgmma_fp32_e4m3_e4m3`—to check it and emit its JIT and
+`python -m examples.dot_product.wgmma_fp32_e4m3_e4m3`—to check it and emit its JIT and
 non-JIT headers under `examples/c_models/`. Generated headers are ignored by
 Git.
 

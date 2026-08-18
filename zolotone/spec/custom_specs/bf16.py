@@ -6,11 +6,6 @@ from typing import ClassVar
 from ..spec_ast import BoolExpr, BoolLit, FPExpr, If, RealExpr, RealLit
 from .fp32 import sign_multiplier
 
-
-def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
-    return (~lhs) | rhs
-
-
 @dataclass(frozen=True)
 class bf16(FPExpr):
     """A symbolic IEEE-754 bfloat16 value and its format operations.
@@ -96,12 +91,12 @@ class bf16(FPExpr):
 
         out._assume_exclusive_classification(ctx)
 
-        ctx.assume(_implies(is_norm, exponent >= one))
-        ctx.assume(_implies(is_norm, exponent <= max_exponent - one))
-        ctx.assume(_implies(is_sub | is_zero, exponent.eq(zero)))
-        ctx.assume(_implies(is_zero | is_inf, mantissa.eq(zero)))
-        ctx.assume(_implies(is_inf | is_nan, exponent.eq(max_exponent)))
-        ctx.assume(_implies(is_sub | is_nan, mantissa >= one))
+        ctx.assume(is_norm.implies(exponent >= one))
+        ctx.assume(is_norm.implies(exponent <= max_exponent - one))
+        ctx.assume((is_sub | is_zero).implies(exponent.eq(zero)))
+        ctx.assume((is_zero | is_inf).implies(mantissa.eq(zero)))
+        ctx.assume((is_inf | is_nan).implies(exponent.eq(max_exponent)))
+        ctx.assume((is_sub | is_nan).implies(mantissa >= one))
 
         return out
 
@@ -168,12 +163,12 @@ class bf16(FPExpr):
         max_mantissa = ctx.real_val((1 << cls.mantissa_bits) - 1)
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
-        ctx.assume(_implies(is_norm, exponent >= one))
-        ctx.assume(_implies(is_norm, exponent <= max_exponent - one))
-        ctx.assume(_implies(is_sub | is_zero, exponent.eq(zero)))
-        ctx.assume(_implies(is_inf, exponent.eq(max_exponent)))
-        ctx.assume(_implies(is_zero | is_inf, mantissa.eq(zero)))
-        ctx.assume(_implies(is_sub, mantissa >= one))
+        ctx.assume(is_norm.implies(exponent >= one))
+        ctx.assume(is_norm.implies(exponent <= max_exponent - one))
+        ctx.assume((is_sub | is_zero).implies(exponent.eq(zero)))
+        ctx.assume(is_inf.implies(exponent.eq(max_exponent)))
+        ctx.assume((is_zero | is_inf).implies(mantissa.eq(zero)))
+        ctx.assume(is_sub.implies(mantissa >= one))
 
         signed_value = sign_multiplier(ctx, sign)
         normal_value = (
@@ -187,8 +182,8 @@ class bf16(FPExpr):
             * (two ** (-mantissa_bits))
             * (two ** (one - exponent_bias))
         )
-        ctx.assume(_implies(is_norm, value.eq(normal_value)))
-        ctx.assume(_implies(is_sub, value.eq(subnormal_value)))
+        ctx.assume(is_norm.implies(value.eq(normal_value)))
+        ctx.assume(is_sub.implies(value.eq(subnormal_value)))
         return out
 
     @classmethod

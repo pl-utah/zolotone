@@ -9,7 +9,9 @@ N = 4
 
 
 def spec_wgmma_fp32_e4m3_e4m3(
-    a0, a1, a2, a3, b0, b1, b2, b3, c, ctx
+    a0: e4m3fn, a1: e4m3fn, a2: e4m3fn, a3: e4m3fn,
+    b0: e4m3fn, b1: e4m3fn, b2: e4m3fn, b3: e4m3fn,
+    c: fp32, ctx
 ):
     operands = (a0, a1, a2, a3, b0, b1, b2, b3)
     any_nan = ormap(c.is_nan, *[value.is_nan for value in operands])
@@ -181,7 +183,7 @@ if __name__ == "__main__":
     )
     design.check_determinism()
     design.check_spec()
-    output_directory = Path(__file__).with_name("c_models")
+    output_directory = Path(__file__).resolve().parents[1] / "c_models"
     output_directory.mkdir(exist_ok=True)
     for jittable, suffix in ((True, "jit"), (False, "no_jit")):
         (output_directory / f"wgmma_fp32_e4m3_e4m3_{suffix}.hpp").write_text(

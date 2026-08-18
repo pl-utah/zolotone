@@ -13,7 +13,7 @@ import tempfile
 import time
 from fractions import Fraction
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import dreal
 import math
@@ -22,6 +22,7 @@ from egglog import EGraph
 
 from zolotone import *
 from zolotone.ast import nodes as ast_nodes
+from zolotone.ast import parallel_verification as parallel_runner
 from zolotone.egglog.rules import (
     check_rules,
     constant_rules,
@@ -46,11 +47,11 @@ from zolotone.rival import (
 )
 from zolotone.spec.spec_context import simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
-from examples.fp32_add import fp32_add
-from examples.fp32_mult import fp32_mult
-from examples.bf16_add import bf16_add
-from examples.bf16_mult import bf16_mult
-from examples.bf16_relu import bf16_relu
+from examples.arithmetic.fp32_add import fp32_add
+from examples.arithmetic.fp32_mult import fp32_mult
+from examples.arithmetic.bf16_add import bf16_add
+from examples.arithmetic.bf16_mult import bf16_mult
+from examples.arithmetic.bf16_relu import bf16_relu
 from examples.converters import (
     CONVERTER_FORMATS,
     CONVERTER_REGISTRY,
@@ -66,30 +67,35 @@ from examples.converters import (
     fp32_to_ue4m3,
     ue4m3_to_fp32,
 )
-from examples.ue4m3x2_e2m1x2_mult_fp32 import (
+from examples.arithmetic.ue4m3x2_e2m1x2_add_fp32 import (
+    spec_ue4m3x2_e2m1x2_add_fp32,
+    ue4m3x2_e2m1x2_add_fp32,
+)
+from examples.arithmetic.ue4m3x2_e2m1x2_mult_fp32 import (
     spec_ue4m3x2_e2m1x2_mult_fp32,
     ue4m3x2_e2m1x2_mult_fp32,
 )
-from examples.bf16x8_dot_fp32_conventional import (
+from examples.dot_product.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
     dot_product_spec as bf16x8_dot_fp32_spec,
 )
-from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
-from examples.wgmma import WGMMA_REGISTRY
-from examples.wgmma_fp16_e4m3_e5m2 import (
+from examples.dot_product.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.dot_product.wgmma import WGMMA_REGISTRY
+from examples.dot_product.wgmma_fp16_e4m3_e5m2 import (
     spec_wgmma_fp16_e4m3_e5m2,
     wgmma_fp16_e4m3_e5m2,
 )
-from examples.wgmma_fp32_e4m3_e4m3 import (
+from examples.dot_product.wgmma_fp32_e4m3_e4m3 import (
     spec_wgmma_fp32_e4m3_e4m3,
     wgmma_fp32_e4m3_e4m3,
 )
-from examples.wgmma_fp32_e5m2_e4m3 import (
+from examples.dot_product.wgmma_fp32_e5m2_e4m3 import (
     spec_wgmma_fp32_e5m2_e4m3,
     wgmma_fp32_e5m2_e4m3,
 )
 
 from infra.compile_cpp import jit_compile, nonjit_compile
+from infra import docker_run_designs
 from infra import make_designs_html
 from infra import run_designs as design_runner
 
@@ -113,23 +119,6 @@ def _flat_trace_tool(ctx, timeout_ms):
     return [report1, report2]
 
 
-def _slow_tool(_ctx, timeout_ms):
-    del timeout_ms
-    time.sleep(1)
-
-
-def _large_report_tool(ctx, timeout_ms):
-    del timeout_ms
-    return build_proof_report(
-        ctx,
-        ctx.copy(),
-        tool="z3",
-        runtime_s=0.0,
-        status="unknown",
-        supplementary_info=b"x" * 2048,
-    )
-
-
 class TestMakeDesignsHtml(unittest.TestCase):
     def test_renders_expandable_case_tables_for_each_design(self):
         report = {
@@ -137,6 +126,7 @@ class TestMakeDesignsHtml(unittest.TestCase):
             "finished_at": "2026-08-04T01:03:03Z",
             "designs": {
                 "first <design>": {
+                    "category": "arithmetic",
                     "elapsed_s": 1.25,
                     "checks": {
                         "determinism": {
@@ -167,7 +157,11 @@ class TestMakeDesignsHtml(unittest.TestCase):
                         },
                     },
                 },
-                "second": {"elapsed_s": 0.5, "checks": {}},
+                "second": {
+                    "category": "dot_product",
+                    "elapsed_s": 0.5,
+                    "checks": {},
+                },
             },
         }
 
@@ -187,6 +181,17 @@ class TestMakeDesignsHtml(unittest.TestCase):
         )
         self.assertIn('aria-controls="design-details-1">second</button>', html)
         self.assertIn('id="design-details-1"', html)
+        self.assertIn(
+            '<tr class="category-row"><th scope="colgroup" '
+            'colspan="6">Arithmetic</th></tr>',
+            html,
+        )
+        self.assertIn(
+            '<tr class="category-row"><th scope="colgroup" '
+            'colspan="6">Dot product</th></tr>',
+            html,
+        )
+        self.assertNotIn('<th scope="col">Category</th>', html)
         for heading in (
             "Case name",
             "Status",
@@ -264,6 +269,46 @@ class TestMakeDesignsHtml(unittest.TestCase):
         self.assertIn("<h2>Determinism cases</h2>", html)
         self.assertIn("<h2>Specification cases</h2>", html)
 
+    def test_designs_are_grouped_in_category_order(self):
+        report = {
+            "started_at": "2026-08-04T01:02:03Z",
+            "finished_at": "2026-08-04T01:03:03Z",
+            "designs": {
+                "legacy": {"elapsed_s": 0.1, "checks": {}},
+                "convert": {
+                    "category": "converter",
+                    "elapsed_s": 0.1,
+                    "checks": {},
+                },
+                "dot": {
+                    "category": "dot_product",
+                    "elapsed_s": 0.1,
+                    "checks": {},
+                },
+                "add": {
+                    "category": "arithmetic",
+                    "elapsed_s": 0.1,
+                    "checks": {},
+                },
+            },
+        }
+
+        html = make_designs_html.build_html(
+            report,
+            Path("reports/run_designs.json"),
+        )
+
+        headings = [
+            html.index(f'colspan="6">{label}</th>')
+            for label in ("Arithmetic", "Dot product", "Converter", "Uncategorized")
+        ]
+        self.assertEqual(headings, sorted(headings))
+        self.assertLess(html.index(">Arithmetic</th>"), html.index(">add</button>"))
+        self.assertLess(
+            html.index(">Uncategorized</th>"),
+            html.index(">legacy</button>"),
+        )
+
     def test_timeout_displays_only_completed_cases(self):
         report = {
             "started_at": "2026-08-04T01:02:03Z",
@@ -305,7 +350,34 @@ class TestRunDesigns(unittest.TestCase):
             result = design_runner.main(["--report", "unused.json"])
 
         self.assertEqual(result, 0)
-        run.assert_called_once_with(report_path=Path("unused.json"))
+        run.assert_called_once_with(
+            timeout_s=design_runner.DEFAULT_DESIGN_TIMEOUT_S,
+            report_path=Path("unused.json"),
+        )
+
+    def test_main_applies_timeout_and_worker_overrides(self):
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch.object(design_runner, "run_designs", return_value=0) as run,
+        ):
+            result = design_runner.main(
+                [
+                    "--report",
+                    "unused.json",
+                    "--timeout",
+                    "12.5",
+                    "--max-workers",
+                    "2",
+                ]
+            )
+            configured_workers = os.environ[parallel_runner.MAX_WORKERS_ENV]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(configured_workers, "2")
+        run.assert_called_once_with(
+            timeout_s=12.5,
+            report_path=Path("unused.json"),
+        )
 
     def test_completed_case_journal_recovers_only_complete_cases(self):
         case_event = {
@@ -352,6 +424,33 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["result"]["status"], "unsat")
 
+    def test_check_design_records_worker_errors_without_crashing(self):
+        design = Mock(node_type="Demo")
+        design.check_determinism.side_effect = RuntimeError("pool broke")
+        design_case = design_runner.DesignCase("demo", Mock(return_value=design))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            journal_path = Path(temp_dir) / "completed_cases.jsonl"
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                proved = design_runner.check_design(
+                    design_case,
+                    check_name="determinism",
+                    result_path=result_path,
+                    completed_cases_path=journal_path,
+                )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(proved)
+        self.assertEqual(result["status"], "error")
+        check_result = result["checks"]["determinism"]
+        self.assertEqual(check_result["status"], "error")
+        self.assertEqual(check_result["cases"], {})
+        self.assertEqual(check_result["error"], "RuntimeError: pool broke")
+
     def test_report_cli_uses_default_and_accepts_override(self):
         self.assertEqual(
             design_runner.parse_args([]).report,
@@ -361,11 +460,38 @@ class TestRunDesigns(unittest.TestCase):
             design_runner.parse_args(["--report", "custom/result.json"]).report,
             Path("custom/result.json"),
         )
+        configured_args = design_runner.parse_args(
+            ["--timeout", "30.5", "--max-workers", "3"]
+        )
+        self.assertEqual(configured_args.timeout, 30.5)
+        self.assertEqual(configured_args.max_workers, 3)
         worker_args = design_runner.parse_args(
             ["--design", "bf16_relu", "--check", "specification"]
         )
         self.assertEqual(worker_args.design, "bf16_relu")
         self.assertEqual(worker_args.check, "specification")
+
+    def test_worker_main_returns_zero_without_running_full_suite(self):
+        with (
+            patch.object(design_runner, "check_design", return_value=False) as check,
+            patch.object(design_runner, "run_designs") as run_all,
+        ):
+            status = design_runner.main(
+                [
+                    "--design",
+                    "bf16_relu",
+                    "--check",
+                    "specification",
+                    "--result-file",
+                    "result.json",
+                    "--completed-cases-file",
+                    "completed.jsonl",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        check.assert_called_once()
+        run_all.assert_not_called()
 
     def test_runner_supports_direct_script_execution(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -405,6 +531,7 @@ class TestRunDesigns(unittest.TestCase):
             *CONVERTER_REGISTRY,
             "fp32_add",
             "fp32_mult",
+            "ue4m3x2_e2m1x2_add_fp32",
             "ue4m3x2_e2m1x2_mult_fp32",
             "bf16x8_dot_fp32_conventional",
             "bf16x8_dot_fp32_optimized",
@@ -416,6 +543,22 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(
             [design_case.name for design_case in design_runner.DESIGNS],
             expected_names,
+        )
+        self.assertEqual(
+            {design.category for design in design_runner.DESIGNS},
+            {"arithmetic", "dot_product", "converter"},
+        )
+        self.assertEqual(
+            {
+                design.name: design.category
+                for design in design_runner.DESIGNS
+                if design.name.startswith("wgmma")
+            },
+            {
+                "wgmma_fp32_e4m3_e4m3": "dot_product",
+                "wgmma_fp32_e5m2_e4m3": "dot_product",
+                "wgmma_fp16_e4m3_e5m2": "dot_product",
+            },
         )
         for design_case in design_runner.DESIGNS:
             with self.subTest(design=design_case.name):
@@ -435,6 +578,15 @@ class TestRunDesigns(unittest.TestCase):
             [UE4M3T(), UE4M3T(), E2M1T(), E2M1T()],
         )
         self.assertEqual(unsigned_mixed_multiplier.node_type, Float32T())
+
+        scaled_add = design_runner._find_design(
+            "ue4m3x2_e2m1x2_add_fp32"
+        ).build()
+        self.assertEqual(
+            [arg.node_type for arg in scaled_add.inner_args],
+            [UE4M3T(), UE4M3T(), E2M1T(), E2M1T()],
+        )
+        self.assertEqual(scaled_add.node_type, Float32T())
 
     def test_check_design_runs_the_selected_check(self):
         design = design_runner._build_bf16_relu()
@@ -574,6 +726,7 @@ class TestRunDesigns(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(observed_designs, [{}, {}])
         self.assertEqual(report["designs"]["demo"]["status"], "passed")
+        self.assertEqual(report["designs"]["demo"]["category"], "arithmetic")
         self.assertNotIn("running", json.dumps(report))
 
     def test_json_report_preserves_case_tool_sequence_and_metrics(self):
@@ -837,41 +990,191 @@ class TestRunDesigns(unittest.TestCase):
         terminate.assert_called_once_with(process)
         process.wait.assert_called_once_with(timeout=17.0)
 
-    def test_completed_worker_uses_report_status_instead_of_process_exit(self):
-        process = Mock(pid=1234, returncode=0)
-        process.wait.return_value = 0
-        failed_result = {
-            "checks": {
-                "specification": {
-                    "status": "failed",
-                    "proved": False,
-                    "cases": {},
-                }
-            }
+    def test_unexpected_wait_error_terminates_active_process_group(self):
+        process = Mock(pid=1234)
+        process.wait.side_effect = RuntimeError("coordinator broke")
+
+        with (
+            patch.object(design_runner, "_terminate_process_group") as terminate,
+            self.assertRaisesRegex(RuntimeError, "coordinator broke"),
+        ):
+            design_runner._wait_for_design_process(process, 17.0)
+
+        terminate.assert_called_once_with(process)
+
+    def test_cleanup_kills_descendant_after_group_leader_exits(self):
+        process = Mock(pid=1234)
+        process.poll.return_value = 0
+
+        with (
+            patch.object(design_runner.os, "killpg") as killpg,
+            patch.object(
+                design_runner,
+                "_process_group_exists",
+                side_effect=(True, True),
+            ),
+            patch.object(design_runner.time, "monotonic", side_effect=(10.0, 15.0)),
+        ):
+            design_runner._terminate_process_group(process)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [call(1234, signal.SIGTERM), call(1234, signal.SIGKILL)],
+        )
+        process.poll.assert_called_once_with()
+        process.wait.assert_called_once_with()
+
+    def test_cleanup_reaps_child_when_group_exits_during_grace(self):
+        process = Mock(pid=1234)
+
+        with (
+            patch.object(design_runner.os, "killpg") as killpg,
+            patch.object(
+                design_runner,
+                "_process_group_exists",
+                side_effect=(False, False),
+            ),
+        ):
+            design_runner._terminate_process_group(process)
+
+        killpg.assert_called_once_with(1234, signal.SIGTERM)
+        process.wait.assert_called_once_with()
+
+
+class TestDockerRunDesigns(unittest.TestCase):
+    @staticmethod
+    def _report(status="passed"):
+        return {
+            "started_at": "2026-08-17T00:00:00Z",
+            "finished_at": "2026-08-17T00:00:01Z",
+            "status": status,
+            "designs": {},
         }
 
+    def test_environment_defaults_and_explicit_cli_overrides(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            (temp_path / "result.json").write_text(
-                json.dumps(failed_result),
-                encoding="utf-8",
+            explicit_report = Path(temp_dir) / "custom.json"
+            environment = {
+                "REPORT_DIR": temp_dir,
+                "DESIGN_TIMEOUT_S": "41",
+                "DESIGN_MAX_WORKERS": "5",
+            }
+            defaults = design_runner.parse_args(
+                docker_run_designs._runner_args([], environment)
             )
-            with (
-                patch.object(
-                    design_runner.tempfile,
-                    "TemporaryDirectory",
-                    return_value=contextlib.nullcontext(temp_dir),
-                ),
-                patch.object(design_runner.subprocess, "Popen", return_value=process),
-            ):
-                status, result = design_runner._run_design_subprocess(
-                    "CSA_tree4",
-                    "specification",
-                    17.0,
+            overrides = design_runner.parse_args(
+                docker_run_designs._runner_args(
+                    [
+                        "--report",
+                        str(explicit_report),
+                        "--timeout",
+                        "2.5",
+                        "--max-workers",
+                        "3",
+                    ],
+                    environment,
                 )
+            )
 
-        self.assertEqual(status, "failed")
-        self.assertFalse(result["proved"])
+        self.assertEqual(defaults.report, Path(temp_dir) / "run_designs.json")
+        self.assertEqual(defaults.timeout, 41.0)
+        self.assertEqual(defaults.max_workers, 5)
+        self.assertEqual(overrides.report, explicit_report)
+        self.assertEqual(overrides.timeout, 2.5)
+        self.assertEqual(overrides.max_workers, 3)
+
+    def test_completed_failed_checks_still_generate_report_and_return_zero(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "run_designs.json"
+
+            def run(_args):
+                report_path.write_text(
+                    json.dumps(self._report("failed")),
+                    encoding="utf-8",
+                )
+                return 0
+
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(docker_run_designs.run_designs, "main", side_effect=run),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = docker_run_designs.main([])
+
+            html_path = Path(temp_dir) / "index.html"
+            self.assertEqual(status, 0)
+            self.assertTrue(html_path.is_file())
+
+    def test_interruption_generates_partial_html_and_returns_130(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "run_designs.json"
+
+            def interrupt(_args):
+                report_path.write_text(
+                    json.dumps(self._report("interrupted")),
+                    encoding="utf-8",
+                )
+                raise KeyboardInterrupt
+
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(
+                    docker_run_designs.run_designs,
+                    "main",
+                    side_effect=interrupt,
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = docker_run_designs.main([])
+
+            self.assertEqual(status, 130)
+            self.assertTrue((Path(temp_dir) / "index.html").is_file())
+
+    def test_missing_json_is_an_infrastructure_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(
+                    docker_run_designs.run_designs,
+                    "main",
+                    return_value=0,
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                status = docker_run_designs.main([])
+
+        self.assertEqual(status, 1)
+
+    def test_verification_and_html_failures_return_one(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(
+                    docker_run_designs.run_designs,
+                    "main",
+                    side_effect=RuntimeError("broken runner"),
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(docker_run_designs.main([]), 1)
+
+            report_path = Path(temp_dir) / "run_designs.json"
+            report_path.write_text(json.dumps(self._report()), encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"REPORT_DIR": temp_dir}, clear=True),
+                patch.object(
+                    docker_run_designs.run_designs,
+                    "main",
+                    return_value=0,
+                ),
+                patch.object(
+                    docker_run_designs,
+                    "_generate_html",
+                    side_effect=OSError("disk full"),
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(docker_run_designs.main([]), 1)
 
 class TestEgglogRewriteRules(unittest.TestCase):
     def test_rewrite_rules_are_sound(self):
@@ -884,6 +1187,30 @@ class TestEgglogRewriteRules(unittest.TestCase):
         }
 
         self.assertEqual(invalid_rules, {})
+
+    def test_simplify_ctx_discharges_nonnegative_absolute_value(self):
+        ctx = SpecContext("simplify-nonnegative-abs")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.real_val(1 / 64))
+        ctx.check(abs(x).eq(x))
+
+        report = simplify_ctx(ctx)
+
+        self.assertEqual(report["status"], "unsat")
+
+    def test_simplify_ctx_discharges_nonnegative_sum_and_product_absolute_value(self):
+        ctx = SpecContext("simplify-nonnegative-significand")
+        mantissa = ctx.real("mantissa")
+        ctx.assume(
+            (mantissa >= ctx.zero())
+            & (mantissa <= ctx.real_val((1 << 23) - 1))
+        )
+        significand = ctx.one() + mantissa * (ctx.two() ** ctx.real_val(-23))
+        ctx.check(abs(significand).eq(significand))
+
+        report = simplify_ctx(ctx)
+
+        self.assertEqual(report["status"], "unsat")
 
 
 class TestConstantFolding(unittest.TestCase):
@@ -1610,6 +1937,25 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(learned[p], BoolLit(True))
         self.assertEqual(learned[q], BoolLit(False))
 
+    def test_context_simplify_reads_nested_conjunctions(self):
+        ctx = SpecContext("learn-conjunction")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        p = ctx.bool("p")
+
+        ctx.assume(x.eq(ctx.zero()) & (y.eq(ctx.one()) & p))
+
+        self.assertEqual(
+            ctx.learned_literals(),
+            {
+                x: RealLit(0),
+                y: RealLit(1),
+                p: BoolLit(True),
+            },
+        )
+        ctx.check((x + y).eq(ctx.one()))
+        self.assertEqual(ctx.simplify().checks, [])
+
     def test_learned_literals_reads_non_literal_equalities_as_boolean_facts(self):
         ctx = SpecContext("learn-ignore")
         x = ctx.real("x")
@@ -1853,7 +2199,10 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(simplified.checks, [])
         self.assertEqual(
             simplified.learned_literals(),
-            {in_range: BoolLit(True)},
+            {
+                x >= ctx.real_val(-1): BoolLit(True),
+                x <= ctx.one(): BoolLit(True),
+            },
         )
 
     def test_context_fixpoint_simplifies_assumptions_from_other_compound_facts(self):
@@ -2278,6 +2627,27 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             BoolLit(True),
         )
 
+    def test_implies_lowers_directly_to_existing_boolean_ast(self):
+        lhs = BoolVar("lhs")
+        rhs = BoolVar("rhs")
+
+        expression = lhs.implies(rhs)
+
+        self.assertEqual(expression, (~lhs) | rhs)
+        self.assertEqual(from_egglog(expression.to_egglog()), (~lhs) | rhs)
+        self.assertEqual(
+            BoolLit(True).implies(BoolLit(False)).constant_fold(),
+            BoolLit(False),
+        )
+        self.assertEqual(
+            BoolLit(False).implies(BoolLit(False)).constant_fold(),
+            BoolLit(True),
+        )
+
+    def test_implies_rejects_non_boolean_operands(self):
+        with self.assertRaisesRegex(TypeError, "Expected BoolExpr"):
+            BoolLit(True).implies(RealLit(0))
+
     def test_if_rejects_mixed_bool_and_real_branches(self):
         with self.assertRaisesRegex(TypeError, "If branches"):
             If(BoolVar("condition"), BoolVar("on_true"), RealLit(0))
@@ -2588,7 +2958,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             shift_if_subnormal(mantissa, exponent, subnormal_extra_bits=-1)
 
     def test_fp32_multiplier_spec_zero_handling(self):
-        from examples.fp32_mult import spec_fp32_mult
+        from examples.arithmetic.fp32_mult import spec_fp32_mult
 
         cases = (
             ("+0 * +0", 0x00000000, 0x00000000, "is_pzero"),
@@ -2622,7 +2992,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_multiplier_spec_preserves_underflow_zero_sign(self):
-        from examples.fp32_mult import spec_fp32_mult
+        from examples.arithmetic.fp32_mult import spec_fp32_mult
 
         cases = (
             ("positive half-minimum tie", 0x00000001, 0x3f000000, "is_pzero"),
@@ -2648,7 +3018,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_adder_spec_preserves_single_infinity(self):
-        from examples.fp32_add import spec_fp32_add
+        from examples.arithmetic.fp32_add import spec_fp32_add
 
         ctx = SpecContext("fp32-adder-single-infinity")
         cases = (
@@ -3467,6 +3837,31 @@ class TestUE4M3Spec(unittest.TestCase):
                     self.assertEqual(compiled(source_bits), expected)
         finally:
             tempdir.cleanup()
+
+    def test_fp32_converter_default_schedule_proves_normal_output(self):
+        source = Var("source", Float32T())
+        design = fp32_to_ue4m3(source)
+        target_name = "fp32_to_ue4m3[arg0=norm,output=norm]"
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_spec(max_workers=1)
+
+        case_result = result["case_results"][0]
+        self.assertTrue(case_result["proved"])
+        self.assertEqual(case_result["proof_trace"][-1]["tool"], "egglog-rewrite")
+        self.assertEqual(case_result["proof_trace"][-1]["status"], "unsat")
 
 
 class TestE5M2Spec(unittest.TestCase):
@@ -4940,6 +5335,177 @@ class TestReducedWGMMA(unittest.TestCase):
                 tempdir_no_jit.cleanup()
 
 
+class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
+    @staticmethod
+    def _reference_bits(scale0, scale1, x0, x1):
+        if scale0.is_nan or scale1.is_nan:
+            return Float32.NaN().val
+
+        value = scale0.to_val() * x0.to_val() + scale1.to_val() * x1.to_val()
+        return struct.unpack(">I", struct.pack(">f", value))[0]
+
+    @staticmethod
+    def _cases():
+        return (
+            ("ordinary-normal", 0x38, 0x40, 0x2, 0x3, 0x40800000),
+            ("ue4m3-subnormal", 0x01, 0x00, 0x1, 0x2, 0x3A800000),
+            ("e2m1-subnormal", 0x38, 0x38, 0x1, 0x2, 0x3FC00000),
+            ("unequal-scales", 0x7E, 0x01, 0x7, 0x1, 0x45280004),
+            ("exact-cancellation", 0x40, 0x40, 0x3, 0xB, 0x00000000),
+            ("both-negative-zero", 0x00, 0x38, 0xF, 0x8, 0x80000000),
+            ("mixed-sign-zeros", 0x00, 0x38, 0xF, 0x0, 0x00000000),
+            ("both-positive-zero", 0x00, 0x38, 0x7, 0x0, 0x00000000),
+            ("maximum-positive", 0x7E, 0x7E, 0x7, 0x7, 0x45A80000),
+            ("maximum-negative", 0x7E, 0x7E, 0xF, 0xF, 0xC5A80000),
+            ("nan0-precedes-negative-zero", 0x7F, 0x00, 0xF, 0x8, 0x7FC00000),
+            ("nan1-precedes-cancellation", 0x38, 0x7F, 0x2, 0xA, 0x7FC00000),
+        )
+
+    def _make_design(self):
+        scale0 = Var(name="scale0", sign=UE4M3T())
+        scale1 = Var(name="scale1", sign=UE4M3T())
+        x0 = Var(name="x0", sign=E2M1T())
+        x1 = Var(name="x1", sign=E2M1T())
+        return (scale0, scale1, x0, x1), ue4m3x2_e2m1x2_add_fp32(
+            scale0, scale1, x0, x1
+        )
+
+    @staticmethod
+    def _load(variables, bits):
+        variables[0].load_val(UE4M3(bits[0]))
+        variables[1].load_val(UE4M3(bits[1]))
+        variables[2].load_val(E2M1(bits[2]))
+        variables[3].load_val(E2M1(bits[3]))
+
+    def test_golden_spec_returns_fp32(self):
+        ctx = SpecContext("ue4m3x2-e2m1x2-add-fp32-spec")
+        values = (
+            UE4M3T().to_spec("scale0", ctx),
+            UE4M3T().to_spec("scale1", ctx),
+            E2M1T().to_spec("x0", ctx),
+            E2M1T().to_spec("x1", ctx),
+        )
+        result = spec_ue4m3x2_e2m1x2_add_fp32(*values, ctx)
+        self.assertIsInstance(result, fp32)
+
+    def _assert_spec_case_proves(self, target_name):
+        _, design = self._make_design()
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_spec()
+
+        self.assertTrue(result["proved"])
+        proof_trace = result["case_results"][0]["proof_trace"]
+        self.assertEqual(proof_trace[-1]["status"], "unsat")
+
+    def test_default_schedule_proves_normal_and_subnormal_cases(self):
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_add_fp32["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
+        )
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_add_fp32["
+            "arg0=norm,arg1=sub,arg2=norm,arg3=norm,output=norm]"
+        )
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_add_fp32["
+            "arg0=sub,arg1=norm,arg2=sub,arg3=norm,output=norm]"
+        )
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_add_fp32["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=zero,output=norm]"
+        )
+
+    def test_determinism(self):
+        _, design = self._make_design()
+        target_name = (
+            "ue4m3x2_e2m1x2_add_fp32_determinism["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
+        )
+        split_classification_cases = ast_nodes._split_classification_cases
+
+        def select_target_case(*args, **kwargs):
+            cases = split_classification_cases(*args, **kwargs)
+            return [next(case for case in cases if case.name == target_name)]
+
+        with (
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_determinism()
+        self.assertTrue(result["proved"])
+
+    def test_curated_exact_results_zeros_and_nan_precedence(self):
+        variables, design = self._make_design()
+        for name, scale0, scale1, x0, x1, expected in self._cases():
+            with self.subTest(case=name):
+                self._load(variables, (scale0, scale1, x0, x1))
+                self.assertEqual(design.evaluate().val, expected)
+
+    def test_random_inputs_match_exact_fused_reference(self):
+        variables, design = self._make_design()
+        rng = random.Random(20260814)
+        for _ in range(500):
+            values = (
+                UE4M3(rng.randrange(0x80)),
+                UE4M3(rng.randrange(0x80)),
+                E2M1(rng.randrange(16)),
+                E2M1(rng.randrange(16)),
+            )
+            for variable, value in zip(variables, values):
+                variable.load_val(value)
+            self.assertEqual(design.evaluate().val, self._reference_bits(*values))
+
+    def test_jit_and_nonjit_cpp_match_reference(self):
+        variables, design = self._make_design()
+        tempdir_jit, compiled_jit = jit_compile(design)
+        tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
+        rng = random.Random(20260815)
+        inputs = [case[1:5] for case in self._cases()]
+        inputs.extend(
+            (
+                rng.randrange(0x80),
+                rng.randrange(0x80),
+                rng.randrange(16),
+                rng.randrange(16),
+            )
+            for _ in range(100)
+        )
+        try:
+            for bits in inputs:
+                values = (
+                    UE4M3(bits[0]),
+                    UE4M3(bits[1]),
+                    E2M1(bits[2]),
+                    E2M1(bits[3]),
+                )
+                expected = self._reference_bits(*values)
+                self._load(variables, bits)
+                with self.subTest(inputs=bits):
+                    self.assertEqual(design.evaluate().val, expected)
+                    self.assertEqual(compiled_jit(*bits), expected)
+                    self.assertEqual(compiled_no_jit(*bits), expected)
+        finally:
+            tempdir_jit.cleanup()
+            tempdir_no_jit.cleanup()
+
+
 class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
     @staticmethod
     def _reference_bits(a0, a1, b0, b1):
@@ -5984,6 +6550,353 @@ class TestStdoutVerificationObserver(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
 
 
+class TestParallelClassificationVerification(unittest.TestCase):
+    @staticmethod
+    def _fp_identity_result(max_workers, observer=None):
+        ctx = SpecContext("parallel-fp-identity")
+        value = fp32.fresh("value", ctx)
+        return ast_nodes.check_equivalence(
+            ast_nodes._Spec("first", lambda _ctx: value),
+            ast_nodes._Spec("second", lambda _ctx: value),
+            base_ctx=ctx,
+            inputs=[],
+            schedule=[{"tool": "simplify"}],
+            observer=observer,
+            max_workers=max_workers,
+        )
+
+    @staticmethod
+    def _case_summary(result):
+        return [
+            (
+                case_result["name"],
+                case_result["proved"],
+                case_result["status"],
+                case_result["feasibility_status"],
+                [report["tool"] for report in case_result["proof_trace"]],
+                [
+                    report["feasibility_status"]
+                    for report in case_result["side_feasibility_reports"]
+                ],
+            )
+            for case_result in result["case_results"]
+        ]
+
+    def test_parallel_matches_serial_order_and_observes_in_parent(self):
+        class ParentObserver:
+            def __init__(self):
+                self.calls = []
+
+            def case_completed(self, result):
+                self.calls.append((os.getpid(), result["name"]))
+
+        observer = ParentObserver()
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            serial = self._fp_identity_result(max_workers=1)
+            parallel = self._fp_identity_result(
+                max_workers=2,
+                observer=observer,
+            )
+
+        self.assertTrue(serial["proved"])
+        self.assertEqual(
+            self._case_summary(parallel),
+            self._case_summary(serial),
+        )
+        self.assertEqual(len(observer.calls), len(parallel["case_results"]))
+        self.assertEqual(
+            {case_name for _, case_name in observer.calls},
+            {case["name"] for case in parallel["case_results"]},
+        )
+        self.assertEqual({pid for pid, _ in observer.calls}, {os.getpid()})
+
+    def test_parallel_worker_can_run_z3_directly(self):
+        def run(max_workers):
+            ctx = SpecContext("parallel-direct-z3")
+            value = ctx.real("value")
+            return ast_nodes.check_equivalence(
+                ast_nodes._Spec("first", lambda _ctx: value),
+                ast_nodes._Spec("second", lambda _ctx: value + ctx.one()),
+                base_ctx=ctx,
+                inputs=[],
+                schedule=[{"tool": "z3", "timeout_ms": 1000}],
+                max_workers=max_workers,
+            )
+
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            serial = run(1)
+            parallel = run(2)
+
+        self.assertFalse(parallel["proved"])
+        self.assertEqual(self._case_summary(parallel), self._case_summary(serial))
+        self.assertEqual(parallel["proof_traces"][0][-1]["tool"], "z3")
+        self.assertEqual(parallel["proof_traces"][0][-1]["status"], "sat")
+
+    def test_serial_and_parallel_match_for_side_feasibility_cases(self):
+        def run(max_workers, second_is_feasible):
+            ctx = SpecContext("parallel-side-feasibility")
+            value = ctx.real("value")
+
+            def collect_zero(side_ctx):
+                side_ctx.assume(value.eq(side_ctx.zero()))
+                return value
+
+            def collect_second(side_ctx):
+                if second_is_feasible:
+                    side_ctx.assume(value.eq(side_ctx.one()))
+                else:
+                    side_ctx.assume(side_ctx.false())
+                return value
+
+            with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+                return ast_nodes.check_equivalence(
+                    ast_nodes._Spec("zero", collect_zero),
+                    ast_nodes._Spec("second", collect_second),
+                    base_ctx=ctx,
+                    inputs=[],
+                    schedule=[{"tool": "simplify"}],
+                    max_workers=max_workers,
+                )
+
+        for second_is_feasible in (True, False):
+            with self.subTest(second_is_feasible=second_is_feasible):
+                serial = run(1, second_is_feasible)
+                parallel = run(2, second_is_feasible)
+                self.assertEqual(serial["proved"], parallel["proved"])
+                self.assertEqual(
+                    self._case_summary(serial),
+                    self._case_summary(parallel),
+                )
+
+    def test_automatic_worker_count_uses_affinity_and_fallbacks(self):
+        with (
+            patch.object(
+                parallel_runner.os,
+                "sched_getaffinity",
+                return_value={2, 4},
+                create=True,
+            ),
+            patch.object(parallel_runner.os, "cpu_count") as cpu_count,
+        ):
+            self.assertEqual(parallel_runner.automatic_max_workers(), 2)
+            cpu_count.assert_not_called()
+
+        with (
+            patch.object(
+                parallel_runner.os,
+                "sched_getaffinity",
+                side_effect=OSError,
+                create=True,
+            ),
+            patch.object(parallel_runner.os, "cpu_count", return_value=7),
+        ):
+            self.assertEqual(parallel_runner.automatic_max_workers(), 7)
+
+        with (
+            patch.object(
+                parallel_runner.os,
+                "sched_getaffinity",
+                return_value=set(),
+                create=True,
+            ),
+            patch.object(parallel_runner.os, "cpu_count", return_value=None),
+        ):
+            self.assertEqual(parallel_runner.automatic_max_workers(), 1)
+
+    def test_invalid_worker_counts_are_rejected(self):
+        for invalid in (True, 1.5, "2", []):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(TypeError):
+                    parallel_runner.resolve_max_workers(invalid)
+        for invalid in (0, -1):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    parallel_runner.resolve_max_workers(invalid)
+
+    def test_worker_count_can_be_bounded_by_environment(self):
+        with patch.dict(
+            os.environ,
+            {parallel_runner.MAX_WORKERS_ENV: "3"},
+        ):
+            self.assertEqual(parallel_runner.resolve_max_workers(None), 3)
+
+        for invalid in ("invalid", "0"):
+            with (
+                self.subTest(invalid=invalid),
+                patch.dict(
+                    os.environ,
+                    {parallel_runner.MAX_WORKERS_ENV: invalid},
+                ),
+                self.assertRaises(ValueError),
+            ):
+                parallel_runner.resolve_max_workers(None)
+
+    def test_parallel_submission_keeps_only_one_case_per_worker_in_flight(self):
+        generated_count = 0
+        completed_count = 0
+        generation_leads = []
+
+        def cases():
+            nonlocal generated_count
+            for index in range(11):
+                generated_count += 1
+                yield SpecContext(f"bounded-{index}")
+
+        class ImmediateFuture:
+            def __init__(self, case_ctx):
+                self.case_ctx = case_ctx
+
+            def result(self):
+                return CaseVerificationResult(
+                    name=self.case_ctx.name,
+                    proved=True,
+                    status="unsat",
+                    feasibility_status="feasible",
+                    proof_trace=[],
+                    side_feasibility_reports=[],
+                )
+
+        class FakeExecutor:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def submit(self, _fn, case_ctx, *_args):
+                return ImmediateFuture(case_ctx)
+
+        def complete_one(futures, return_when):
+            nonlocal completed_count
+            self.assertEqual(return_when, parallel_runner.FIRST_COMPLETED)
+            generation_leads.append(generated_count - completed_count)
+            completed_count += 1
+            return {next(iter(futures))}, set(futures)
+
+        with (
+            patch.object(parallel_runner, "ProcessPoolExecutor", FakeExecutor),
+            patch.object(parallel_runner, "wait", side_effect=complete_one),
+        ):
+            results = parallel_runner._run_in_parallel(
+                cases(),
+                verify_case=lambda case_ctx: case_ctx,
+                verification_args=(),
+                observer=Mock(),
+                max_workers=2,
+            )
+
+        self.assertEqual(
+            [result["name"] for result in results],
+            [f"bounded-{index}" for index in range(11)],
+        )
+        self.assertLessEqual(max(generation_leads), 2)
+
+    def test_parallel_observes_completion_order_but_returns_generation_order(self):
+        class ImmediateFuture:
+            def __init__(self, index):
+                self.index = index
+
+            def result(self):
+                return CaseVerificationResult(
+                    name=f"case-{self.index}",
+                    proved=True,
+                    status="unsat",
+                    feasibility_status="feasible",
+                    proof_trace=[],
+                    side_feasibility_reports=[],
+                )
+
+        class FakeExecutor:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def submit(self, _fn, case_ctx, *_args):
+                return ImmediateFuture(int(case_ctx.name.rsplit("-", 1)[1]))
+
+        completion_order = iter((1, 2, 0, 3))
+
+        def complete_expected(futures, return_when):
+            self.assertEqual(return_when, parallel_runner.FIRST_COMPLETED)
+            expected = next(completion_order)
+            completed = next(future for future in futures if future.index == expected)
+            return {completed}, set(futures) - {completed}
+
+        observer = Mock()
+        with (
+            patch.object(parallel_runner, "ProcessPoolExecutor", FakeExecutor),
+            patch.object(parallel_runner, "wait", side_effect=complete_expected),
+        ):
+            results = parallel_runner._run_in_parallel(
+                (SpecContext(f"case-{index}") for index in range(4)),
+                verify_case=lambda case_ctx: case_ctx,
+                verification_args=(),
+                observer=observer,
+                max_workers=2,
+            )
+
+        self.assertEqual(
+            [result["name"] for result in results],
+            ["case-0", "case-1", "case-2", "case-3"],
+        )
+        self.assertEqual(
+            [event.args[0]["name"] for event in observer.case_completed.call_args_list],
+            ["case-1", "case-2", "case-0", "case-3"],
+        )
+
+    def test_max_workers_one_runs_serially_without_an_executor(self):
+        cases = [SpecContext("first"), SpecContext("second")]
+        observer = Mock()
+
+        def verify(case_ctx):
+            return CaseVerificationResult(
+                name=case_ctx.name,
+                proved=True,
+                status="unsat",
+                feasibility_status="feasible",
+                proof_trace=[],
+                side_feasibility_reports=[],
+            )
+
+        with patch.object(parallel_runner, "ProcessPoolExecutor") as executor:
+            results = parallel_runner.run_verification_cases(
+                cases,
+                verify_case=verify,
+                verification_args=(),
+                observer=observer,
+                max_workers=1,
+            )
+
+        executor.assert_not_called()
+        self.assertEqual([result["name"] for result in results], ["first", "second"])
+        self.assertEqual(
+            [event.args[0]["name"] for event in observer.case_completed.call_args_list],
+            ["first", "second"],
+        )
+
+    def test_parallel_worker_exception_propagates(self):
+        ctx = SpecContext("parallel-worker-error")
+        value = ctx.real("value")
+        with self.assertRaisesRegex(ValueError, "Unknown schedule tool"):
+            ast_nodes.check_equivalence(
+                ast_nodes._Spec("first", lambda _ctx: value),
+                ast_nodes._Spec("second", lambda _ctx: value),
+                base_ctx=ctx,
+                inputs=[],
+                schedule=[{"tool": "not-a-tool"}],
+                observer=Mock(),
+                max_workers=2,
+            )
+
+
 class TestSpecificationDeterminism(unittest.TestCase):
     def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):
         def malformed_spec(x, ctx):
@@ -6222,6 +7135,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
                 base_ctx=base_ctx,
                 inputs=[],
                 schedule=[{"tool": "simplify"}],
+                max_workers=1,
             )
 
         self.assertFalse(result["proved"])
@@ -6671,19 +7585,6 @@ class TestSolverApis(unittest.TestCase):
         self.assertIsInstance(proof_trace[0], dict)
         self.assertEqual(proof_trace[0]["tool"], "branch-b")
 
-    def test_run_tool_has_hard_wall_clock_timeout(self):
-        ctx = SpecContext("tool-timeout")
-
-        with patch.dict(solver_engine.TOOL_FNS, {"z3": _slow_tool}):
-            reports = solver_engine._run_tool(
-                ctx,
-                {"tool": "z3", "timeout_ms": 1},
-                timeout=0.01,
-            )
-
-        self.assertEqual(reports[0]["status"], "unknown")
-        self.assertEqual(reports[0]["wall_clock_timeout_s"], 0.01)
-
     def test_spec_context_is_pickleable(self):
         ctx = SpecContext("pickle-context")
         x = ctx.real("x")
@@ -6695,16 +7596,6 @@ class TestSolverApis(unittest.TestCase):
         for transported_ctx in (restored, restored.copy()):
             with self.assertRaisesRegex(RuntimeError, "spec_cache was discarded"):
                 transported_ctx.spec_of(object())
-
-    def test_run_tool_rejects_large_report(self):
-        ctx = SpecContext("large-report")
-
-        with (
-            patch.dict(solver_engine.TOOL_FNS, {"z3": _large_report_tool}),
-            patch.object(solver_engine, "MAX_TOOL_REPORT_BYTES", 1024),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "maximum is 1024 bytes"):
-                solver_engine._run_tool(ctx, {"tool": "z3", "timeout_ms": 1})
 
     def test_check_equivalence_rejects_rival_feasibility_as_proof_tool(self):
         ctx = SpecContext("rival-schedule")

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import sys
 from collections import Counter
-from typing import Any, Final, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, TextIO, cast
 
 
 ProofStatus = Literal["sat", "unsat", "unknown"]
@@ -16,7 +17,6 @@ COUNT_FIELDS: Final = (
 )
 TOOL_METADATA_FIELDS: Final = (
     "timeout_ms",
-    "wall_clock_timeout_s",
     "precision",
     "iterations_used",
     "egraph_size",
@@ -90,6 +90,77 @@ class VerificationObserver(Protocol):
     """Receives verification cases after they have completed."""
 
     def case_completed(self, result: CaseVerificationResult) -> None: ...
+
+
+class StdoutVerificationObserver:
+    """Print completed verification cases as a streaming stdout table."""
+
+    def __init__(self, stream: TextIO | None = None) -> None:
+        self._stream = stream
+        self._header_printed = False
+
+    def _print(self, value: str) -> None:
+        print(
+            value,
+            file=self._stream if self._stream is not None else sys.stdout,
+            flush=True,
+        )
+
+    @staticmethod
+    def _decisive_tool(result: CaseVerificationResult) -> str:
+        if (
+            result["proved"]
+            and result["feasibility_status"] == "not feasible"
+            and result["side_feasibility_reports"]
+        ):
+            tools = dict.fromkeys(
+                str(report["tool"])
+                for report in result["side_feasibility_reports"]
+            )
+            return "+".join(tools)
+
+        proof_trace = result["proof_trace"]
+        if not proof_trace:
+            return "-"
+        decisive_report = next(
+            (
+                report
+                for report in reversed(proof_trace)
+                if report["status"] in {"sat", "unsat"}
+            ),
+            proof_trace[-1],
+        )
+        return str(decisive_report["tool"])
+
+    @staticmethod
+    def _elapsed_s(result: CaseVerificationResult) -> float:
+        reports = (
+            list(result["proof_trace"])
+            + list(result["side_feasibility_reports"])
+        )
+        return sum(float(report.get("runtime_s", 0.0)) for report in reports)
+
+    def case_completed(self, result: CaseVerificationResult) -> None:
+        if not self._header_printed:
+            self._print("Verification cases:")
+            self._print(
+                f"{'PROVED':<7} "
+                f"{'STATUS':<8} "
+                f"{'FEASIBILITY':<15} "
+                f"{'TOOL':<24} "
+                f"{'TIME':>9}  "
+                "CASE"
+            )
+            self._header_printed = True
+
+        self._print(
+            f"{'yes' if result['proved'] else 'no':<7} "
+            f"{result['status']:<8} "
+            f"{result['feasibility_status'] or 'unknown':<15} "
+            f"{self._decisive_tool(result):<24} "
+            f"{self._elapsed_s(result):>8.3f}s  "
+            f"{result['name']}"
+        )
 
 
 class CheckResult(dict[str, Any]):

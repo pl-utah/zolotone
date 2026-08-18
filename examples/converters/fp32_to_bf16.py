@@ -16,32 +16,16 @@ def spec_fp32_to_bf16(x: fp32, ctx):
 def fp32_to_bf16(x: Node) -> Node:
     X = fp32_decode(x)
 
-    mantissa_fraction = uq_integer_to_fraction(X.mantissa)
-    significand = if_then_else(
-        X.is_norm,
-        add_implicit_bit(mantissa_fraction),
-        uq_resize(mantissa_fraction, 1, Float32.mantissa_bits),
-    )
+    significand = effective_significand(X)
     significand = uq_resize(
         significand,
         1,
         max(Float32.mantissa_bits, BFloat16.mantissa_bits),
     )
 
-    subnormal_exponent = Const(
-        UQ(
-            1,
-            X.exponent.node_type.int_bits,
-            X.exponent.node_type.frac_bits,
-        )
-    )
-    effective_exponent = if_then_else(
-        X.is_sub,
-        subnormal_exponent,
-        X.exponent,
-    )
+    source_exponent = effective_exponent(X)
     target_exponent = q_add(
-        uq_to_q(effective_exponent),
+        uq_to_q(source_exponent),
         Const(Q.from_int(BFloat16.exponent_bias - Float32.exponent_bias)),
     )
 

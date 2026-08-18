@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import multiprocessing
-import pickle
-from multiprocessing.connection import wait
-from time import perf_counter
 from typing import Any
 
 from ..spec import SpecContext
 from ..spec.spec_context import simplify_ctx
-from .report import ProofReport, build_proof_report, validate_proof_status
+from .report import ProofReport, validate_proof_status
 from ..egglog import egglog_rewrite
 from ..smt import z3_check_eq, dreal_check_eq
 
@@ -18,10 +14,6 @@ DEFAULT_Z3_TIMEOUT = 10000
 DEFAULT_DREAL_PRECISION = 0.001
 DEFAULT_EGGLOG_MATCH_LIMIT = 100000
 DEFAULT_EGGLOG_BAN_LENGTH = 1
-DEFAULT_TOOL_TIMEOUT_S = 60.0
-MAX_TOOL_REPORT_BYTES = 8 * 1024 * 1024
-HARD_TIMEOUT_TOOLS = frozenset({"z3", "dreal"})
-
 
 TOOL_FNS = {
     "simplify": simplify_ctx,
@@ -94,83 +86,11 @@ def _normalize_schedule(
     return normalized
 
 
-def _run_tool_worker(
-    pipe,
-    tool: str,
-    tool_fn,
-    ctx: SpecContext,
-    kwargs: dict[str, Any],
-    max_report_bytes: int,
-):
-    try:
-        reports = _normalize_tool_reports(tool_fn(ctx, **kwargs))
-        payload = pickle.dumps(("ok", reports), protocol=pickle.HIGHEST_PROTOCOL)
-        if len(payload) > max_report_bytes:
-            raise ValueError(
-                f"{tool} report is {len(payload)} bytes; "
-                f"maximum is {max_report_bytes} bytes"
-            )
-        pipe.send_bytes(payload)
-    except BaseException as exc:
-        pipe.send_bytes(pickle.dumps(("error", repr(exc))))
-    finally:
-        pipe.close()
-
-
-def _run_tool(ctx: SpecContext, step: dict[str, Any], timeout=DEFAULT_TOOL_TIMEOUT_S):
+def _run_tool(ctx: SpecContext, step: dict[str, Any]):
     tool = step["tool"]
     tool_fn = TOOL_FNS[tool]
     kwargs = {key: value for key, value in step.items() if key != "tool"}
-
-    if tool not in HARD_TIMEOUT_TOOLS:
-        return _normalize_tool_reports(tool_fn(ctx, **kwargs))
-
-    process_ctx = multiprocessing.get_context("spawn")
-    parent_pipe, child_pipe = process_ctx.Pipe(duplex=False)
-    process = process_ctx.Process(
-        target=_run_tool_worker,
-        args=(
-            child_pipe,
-            tool,
-            tool_fn,
-            ctx,
-            kwargs,
-            MAX_TOOL_REPORT_BYTES,
-        ),
-    )
-
-    started_at = perf_counter()
-    process.start()
-    child_pipe.close()
-    ready = wait([parent_pipe, process.sentinel], timeout=timeout)
-
-    if not ready:
-        process.terminate()
-        process.join()
-        parent_pipe.close()
-        return [
-            build_proof_report(
-                ctx,
-                ctx.copy(),
-                tool=tool,
-                runtime_s=perf_counter() - started_at,
-                status="unknown",
-                wall_clock_timeout_s=timeout,
-                **kwargs,
-            )
-        ]
-
-    if not parent_pipe.poll():
-        process.join()
-        parent_pipe.close()
-        raise RuntimeError(f"{tool} worker exited without returning a result")
-
-    status, result = pickle.loads(parent_pipe.recv_bytes())
-    process.join()
-    parent_pipe.close()
-    if status == "error":
-        raise RuntimeError(f"{tool} worker failed: {result}")
-    return result
+    return _normalize_tool_reports(tool_fn(ctx, **kwargs))
 
 
 def _normalize_tool_reports(
@@ -202,14 +122,13 @@ def check_equivalence(
 ):
     current_tracks: list[list[ProofReport]] = [[]]
     current_ctxs = [ctx.copy()]
-
     normalized_schedule = _normalize_schedule(schedule=schedule)
     for step in normalized_schedule:
         next_tracks: list[list[ProofReport]] = []
         next_ctxs: list[SpecContext] = []
 
         for current_ctx, current_track in zip(current_ctxs, current_tracks):
-            reports = _run_tool(current_ctx, step, timeout=DEFAULT_TOOL_TIMEOUT_S)
+            reports = _run_tool(current_ctx, step)
             for report in reports:
                 next_track = current_track + [report]
                 status = report["status"]

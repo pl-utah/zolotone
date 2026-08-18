@@ -91,6 +91,12 @@ def rewrite_rules():
         ("const_9", (zero + x).eq(x)),
         ("const_10", (- zero).eq(zero)),
         ("const_11", zero.eq(-zero)),
+
+        # Absolute value
+        ("abs_neg", abs(-a).eq(abs(a))),
+        ("abs_abs", abs(abs(a)).eq(abs(a))),
+        ("abs_mul", abs(a * b).eq(abs(a) * abs(b))),
+        ("abs_if", abs(If(bool_var, a, b)).eq(If(bool_var, abs(a), abs(b)))),
         
         # Equality
         ("eq_1", (a.eq(a)).eq(true)),
@@ -274,11 +280,18 @@ def constant_rules(fold_base_two_powers: bool = True):
         rewrite(Math.Eq(Math.Num(m), Math.Num(n))).to(MathBool.False_(), ne(m).to(n)),
         rewrite(Math.NotEq(Math.Num(m), Math.Num(n))).to(MathBool.True_(), ne(m).to(n)),
         rewrite(Math.NotEq(Math.Num(m), Math.Num(n))).to(MathBool.False_(), eq(m).to(n)),
+        rewrite(Math.Ge(Math.Num(m), Math.Num(n))).to(
+            MathBool.True_(), m >= n
+        ),
+        rewrite(Math.Ge(Math.Num(m), Math.Num(n))).to(
+            MathBool.False_(), m < n
+        ),
         # arithmetic
         rewrite(Math.Num(m)).to(Math.Neg(Math.Num(-m))),
         rewrite(Math.Add(Math.Num(m), Math.Num(n))).to(Math.Num(m + n)),
         rewrite(Math.Neg(Math.Num(m))).to(Math.Num(-m)),
         rewrite(Math.Mul(Math.Num(m), Math.Num(n))).to(Math.Num(m * n)),
+        rewrite(Math.Abs(Math.Num(m))).to(Math.Num(abs(m))),
         rewrite(Math.Pow(Math.Num(m), Math.Num(BigRat(2, 1)))).to(Math.Num(m * m)),
         rewrite(Math.Pow(Math.Num(BigRat(-1, 1)), Math.Num(m))).to(Math.Num(BigRat(-1, 1) ** m), eq(m.denom).to(1)),
     ]
