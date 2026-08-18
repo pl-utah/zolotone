@@ -1188,17 +1188,27 @@ class TestEgglogRewriteRules(unittest.TestCase):
 
         self.assertEqual(invalid_rules, {})
 
-    def test_nonnegative_absolute_value_is_discharged(self):
-        ctx = SpecContext("egglog-nonnegative-abs")
+    def test_simplify_ctx_discharges_nonnegative_absolute_value(self):
+        ctx = SpecContext("simplify-nonnegative-abs")
         x = ctx.real("x")
         ctx.assume(x >= ctx.real_val(1 / 64))
         ctx.check(abs(x).eq(x))
 
-        report = egglog_rewrite(
-            ctx,
-            iterations=6,
-            scheduler={"match_limit": 500_000, "ban_length": 1},
+        report = simplify_ctx(ctx)
+
+        self.assertEqual(report["status"], "unsat")
+
+    def test_simplify_ctx_discharges_nonnegative_sum_and_product_absolute_value(self):
+        ctx = SpecContext("simplify-nonnegative-significand")
+        mantissa = ctx.real("mantissa")
+        ctx.assume(
+            (mantissa >= ctx.zero())
+            & (mantissa <= ctx.real_val((1 << 23) - 1))
         )
+        significand = ctx.one() + mantissa * (ctx.two() ** ctx.real_val(-23))
+        ctx.check(abs(significand).eq(significand))
+
+        report = simplify_ctx(ctx)
 
         self.assertEqual(report["status"], "unsat")
 
@@ -1927,6 +1937,25 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(learned[p], BoolLit(True))
         self.assertEqual(learned[q], BoolLit(False))
 
+    def test_context_simplify_reads_nested_conjunctions(self):
+        ctx = SpecContext("learn-conjunction")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        p = ctx.bool("p")
+
+        ctx.assume(x.eq(ctx.zero()) & (y.eq(ctx.one()) & p))
+
+        self.assertEqual(
+            ctx.learned_literals(),
+            {
+                x: RealLit(0),
+                y: RealLit(1),
+                p: BoolLit(True),
+            },
+        )
+        ctx.check((x + y).eq(ctx.one()))
+        self.assertEqual(ctx.simplify().checks, [])
+
     def test_learned_literals_reads_non_literal_equalities_as_boolean_facts(self):
         ctx = SpecContext("learn-ignore")
         x = ctx.real("x")
@@ -2170,7 +2199,10 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(simplified.checks, [])
         self.assertEqual(
             simplified.learned_literals(),
-            {in_range: BoolLit(True)},
+            {
+                x >= ctx.real_val(-1): BoolLit(True),
+                x <= ctx.one(): BoolLit(True),
+            },
         )
 
     def test_context_fixpoint_simplifies_assumptions_from_other_compound_facts(self):
@@ -5385,7 +5417,15 @@ class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
         )
         self._assert_spec_case_proves(
             "ue4m3x2_e2m1x2_add_fp32["
+            "arg0=norm,arg1=sub,arg2=norm,arg3=norm,output=norm]"
+        )
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_add_fp32["
             "arg0=sub,arg1=norm,arg2=sub,arg3=norm,output=norm]"
+        )
+        self._assert_spec_case_proves(
+            "ue4m3x2_e2m1x2_add_fp32["
+            "arg0=norm,arg1=norm,arg2=norm,arg3=zero,output=norm]"
         )
 
     def test_determinism(self):

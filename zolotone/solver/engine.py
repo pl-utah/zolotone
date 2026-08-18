@@ -122,7 +122,6 @@ def check_equivalence(
 ):
     current_tracks: list[list[ProofReport]] = [[]]
     current_ctxs = [ctx.copy()]
-
     normalized_schedule = _normalize_schedule(schedule=schedule)
     for step in normalized_schedule:
         next_tracks: list[list[ProofReport]] = []

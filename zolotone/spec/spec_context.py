@@ -12,6 +12,16 @@ import z3
 import warnings
 
 
+def _assumption_conjuncts(assume: BoolExpr) -> tuple[BoolExpr, ...]:
+    """Return the facts asserted by a possibly nested conjunction."""
+    if isinstance(assume, And):
+        return (
+            *_assumption_conjuncts(assume.lhs),
+            *_assumption_conjuncts(assume.rhs),
+        )
+    return (assume,)
+
+
 class SpecContext:
     """Builder API for creating spec programs over the spec AST."""
     
@@ -127,10 +137,11 @@ class SpecContext:
                 raise PoorSpec(f"Conflicting learned literals for {expr}: {existing[0]} vs {lit}")
         
         for anchor, assume in enumerate(self.assumes):
-            learned = self._canonical_learned_assumption(assume)
-            if learned is None:
-                continue
-            record(*learned, anchor)
+            for conjunct in _assumption_conjuncts(assume):
+                learned = self._canonical_learned_assumption(conjunct)
+                if learned is None:
+                    continue
+                record(*learned, anchor)
         
         return candidates
 
@@ -169,11 +180,12 @@ class SpecContext:
             return None
         
         for assume in self.assumes:
-            learned = learned_from(assume)
-            if learned is None:
-                continue
-            var, expr = learned
-            aliases.setdefault(var, expr)
+            for conjunct in _assumption_conjuncts(assume):
+                learned = learned_from(conjunct)
+                if learned is None:
+                    continue
+                var, expr = learned
+                aliases.setdefault(var, expr)
         return aliases
 
     @staticmethod
@@ -232,7 +244,12 @@ class SpecContext:
     def simplify(self) -> "SpecContext":
         """Apply context learning and ordinary constant folding to a fixpoint."""
         simplified = self.copy()
-        max_iterations = len(simplified.assumes) + len(simplified.checks) + 1
+        learned_fact_count = sum(
+            1
+            for assume in simplified.assumes
+            for _ in _assumption_conjuncts(assume)
+        )
+        max_iterations = learned_fact_count + len(simplified.checks) + 1
         for _ in range(max_iterations):
             anchored_literals = simplified._learned_literals_with_anchors()
             literal_replacements = {

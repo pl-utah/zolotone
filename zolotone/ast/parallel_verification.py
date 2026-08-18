@@ -50,7 +50,6 @@ def resolve_max_workers(max_workers: int | None) -> int:
 
 def run_verification_cases(
     cases: Iterable[SpecContext],
-    *,
     verify_case: CaseVerifier,
     verification_args: tuple[Any, ...],
     observer: VerificationObserver,
@@ -74,7 +73,6 @@ def run_verification_cases(
 
 def _run_serially(
     cases: Iterable[SpecContext],
-    *,
     verify_case: CaseVerifier,
     verification_args: tuple[Any, ...],
     observer: VerificationObserver,
