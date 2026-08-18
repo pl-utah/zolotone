@@ -6437,6 +6437,429 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(trimmed.checks, [abs_check, if_check])
 
+
+class TestAdaptiveCasesVerification(unittest.TestCase):
+    @staticmethod
+    def _result(case, status, *, proved=None):
+        if proved is None:
+            proved = status == "unsat"
+        report = build_proof_report(
+            case.ctx,
+            case.ctx.copy(),
+            tool="mock",
+            runtime_s=0,
+            status=status,
+            feasibility_status="feasible",
+        )
+        return CaseVerificationResult(
+            name=case.ctx.name,
+            proved=proved,
+            status=status,
+            feasibility_status="feasible",
+            proof_trace=[report],
+            side_feasibility_reports=[],
+        )
+
+    def test_cases_metadata_preserves_ordered_entries_and_lowered_value(self):
+        ctx = SpecContext("retained-cases")
+        first = ctx.bool("first")
+        second = ctx.bool("second")
+        entries = (
+            case(first, ctx.real_val(1)),
+            case(second, ctx.real_val(2)),
+            case(ctx.true(), ctx.real_val(3)),
+        )
+
+        output = Cases(*entries, ctx=ctx)
+
+        self.assertEqual(len(ctx.case_partitions), 1)
+        self.assertEqual(ctx.case_partitions[0].entries, entries)
+        self.assertIs(ctx.case_partitions[0].value, output)
+        self.assertEqual(ctx.copy().case_partitions, ctx.case_partitions)
+
+    def test_effective_guards_preserve_overlap_order_and_shadowing(self):
+        ctx = SpecContext("effective-guards")
+        first = ctx.bool("first")
+        second = ctx.bool("second")
+        output = Cases(
+            case(first, ctx.real_val(1)),
+            case(second, ctx.real_val(2)),
+            case(ctx.true(), ctx.real_val(3)),
+            ctx=ctx,
+        )
+        partition = ast_nodes._direct_case_partition(ctx, output)
+
+        guards = ast_nodes._effective_case_guards(partition.entries)
+
+        self.assertEqual(
+            guards,
+            [
+                BoolLit(True) & first,
+                (BoolLit(True) & (~first)) & second,
+                ((BoolLit(True) & (~first)) & (~second)) & BoolLit(True),
+            ],
+        )
+
+        shadow_ctx = SpecContext("shadowed-guards")
+        shadowed = Cases(
+            case(shadow_ctx.true(), shadow_ctx.real_val(1)),
+            case(shadow_ctx.true(), shadow_ctx.real_val(2)),
+            ctx=shadow_ctx,
+        )
+        shadow_partition = ast_nodes._direct_case_partition(shadow_ctx, shadowed)
+        shadow_guards = ast_nodes._effective_case_guards(
+            shadow_partition.entries
+        )
+        self.assertEqual(shadow_guards[1].constant_fold(), BoolLit(False))
+
+    def test_only_unknown_coarse_path_is_refined_and_observed(self):
+        ctx = SpecContext("adaptive-outcomes")
+        first = ctx.bool("first")
+        second = ctx.bool("second")
+
+        def partitioned(case_ctx):
+            return Cases(
+                case(first, case_ctx.real_val(1)),
+                case(second, case_ctx.real_val(2)),
+                case(case_ctx.true(), case_ctx.real_val(3)),
+                ctx=case_ctx,
+            )
+
+        observer = Mock()
+        outcomes = iter(("unsat", "sat", "unknown", "unsat"))
+        calls = []
+        schedules = []
+
+        def verify(case, schedule, *_args):
+            calls.append(case.ctx.name)
+            schedules.append(schedule)
+            return self._result(case, next(outcomes))
+
+        schedule = [{"tool": "simplify"}, {"tool": "z3", "timeout_ms": 7}]
+        with (
+            patch.object(ast_nodes, "_verify_adaptive_case", side_effect=verify),
+            patch.object(
+                ast_nodes,
+                "_split_classification_cases",
+                wraps=ast_nodes._split_classification_cases,
+            ) as exhaustive_split,
+        ):
+            result = ast_nodes.check_equivalence(
+                ast_nodes._Spec("partitioned", partitioned, partition_cases=True),
+                ast_nodes._Spec("other", lambda case_ctx: case_ctx.real_val(1)),
+                base_ctx=ctx,
+                inputs=[first, second],
+                schedule=schedule,
+                observer=observer,
+                max_workers=1,
+            )
+
+        exhaustive_split.assert_not_called()
+
+        self.assertEqual(
+            calls,
+            [
+                "adaptive-outcomes[path=0]",
+                "adaptive-outcomes[path=1]",
+                "adaptive-outcomes[path=2]",
+                "adaptive-outcomes[path=2]",
+            ],
+        )
+        self.assertEqual(len(result["case_results"]), 3)
+        self.assertEqual(observer.case_completed.call_count, 3)
+        self.assertEqual(schedules, [schedule] * 4)
+        self.assertFalse(result["proved"])
+
+    def test_unknown_path_with_no_refined_leaves_remains_failure(self):
+        ctx = SpecContext("empty-refinement")
+        selector = ctx.bool("selector")
+
+        def partitioned(case_ctx):
+            return Cases(
+                case(case_ctx.true(), case_ctx.real_val(1)),
+                ctx=case_ctx,
+            )
+
+        observer = Mock()
+        with (
+            patch.object(
+                ast_nodes,
+                "_verify_adaptive_case",
+                side_effect=lambda case, *_args: self._result(case, "unknown"),
+            ),
+            patch.object(ast_nodes, "_refined_adaptive_cases", return_value=()),
+        ):
+            result = ast_nodes.check_equivalence(
+                ast_nodes._Spec("first", partitioned, partition_cases=True),
+                ast_nodes._Spec("second", lambda case_ctx: case_ctx.real_val(1)),
+                base_ctx=ctx,
+                inputs=[selector],
+                schedule=[{"tool": "simplify"}],
+                observer=observer,
+                max_workers=1,
+            )
+
+        self.assertFalse(result["proved"])
+        self.assertEqual(len(result["case_results"]), 1)
+        observer.case_completed.assert_called_once()
+
+    def test_associated_groups_exclude_unrelated_fp_inputs(self):
+        ctx = SpecContext("associated-inputs")
+        relevant = fp32.fresh("relevant", ctx)
+        unrelated = fp32.fresh("unrelated", ctx)
+
+        groups = ast_nodes._associated_input_groups(
+            [relevant, unrelated],
+            relevant.is_finite,
+            relevant,
+        )
+
+        self.assertEqual([name for name, _value in groups], ["arg0"])
+
+    def test_guarded_fp_equality_observes_zero_sign_but_not_nan_payload(self):
+        zero_ctx = SpecContext("signed-zero-observation")
+        ast_nodes._add_guarded_observable_equality_checks(
+            zero_ctx,
+            fp32.zero(zero_ctx),
+            fp32.nzero(zero_ctx),
+        )
+        zero_status, _trace = solver_engine.check_equivalence(
+            zero_ctx,
+            schedule=[{"tool": "simplify"}],
+        )
+
+        nan_ctx = SpecContext("nan-payload-observation")
+        ast_nodes._add_guarded_observable_equality_checks(
+            nan_ctx,
+            fp32.nan(nan_ctx),
+            fp32.nan(nan_ctx),
+        )
+        nan_status, _trace = solver_engine.check_equivalence(
+            nan_ctx,
+            schedule=[{"tool": "simplify"}],
+        )
+
+        self.assertEqual(zero_status, "sat")
+        self.assertEqual(nan_status, "unsat")
+
+    def test_finite_guard_prunes_nonfinite_partial_classifications(self):
+        ctx = SpecContext("classification-pruning")
+        value = fp32.fresh("value", ctx)
+
+        for classification in ("inf", "nan"):
+            with self.subTest(classification=classification):
+                self.assertTrue(
+                    ast_nodes._selection_constant_folds_to_contradiction(
+                        value.is_finite,
+                        (("arg0", value, classification),),
+                    )
+                )
+        for classification in ("norm", "sub", "zero"):
+            with self.subTest(classification=classification):
+                self.assertFalse(
+                    ast_nodes._selection_constant_folds_to_contradiction(
+                        value.is_finite,
+                        (("arg0", value, classification),),
+                    )
+                )
+
+    def test_refinement_assumes_output_class_only_on_partition_side(self):
+        ctx = SpecContext("one-sided-output-class")
+        value = fp32.fresh("value", ctx)
+        finite_output = fp32.encode(value.value, ctx)
+        output = Cases(
+            case(value.is_finite, finite_output),
+            case(~value.is_finite, fp32.nan(ctx)),
+            ctx=ctx,
+        )
+        partition = ast_nodes._direct_case_partition(ctx, output)
+        guards = ast_nodes._effective_case_guards(partition.entries)
+
+        refined = next(
+            ast_nodes._refined_adaptive_cases(
+                ctx,
+                partition,
+                guards,
+                value,
+                [value],
+                partition_side=0,
+                unresolved_paths={0},
+            )
+        )
+
+        self.assertGreater(
+            len(refined.side_assumptions[0]),
+            len(refined.side_assumptions[1]),
+        )
+        self.assertTrue(
+            all(
+                assumption not in refined.side_assumptions[1]
+                for assumption in refined.side_assumptions[0][
+                    len(refined.side_assumptions[1]) :
+                ]
+            )
+        )
+
+    def test_side_local_case_guard_disables_adaptive_partition(self):
+        base_ctx = SpecContext("side-local-guard")
+        shared = base_ctx.real("shared")
+        first_ctx = base_ctx.copy()
+        local = first_ctx.fresh_bool("local")
+        first_output = Cases(
+            case(local, shared),
+            case(~local, shared),
+            ctx=first_ctx,
+        )
+        second_ctx = base_ctx.copy()
+
+        adaptive = ast_nodes._adaptive_partition(
+            (
+                ast_nodes._Spec("first", lambda _ctx: first_output, True),
+                ast_nodes._Spec("second", lambda _ctx: shared),
+            ),
+            (first_ctx, second_ctx),
+            (first_output, shared),
+            [shared],
+        )
+
+        self.assertIsNone(adaptive)
+
+    def test_side_local_guard_uses_exhaustive_fallback(self):
+        ctx = SpecContext("side-local-fallback")
+        shared = ctx.real("shared")
+
+        def unstable(case_ctx):
+            local = case_ctx.fresh_bool("local")
+            return Cases(
+                case(local, shared),
+                case(~local, shared),
+                ctx=case_ctx,
+            )
+
+        with patch.object(
+            ast_nodes,
+            "_split_classification_cases",
+            wraps=ast_nodes._split_classification_cases,
+        ) as exhaustive_split:
+            result = ast_nodes.check_equivalence(
+                ast_nodes._Spec("unstable", unstable, partition_cases=True),
+                ast_nodes._Spec("stable", lambda _ctx: shared),
+                base_ctx=ctx,
+                inputs=[shared],
+                schedule=[{"tool": "simplify"}],
+                observer=Mock(),
+                max_workers=1,
+            )
+
+        exhaustive_split.assert_called_once()
+        self.assertTrue(result["proved"])
+
+    def test_adaptive_serial_and_parallel_terminal_cases_match(self):
+        def run(max_workers):
+            ctx = SpecContext("adaptive-parallel")
+            selector = ctx.bool("selector")
+
+            def partitioned(case_ctx):
+                return Cases(
+                    case(selector, case_ctx.real_val(1)),
+                    case(~selector, case_ctx.real_val(2)),
+                    ctx=case_ctx,
+                )
+
+            return ast_nodes.check_equivalence(
+                ast_nodes._Spec("first", partitioned, partition_cases=True),
+                ast_nodes._Spec(
+                    "second",
+                    lambda case_ctx: If(
+                        selector,
+                        case_ctx.real_val(1),
+                        case_ctx.real_val(2),
+                    ),
+                ),
+                base_ctx=ctx,
+                inputs=[selector],
+                schedule=[{"tool": "simplify"}],
+                observer=Mock(),
+                max_workers=max_workers,
+            )
+
+        serial = run(1)
+        parallel = run(2)
+
+        self.assertEqual(
+            [
+                (case["name"], case["proved"], case["status"])
+                for case in parallel["case_results"]
+            ],
+            [
+                (case["name"], case["proved"], case["status"])
+                for case in serial["case_results"]
+            ],
+        )
+
+    def test_bf16_dot_finite_path_has_26244_meaningful_refinements(self):
+        ctx = SpecContext("bf16-dot-adaptive")
+        inputs = [bf16.fresh(f"input{index}", ctx) for index in range(8)]
+        output = bf16x8_dot_fp32_spec(*inputs, ctx=ctx)
+        partition = ast_nodes._direct_case_partition(ctx, output)
+        guards = ast_nodes._effective_case_guards(partition.entries)
+        finite_guard = guards[3]
+        finite_value = partition.entries[3].value
+
+        associated = ast_nodes._associated_input_groups(
+            inputs,
+            finite_guard,
+            finite_value,
+        )
+        self.assertEqual(len(partition.entries), 4)
+        self.assertEqual(
+            [name for name, _value in associated],
+            [f"arg{index}" for index in range(8)],
+        )
+
+        input_choices = []
+        selected_inputs = []
+        for name, value in associated:
+            choices = [
+                classification
+                for classification in value.classification_flags()
+                if not ast_nodes._selection_constant_folds_to_contradiction(
+                    finite_guard,
+                    ((name, value, classification),),
+                )
+            ]
+            input_choices.append(choices)
+            selected_inputs.append((name, value, "norm"))
+        output_choices = [
+            classification
+            for classification in finite_value.classification_flags()
+            if not ast_nodes._selection_constant_folds_to_contradiction(
+                finite_guard,
+                tuple(selected_inputs)
+                + (("output", finite_value, classification),),
+            )
+        ]
+
+        self.assertEqual(input_choices, [["norm", "sub", "zero"]] * 8)
+        self.assertEqual(output_choices, ["norm", "sub", "zero", "inf"])
+        self.assertEqual(3**8 * len(output_choices), 26_244)
+
+        representative = next(
+            ast_nodes._refined_adaptive_cases(
+                ctx,
+                partition,
+                guards,
+                finite_value,
+                inputs,
+                partition_side=0,
+                unresolved_paths={3},
+            )
+        )
+        self.assertIn("path=3", representative.ctx.name)
+        self.assertNotIn("=nan", representative.ctx.name)
+        self.assertNotIn("=inf", representative.ctx.name.split("output=", 1)[0])
+
+
 class TestStdoutVerificationObserver(unittest.TestCase):
     def test_default_schedule_restarts_rewrite_pipeline_three_times(self):
         schedule = ast_nodes._default_equivalence_schedule()
