@@ -731,6 +731,12 @@ class _CaseEntry:
     value: _CaseValue
 
 
+@dataclass(frozen=True)
+class _CasePartition:
+    entries: tuple[_CaseEntry, ...]
+    value: _CaseValue
+
+
 def case(condition: BoolExpr, value: _CaseValue) -> _CaseEntry:
     """Create an ordered conditional entry for :func:`Cases`."""
     BoolExpr._coerce_bool_expr(condition)
@@ -783,6 +789,7 @@ def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
     for entry in reversed(entries[:-1]):
         result = _select_case_value(entry.condition, entry.value, result)
     ctx.require(coverage)
+    ctx.case_partitions.append(_CasePartition(tuple(entries), result))
     return result
 
 

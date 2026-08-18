@@ -19,6 +19,9 @@ class SpecContext:
         self.assumes: list[BoolExpr] = []
         self.checks: list[BoolExpr] = []
         self.requirements: list[BoolExpr] = []
+        # Cases keeps its ordinary nested-If result, while retaining the
+        # source-level table here for verification-time path partitioning.
+        self.case_partitions: list[_CasePartition] = []
         self._sym_counter = 0
         self.name = name
         self.spec_cache = {}
@@ -335,6 +338,7 @@ class SpecContext:
         self.assumes.clear()
         self.checks.clear()
         self.requirements.clear()
+        self.case_partitions.clear()
         self._sym_counter = 0
         self.spec_cache.clear()
         self._spec_cache_valid = True
@@ -363,7 +367,13 @@ class SpecContext:
         lines.extend(format_section("Requirements", self.requirements))
         return "\n".join(lines)
     
-    def copy(self, assumes=None, checks=None, requirements=None):
+    def copy(
+        self,
+        assumes=None,
+        checks=None,
+        requirements=None,
+        case_partitions=None,
+    ):
         if assumes is None:
             # Spec AST nodes are immutable, so a shallow list copy is enough here.
             # Deep-copying rebuilds nodes such as Eq via pickle-style protocols,
@@ -373,11 +383,14 @@ class SpecContext:
             checks = list(self.checks)
         if requirements is None:
             requirements = list(self.requirements)
+        if case_partitions is None:
+            case_partitions = list(self.case_partitions)
         
         new_ctx = SpecContext(self.name)
         new_ctx.assumes = assumes
         new_ctx.checks = checks
         new_ctx.requirements = requirements
+        new_ctx.case_partitions = case_partitions
         new_ctx._sym_counter = self._sym_counter
         new_ctx.spec_cache = dict(self.spec_cache)
         new_ctx._spec_cache_valid = self._spec_cache_valid
