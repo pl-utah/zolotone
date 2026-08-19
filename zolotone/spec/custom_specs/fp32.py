@@ -55,19 +55,19 @@ class fp32(FPExpr):
         two = ctx.two()
         mantissa_bits = ctx.real_val(cls.mantissa_bits)
         exponent_bias = ctx.real_val(cls.exponent_bias)
-        
+
         signed_value = sign_multiplier(ctx, sign)
-        normal_value = (
-            signed_value
-            * (one + mantissa * (two ** (-mantissa_bits)))
+        normal_magnitude = (
+            (one + mantissa * (two ** (-mantissa_bits)))
             * (two ** (exponent - exponent_bias))
         )
-        subnormal_value = (
-            signed_value
-            * mantissa
+        normal_value = signed_value * normal_magnitude
+        subnormal_magnitude = (
+            mantissa
             * (two ** (-mantissa_bits))
             * (two ** (one - exponent_bias))
         )
+        subnormal_value = signed_value * subnormal_magnitude
         value = If(
             is_norm,
             normal_value,
@@ -102,6 +102,8 @@ class fp32(FPExpr):
         ctx.assume((is_zero | is_inf).implies(mantissa.eq(zero)))
         ctx.assume((is_inf | is_nan).implies(exponent.eq(max_exponent)))
         ctx.assume((is_sub | is_nan).implies(mantissa >= one))
+        ctx.assume(is_norm.implies(abs(value).eq(normal_magnitude)))
+        ctx.assume(is_sub.implies(abs(value).eq(subnormal_magnitude)))
 
         return out
     

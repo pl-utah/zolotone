@@ -166,6 +166,7 @@ def _direct_case_partition(ctx: SpecContext, output: tp.Any):
     )
 
 
+# Derive guards
 def _effective_case_guards(entries) -> list[BoolExpr]:
     no_prior_match: BoolExpr = BoolLit(True)
     guards = []
@@ -182,6 +183,7 @@ def _variables_in_value(value: tp.Any) -> set[tp.Any]:
     return result
 
 
+# Get partition of preferred spec + guards
 def _partition_for(
     side_contexts: tuple[SpecContext, SpecContext],
     outputs: tuple[tp.Any, tp.Any],
@@ -213,6 +215,7 @@ def _partition_for(
     return None
 
 
+# Find classification flags that are children of condition
 def _descendant_input_flag_groups(
     condition: BoolExpr,
     inputs: list[tp.Any],
@@ -263,6 +266,7 @@ def _descendant_input_flag_groups(
     return groups
 
 
+# refine flags in case of failed adaptive case
 def _refinement_flag_assignments(
     condition: BoolExpr,
     inputs: list[tp.Any],
@@ -287,6 +291,7 @@ def _refinement_flag_assignments(
             for group_assignment in selected_options
             for item in group_assignment
         )
+        # Quick check whether condition folds to False under an assignment
         replacements = {
             flag: BoolLit(flag_value)
             for _, _, flag, flag_value in assignment
@@ -391,10 +396,7 @@ def _refined_cases(
         for output_class in _output_classes(entry.value):
             if (path_index, output_class) not in unresolved_cases:
                 continue
-            for assignment in _refinement_flag_assignments(
-                entry.condition,
-                inputs,
-            ):
+            for assignment in _refinement_flag_assignments(entry.condition, inputs):
                 refinements = tuple(
                     (
                         f"{value_name}={flag_name}" if flag_value else None,

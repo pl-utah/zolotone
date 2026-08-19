@@ -3875,6 +3875,44 @@ class TestUE4M3Spec(unittest.TestCase):
         )
         self.assertEqual(case_result["proof_trace"][-1]["status"], "unsat")
 
+    def test_fp32_converter_adaptive_normal_input_is_proved_by_egglog(self):
+        source = Var("source", Float32T())
+        design = fp32_to_ue4m3(source)
+        coarse_cases = ast_case_split._coarse_cases
+        coarse_name = "fp32_to_ue4m3[path=2,output=norm]"
+        refined_name = f"{coarse_name[:-1]},arg0=norm]"
+
+        def select_target_case(*args, **kwargs):
+            cases = coarse_cases(*args, **kwargs)
+            return [next(case for case in cases if case.ctx.name == coarse_name)]
+
+        schedule = [
+            {"tool": "simplify"},
+            {
+                "tool": "egglog-rewrite",
+                "iterations": 6,
+                "scheduler": {"match_limit": 500_000, "ban_length": 1},
+            },
+        ]
+        with (
+            patch.object(
+                ast_case_split,
+                "_coarse_cases",
+                side_effect=select_target_case,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = design.check_spec(schedule=schedule, max_workers=1)
+
+        case_result = next(
+            case
+            for case in result["case_results"]
+            if case["name"] == refined_name
+        )
+        self.assertTrue(case_result["proved"])
+        self.assertEqual(case_result["proof_trace"][-1]["tool"], "egglog-rewrite")
+        self.assertEqual(case_result["proof_trace"][-1]["status"], "unsat")
+
 
 class TestE5M2Spec(unittest.TestCase):
     def test_runtime_constants_constructors_validation_copy_and_static_type(self):
