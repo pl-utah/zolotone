@@ -88,7 +88,6 @@ def _normalize_schedule(
 
 def _run_tool(ctx: SpecContext, step: dict[str, Any]):
     tool = step["tool"]
-    print(tool)
     tool_fn = TOOL_FNS[tool]
     kwargs = {key: value for key, value in step.items() if key != "tool"}
     return _normalize_tool_reports(tool_fn(ctx, **kwargs))
@@ -121,6 +120,8 @@ def check_equivalence(
     ctx: SpecContext,
     schedule: list[str | dict[str, Any]],
 ):
+    # if ctx.name != "bf16x8_dot_fp32_conventional[path=3,output=norm]":
+    #      return "unknown", [{'feasibility_status': 'unknown', 'status': 'unknown', 'tool':"simplfiy"}]
     current_tracks: list[list[ProofReport]] = [[]]
     current_ctxs = [ctx.copy()]
     normalized_schedule = _normalize_schedule(schedule=schedule)
@@ -137,6 +138,7 @@ def check_equivalence(
                     return status, next_track
                 next_tracks.append(next_track)
                 next_ctxs.append(report["new_ctx"])
+            
 
         current_tracks = next_tracks
         current_ctxs = next_ctxs

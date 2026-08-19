@@ -432,7 +432,6 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
     max_passes = 32
 
     for i in range(max_passes):
-        print(i)
         current_state = _context_expression_state(current)
         if current_state in seen_states:
             warnings.warn(f"Simplification cycle detected for {ctx.name!r}", RuntimeWarning)
@@ -481,7 +480,6 @@ def simplify_ctx(ctx: SpecContext):
         if any([identical_nodes(x, BoolLit(False)) for x in simplified_ctx.checks]):
              satisfiability_status = "sat"
         else:
-            
             if rival_feasibility_check(simplified_ctx, max_depth=0, checks=True) == "not feasible":
                 satisfiability_status = "sat"
             else:

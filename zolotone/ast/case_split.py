@@ -19,6 +19,7 @@ from ..spec import (
     SpecContext,
     SpecNode,
     children,
+    substitute_literals,
     variables,
 )
 from ..spec.spec_context import simplify_ctx
@@ -30,11 +31,6 @@ class _AdaptiveCase:
     ctx: SpecContext
     side_assumptions: tuple[tuple[BoolExpr, ...], tuple[BoolExpr, ...]]
     vacuous_side: int | None = None
-
-
-class _NullObserver:
-    def case_completed(self, result: CaseVerificationResult) -> None:
-        del result
 
 
 def _append_case_name(name: str, case_label: str) -> str:
@@ -217,25 +213,88 @@ def _partition_for(
     return None
 
 
-def _descendant_input_flags(
-    guard: BoolExpr,
+def _descendant_input_flag_groups(
+    condition: BoolExpr,
     inputs: list[tp.Any],
-) -> list[tuple[str, str, BoolExpr]]:
-    descendant_ids = {id(node) for node in _walk_value(guard)}
+) -> list[list[tuple[str, str, BoolExpr]]]:
+    """Return feasible classification groups for inputs used by condition."""
+    descendant_ids = {id(node) for node in _walk_value(condition)}
     seen_flags: set[int] = set()
-    selected = []
+    groups = []
     for input_index, item in enumerate(inputs):
         for value_name, fp_value in _named_fp_items(f"arg{input_index}", item):
-            for flag_name, flag in fp_value.classification_flags().items():
+            classification_flags = [
+                (flag_name, flag)
+                for flag_name, flag in fp_value.classification_flags().items()
+                if not isinstance(flag, BoolLit)
+            ]
+            mentioned_flags = [
+                (flag_name, flag)
+                for flag_name, flag in classification_flags
+                if id(flag) in descendant_ids
+            ]
+            if not mentioned_flags:
+                continue
+
+            mentioned_false = {
+                flag: BoolLit(False)
+                for _, flag in mentioned_flags
+            }
+            condition_with_mentioned_flags_false = substitute_literals(
+                condition,
+                mentioned_false,
+            )
+            flags_for_refinement = (
+                mentioned_flags
+                if isinstance(condition_with_mentioned_flags_false, BoolLit)
+                and not condition_with_mentioned_flags_false.value
+                else classification_flags
+            )
+
+            group = []
+            for flag_name, flag in flags_for_refinement:
                 flag_id = id(flag)
-                if (
-                    flag_id in descendant_ids
-                    and flag_id not in seen_flags
-                    and not isinstance(flag, BoolLit)
-                ):
-                    seen_flags.add(flag_id)
-                    selected.append((value_name, flag_name, flag))
-    return selected
+                if flag_id in seen_flags:
+                    continue
+                seen_flags.add(flag_id)
+                group.append((value_name, flag_name, flag))
+            if group:
+                groups.append(group)
+    return groups
+
+
+def _refinement_flag_assignments(
+    condition: BoolExpr,
+    inputs: list[tp.Any],
+) -> tp.Iterator[tuple[tuple[str, str, BoolExpr, bool], ...]]:
+    """Enumerate feasible one-hot assignments to condition input flags."""
+    groups = _descendant_input_flag_groups(condition, inputs)
+    if not groups:
+        return
+
+    group_options = []
+    for flags in groups:
+        options = [
+            tuple((*flag, flag_index == selected_index)
+                  for flag_index, flag in enumerate(flags))
+            for selected_index in range(len(flags))
+        ]
+        group_options.append(options)
+
+    for selected_options in product(*group_options):
+        assignment = tuple(
+            item
+            for group_assignment in selected_options
+            for item in group_assignment
+        )
+        replacements = {
+            flag: BoolLit(flag_value)
+            for _, _, flag, flag_value in assignment
+        }
+        folded_condition = substitute_literals(condition, replacements)
+        if isinstance(folded_condition, BoolLit) and not folded_condition.value:
+            continue
+        yield assignment
 
 
 def _output_classes(value: tp.Any) -> tuple[str | None, ...]:
@@ -252,7 +311,7 @@ def _adaptive_case(
     guard: BoolExpr,
     other_output: tp.Any,
     output_class: str | None,
-    refinements: tuple[tuple[str, BoolExpr], ...] = (),
+    refinements: tuple[tuple[str | None, BoolExpr], ...] = (),
 ) -> _AdaptiveCase:
     case_ctx = combined_ctx.copy()
     case_ctx.name = _append_case_name(case_ctx.name, f"path={path_index}")
@@ -276,7 +335,8 @@ def _adaptive_case(
         side_assumptions[partition_side].extend(output_assumptions)
 
     for label, assumption in refinements:
-        case_ctx.name = _append_case_name(case_ctx.name, label)
+        if label is not None:
+            case_ctx.name = _append_case_name(case_ctx.name, label)
         case_ctx.assume(assumption)
         side_assumptions[0].append(assumption)
         side_assumptions[1].append(assumption)
@@ -328,23 +388,19 @@ def _refined_cases(
     for path_index, (entry, guard) in enumerate(
         zip(partition.entries, guards, strict=True)
     ):
-        flags = _descendant_input_flags(guard, inputs)
         for output_class in _output_classes(entry.value):
             if (path_index, output_class) not in unresolved_cases:
                 continue
-            for flag_values in product((False, True), repeat=len(flags)):
-                if not flags:
-                    continue
+            for assignment in _refinement_flag_assignments(
+                entry.condition,
+                inputs,
+            ):
                 refinements = tuple(
                     (
-                        f"{value_name}.{flag_name}={str(flag_value).lower()}",
+                        f"{value_name}={flag_name}" if flag_value else None,
                         flag.eq(combined_ctx.bool_val(flag_value)),
                     )
-                    for (value_name, flag_name, flag), flag_value in zip(
-                        flags,
-                        flag_values,
-                        strict=True,
-                    )
+                    for value_name, flag_name, flag, flag_value in assignment
                 )
                 yield _adaptive_case(
                     combined_ctx,
@@ -446,7 +502,7 @@ def _run_adaptive_cases(
         ),
         verify_case=_verify_adaptive_case,
         verification_args=(schedule, side_contexts),
-        observer=observer, # _NullObserver(),
+        observer=observer,
         max_workers=max_workers,
     )
 
@@ -459,9 +515,6 @@ def _run_adaptive_cases(
         for result in coarse_results
         if result["status"] == "unknown"
     }
-    for result in coarse_results:
-        if result_key(result) not in unresolved_cases:
-            observer.case_completed(result)
 
     refined_results = run_verification_cases(
         _refined_cases(
@@ -478,10 +531,7 @@ def _run_adaptive_cases(
         observer=observer,
         max_workers=max_workers,
     )
-    refined_by_case: dict[
-        tuple[int, str | None],
-        list[CaseVerificationResult],
-    ] = {}
+    refined_by_case = {}
     for result in refined_results:
         refined_by_case.setdefault(result_key(result), []).append(result)
 
@@ -495,7 +545,6 @@ def _run_adaptive_cases(
         if replacements:
             terminal_results.extend(replacements)
         else:
-            observer.case_completed(coarse_result)
             terminal_results.append(coarse_result)
     return terminal_results
 

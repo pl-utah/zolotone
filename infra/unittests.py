@@ -38,7 +38,9 @@ from zolotone.solver.report import (
     build_proof_report,
 )
 from zolotone.rival import (
+    MAX_RECTS_ENV,
     RivalAnalysis,
+    RivalRectLimitExceeded,
     build_machine,
     collect_free_vars,
     get_rival_rects,
@@ -5983,6 +5985,68 @@ class TestRivalTranslation(unittest.TestCase):
             ],
         )
 
+    def test_rival_rects_stop_before_cartesian_product_exceeds_cap(self):
+        ctx = SpecContext("rival-rects-capped-cartesian-or")
+        sign = ctx.real("sign")
+        exponent = ctx.real("exponent")
+
+        ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
+        ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
+
+        with self.assertRaises(RivalRectLimitExceeded) as raised:
+            get_rival_rects(
+                ctx.assumes,
+                ["sign", "exponent"],
+                max_rects=3,
+            )
+
+        self.assertEqual(raised.exception.rect_count, 4)
+        self.assertEqual(raised.exception.max_rects, 3)
+
+    def test_rival_rect_cap_can_be_configured_with_environment(self):
+        ctx = SpecContext("rival-rects-environment-cap")
+        sign = ctx.real("sign")
+        exponent = ctx.real("exponent")
+
+        ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
+        ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
+
+        with (
+            patch.dict(os.environ, {MAX_RECTS_ENV: "3"}),
+            self.assertRaises(RivalRectLimitExceeded),
+        ):
+            get_rival_rects(ctx.assumes, ["sign", "exponent"])
+
+    def test_rival_feasibility_returns_unknown_when_rect_cap_is_exceeded(self):
+        ctx = SpecContext("rival-feasibility-capped-rects")
+        sign = ctx.real("sign")
+        exponent = ctx.real("exponent")
+
+        ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
+        ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
+
+        with patch("zolotone.rival.build_machine") as build:
+            status = rival_feasibility_check(ctx, max_rects=3)
+
+        self.assertEqual(status, "unknown")
+        build.assert_not_called()
+
+    def test_rival_trim_returns_original_context_when_rect_cap_is_exceeded(self):
+        ctx = SpecContext("rival-trim-capped-rects")
+        sign = ctx.real("sign")
+        exponent = ctx.real("exponent")
+        check = sign <= ctx.one()
+
+        ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
+        ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
+        ctx.check(check)
+
+        trimmed = rival_trim_context(ctx, max_rects=3)
+
+        self.assertIs(trimmed, ctx)
+        self.assertEqual(trimmed.assumes, ctx.assumes)
+        self.assertEqual(trimmed.checks, [check])
+
     def test_rival_rects_preserve_free_var_order(self):
         ctx = SpecContext("rival-rects-order")
         x = ctx.real("x")
@@ -6502,7 +6566,7 @@ class TestPartialCasesVerification(unittest.TestCase):
                 ctx=independent_ctx,
             )
 
-    def test_fp32_add_unknown_nan_path_splits_only_guard_flags(self):
+    def test_fp32_add_unknown_nan_path_splits_condition_flags_one_hot(self):
         base_ctx = SpecContext("partial-fp32-add")
         x = fp32.fresh("x", base_ctx)
         y = fp32.fresh("y", base_ctx)
@@ -6543,21 +6607,79 @@ class TestPartialCasesVerification(unittest.TestCase):
             for name in calls
             if "path=0,output=nan," in name
         ]
-        self.assertEqual(len(calls), 5 * 5 + 16)
-        self.assertEqual(len(refined_names), 16)
-        self.assertEqual(len(results), 5 * 5 - 1 + 16)
-        self.assertEqual(observer.case_completed.call_count, len(results))
+        self.assertEqual(len(calls), 5 * 5 + 10)
+        self.assertEqual(len(refined_names), 10)
+        self.assertEqual(len(results), 5 * 5 - 1 + 10)
+        self.assertEqual(observer.case_completed.call_count, len(calls))
         self.assertIn("partial-fp32-add[path=0,output=norm]", calls)
         self.assertIn("partial-fp32-add[path=4,output=nan]", calls)
         for name in refined_names:
-            self.assertIn("arg0.inf=", name)
-            self.assertIn("arg0.nan=", name)
-            self.assertIn("arg1.inf=", name)
-            self.assertIn("arg1.nan=", name)
-            self.assertNotIn(".norm=", name)
-            self.assertNotIn(".sub=", name)
-            self.assertNotIn(".zero=", name)
+            self.assertNotIn("=true", name)
+            self.assertNotIn("=false", name)
             self.assertIn("output=nan", name)
+            self.assertIn("arg0=", name)
+            self.assertIn("arg1=", name)
+            self.assertTrue(
+                "=nan" in name
+                or ("arg0=inf" in name and "arg1=inf" in name)
+            )
+
+    def test_fp32_add_unknown_finite_path_excludes_prior_nan_flags(self):
+        base_ctx = SpecContext("partial-fp32-add")
+        x = fp32.fresh("x", base_ctx)
+        y = fp32.fresh("y", base_ctx)
+        first_ctx = base_ctx.copy()
+        first_output = fp32.zero(first_ctx)
+        second_ctx = base_ctx.copy()
+        second_output = spec_fp32_add(x, y, second_ctx)
+        observer = Mock()
+        calls = []
+
+        def verify(case, *_args):
+            calls.append(case.ctx.name)
+            status = (
+                "unknown"
+                if case.ctx.name == "partial-fp32-add[path=4,output=norm]"
+                else "unsat"
+            )
+            return self._result(case, status)
+
+        with patch.object(
+            ast_case_split,
+            "_verify_adaptive_case",
+            side_effect=verify,
+        ):
+            results = ast_case_split.run_equivalence_cases(
+                combined_ctx=base_ctx.copy(),
+                side_contexts=(first_ctx, second_ctx),
+                outputs=(first_output, second_output),
+                inputs=[x, y],
+                schedule=[{"tool": "simplify"}],
+                observer=observer,
+                max_workers=1,
+                preferred_side=1,
+            )
+
+        refined_names = [
+            name
+            for name in calls
+            if "path=4,output=norm," in name
+        ]
+        self.assertEqual(len(refined_names), 9)
+        self.assertEqual(len(results), 5 * 5 - 1 + 9)
+        self.assertEqual(observer.case_completed.call_count, len(calls))
+        for name in refined_names:
+            self.assertNotIn("=inf", name)
+            self.assertNotIn("=nan", name)
+            self.assertNotIn("=true", name)
+            self.assertNotIn("=false", name)
+            for argument in ("arg0", "arg1"):
+                true_flags = [
+                    flag_name
+                    for flag_name in ("norm", "sub", "zero")
+                    if f"{argument}={flag_name}" in name
+                ]
+                self.assertEqual(len(true_flags), 1)
 
     def test_sat_coarse_path_is_terminal(self):
         ctx = SpecContext("sat-is-terminal")

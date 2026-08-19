@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from itertools import product
 import math
+import os
 import sys
 from typing import Any, Iterable, Sequence
 
@@ -12,9 +13,52 @@ from .spec.spec_ast import *
 RivalIR = dict[str, Any]
 
 __all__ = [
+    "DEFAULT_MAX_RECTS",
+    "MAX_RECTS_ENV",
+    "RivalRectLimitExceeded",
     "rival_feasibility_check",
     "rival_trim_context",
 ]
+
+
+MAX_RECTS_ENV = "ZOLOTONE_RIVAL_MAX_RECTS"
+# Rectangles scale with the number of free variables because every candidate
+# intersection scans the full domain. Keep the default below the point where
+# wide floating-point contexts become expensive even before retaining results.
+DEFAULT_MAX_RECTS = 10_000
+
+
+class RivalRectLimitExceeded(RuntimeError):
+    def __init__(self, rect_count: int, max_rects: int):
+        super().__init__(
+            f"Rival rectangle limit exceeded: {rect_count} candidates "
+            f"for a limit of {max_rects}"
+        )
+        self.rect_count = rect_count
+        self.max_rects = max_rects
+
+
+def resolve_max_rects(max_rects: int | None) -> int:
+    if max_rects is None:
+        configured_max = os.environ.get(MAX_RECTS_ENV)
+        if configured_max is None:
+            return DEFAULT_MAX_RECTS
+        try:
+            max_rects = int(configured_max)
+        except ValueError as exc:
+            raise ValueError(
+                f"{MAX_RECTS_ENV} must be a positive integer"
+            ) from exc
+    if isinstance(max_rects, bool) or not isinstance(max_rects, int):
+        raise TypeError("max_rects must be an integer or None")
+    if max_rects < 1:
+        raise ValueError("max_rects must be at least 1")
+    return max_rects
+
+
+def _check_rect_limit(rect_count: int, max_rects: int) -> None:
+    if rect_count > max_rects:
+        raise RivalRectLimitExceeded(rect_count, max_rects)
 
 
 @dataclass(frozen=True)
@@ -125,9 +169,16 @@ def get_rival_rects(
     assumes: Sequence[BoolExpr],
     free_vars: Sequence[str],
     bool_var_names: Iterable[str] | None = None,
+    max_rects: int | None = None,
 ) -> list[list[tuple[float, float]]]:
+    resolved_max_rects = resolve_max_rects(max_rects)
     resolved_bool_var_names = _collect_bool_var_names(assumes) if bool_var_names is None else set(bool_var_names)
-    rects, _ = _get_rival_rects_and_contributors(assumes, free_vars, resolved_bool_var_names)
+    rects, _ = _get_rival_rects_and_contributors(
+        assumes,
+        free_vars,
+        resolved_bool_var_names,
+        resolved_max_rects,
+    )
     return rects
 
 
@@ -135,22 +186,36 @@ def _get_rival_rects_and_contributors(
     assumes: Sequence[BoolExpr],
     free_vars: Sequence[str],
     bool_var_names: set[str],
+    max_rects: int,
 ) -> tuple[list[list[tuple[float, float]]], list[bool]]:
     domain = _RivalRectDomain.build(free_vars, bool_var_names)
     rects = [domain.new_rect()]
     contributors = [False] * len(assumes)
     for index, assume in enumerate(assumes):
-        alternatives = _rival_rect_alternatives(assume, domain)
+        alternatives = _rival_rect_alternatives(
+            assume,
+            domain,
+            max_rects,
+        )
         if alternatives is None:
             continue
         contributors[index] = True
-        rects = _intersect_rival_rect_sets(rects, alternatives)
+        rects = _intersect_rival_rect_sets(
+            rects,
+            alternatives,
+            max_rects,
+        )
         if not rects:
             break
     return rects, contributors
 
 
-def rival_feasibility_check(ctx: "SpecContext", max_depth: int = 1, checks=False):
+def rival_feasibility_check(
+    ctx: "SpecContext",
+    max_depth: int = 1,
+    checks=False,
+    max_rects: int | None = None,
+):
     max_depth = int(max_depth)
     exprs = ctx.assumes + ctx.checks if checks else ctx.assumes
     free_vars = collect_free_vars(exprs)
@@ -159,7 +224,15 @@ def rival_feasibility_check(ctx: "SpecContext", max_depth: int = 1, checks=False
     if not exprs:
         return "feasible"
     
-    rects = get_rival_rects(ctx.assumes, free_vars, bool_var_names)
+    try:
+        rects = get_rival_rects(
+            ctx.assumes,
+            free_vars,
+            bool_var_names,
+            max_rects=max_rects,
+        )
+    except RivalRectLimitExceeded:
+        return "unknown"
     if not rects:
         return "not feasible"
 
@@ -295,15 +368,25 @@ def _rewrite_proven_expressions(
 # Preserve assumptions used to construct the rectangular domain. Rewrite all
 # other assumptions and checks only when every applicable rectangle agrees,
 # then drop expressions that are certainly true.
-def rival_trim_context(ctx: "SpecContext") -> "SpecContext":
+def rival_trim_context(
+    ctx: "SpecContext",
+    max_rects: int | None = None,
+) -> "SpecContext":
     exprs = ctx.assumes + ctx.checks
     free_vars = collect_free_vars(exprs)
     bool_var_names = _collect_bool_var_names(exprs)
-    assumption_rects, assumption_contributes_to_rect = _get_rival_rects_and_contributors(
-        ctx.assumes,
-        free_vars,
-        bool_var_names,
-    )
+    resolved_max_rects = resolve_max_rects(max_rects)
+    try:
+        assumption_rects, assumption_contributes_to_rect = (
+            _get_rival_rects_and_contributors(
+                ctx.assumes,
+                free_vars,
+                bool_var_names,
+                resolved_max_rects,
+            )
+        )
+    except RivalRectLimitExceeded:
+        return ctx
     # Assumes that do not store pure facts and can be simplified
     rewritable_assumes = [
         assume
@@ -495,6 +578,7 @@ def _split_rival_interval(
 def _rival_rect_alternatives(
     expr: BoolExpr,
     domain: _RivalRectDomain,
+    max_rects: int,
 ) -> list[list[tuple[float, float]]] | None:
     if isinstance(expr, BoolLit):
         return None if expr.value else []
@@ -505,24 +589,29 @@ def _rival_rect_alternatives(
         and all(isinstance(var, BoolVar) for var in expr_vars)
         and all(var.name in domain.bool_var_names for var in expr_vars)
     ):
-        return _rival_boolean_rect_alternatives(expr, domain)
+        return _rival_boolean_rect_alternatives(
+            expr,
+            domain,
+            max_rects,
+        )
 
     if isinstance(expr, And):
-        lhs = _rival_rect_alternatives(expr.lhs, domain)
-        rhs = _rival_rect_alternatives(expr.rhs, domain)
+        lhs = _rival_rect_alternatives(expr.lhs, domain, max_rects)
+        rhs = _rival_rect_alternatives(expr.rhs, domain, max_rects)
         if lhs == [] or rhs == []:
             return []
         if lhs is None:
             return rhs
         if rhs is None:
             return lhs
-        return _intersect_rival_rect_sets(lhs, rhs)
+        return _intersect_rival_rect_sets(lhs, rhs, max_rects)
 
     if isinstance(expr, Or):
-        lhs = _rival_rect_alternatives(expr.lhs, domain)
-        rhs = _rival_rect_alternatives(expr.rhs, domain)
+        lhs = _rival_rect_alternatives(expr.lhs, domain, max_rects)
+        rhs = _rival_rect_alternatives(expr.rhs, domain, max_rects)
         if lhs is None or rhs is None:
             return None
+        _check_rect_limit(len(lhs) + len(rhs), max_rects)
         return lhs + rhs
 
     return _rival_comparison_rect(expr, domain)
@@ -531,6 +620,7 @@ def _rival_rect_alternatives(
 def _rival_boolean_rect_alternatives(
     expr: BoolExpr,
     domain: _RivalRectDomain,
+    max_rects: int,
 ) -> list[list[tuple[float, float]]] | None:
     bool_vars = sorted(
         (var for var in variables(expr) if isinstance(var, BoolVar)),
@@ -556,6 +646,7 @@ def _rival_boolean_rect_alternatives(
             point = 1.0 if value else 0.0
             rect[domain.var_indexes[var.name]] = (point, point)
         alternatives.append(rect)
+        _check_rect_limit(len(alternatives), max_rects)
     return alternatives
 
 
@@ -634,13 +725,16 @@ def _rival_literal_enclosure(
 def _intersect_rival_rect_sets(
     lhs_rects: list[list[tuple[float, float]]],
     rhs_rects: list[list[tuple[float, float]]],
+    max_rects: int,
 ) -> list[list[tuple[float, float]]]:
+    _check_rect_limit(len(lhs_rects) * len(rhs_rects), max_rects)
     intersections: list[list[tuple[float, float]]] = []
     for lhs in lhs_rects:
         for rhs in rhs_rects:
             intersection = _intersect_rival_rects(lhs, rhs)
             if intersection is not None:
                 intersections.append(intersection)
+                _check_rect_limit(len(intersections), max_rects)
     return intersections
 
 
