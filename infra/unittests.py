@@ -21,6 +21,7 @@ import z3
 from egglog import EGraph
 
 from zolotone import *
+from zolotone.ast import case_split as ast_case_split
 from zolotone.ast import nodes as ast_nodes
 from zolotone.ast import parallel_verification as parallel_runner
 from zolotone.egglog.rules import (
@@ -47,7 +48,7 @@ from zolotone.rival import (
 )
 from zolotone.spec.spec_context import simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
-from examples.arithmetic.fp32_add import fp32_add
+from examples.arithmetic.fp32_add import fp32_add, spec_fp32_add
 from examples.arithmetic.fp32_mult import fp32_mult
 from examples.arithmetic.bf16_add import bf16_add
 from examples.arithmetic.bf16_mult import bf16_mult
@@ -3020,16 +3021,21 @@ class TestSpecAstConstantFolding(unittest.TestCase):
     def test_fp32_adder_spec_preserves_single_infinity(self):
         from examples.arithmetic.fp32_add import spec_fp32_add
 
-        ctx = SpecContext("fp32-adder-single-infinity")
         cases = (
-            (fp32.inf(ctx), fp32.zero(ctx), "is_pinf"),
-            (fp32.zero(ctx), fp32.inf(ctx), "is_pinf"),
-            (fp32.ninf(ctx), fp32.zero(ctx), "is_ninf"),
-            (fp32.zero(ctx), fp32.ninf(ctx), "is_ninf"),
+            (fp32.inf, fp32.zero, "is_pinf"),
+            (fp32.zero, fp32.inf, "is_pinf"),
+            (fp32.ninf, fp32.zero, "is_ninf"),
+            (fp32.zero, fp32.ninf, "is_ninf"),
         )
 
-        for lhs, rhs, expected_predicate in cases:
-            with self.subTest(lhs=lhs, rhs=rhs):
+        for lhs_factory, rhs_factory, expected_predicate in cases:
+            with self.subTest(
+                lhs=lhs_factory.__name__,
+                rhs=rhs_factory.__name__,
+            ):
+                ctx = SpecContext("fp32-adder-single-infinity")
+                lhs = lhs_factory(ctx)
+                rhs = rhs_factory(ctx)
                 result = spec_fp32_add(lhs, rhs, ctx)
                 ctx.validate_requirements(timeout_ms=1000)
                 self.assertEqual(
@@ -3227,7 +3233,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         inner = fp32.zero(ctx)
         outer = fp32.zero(ctx)
 
-        cases = ast_nodes._split_classification_cases(
+        cases = ast_case_split._split_classification_cases(
             ctx,
             [],
             ((inner,), RealLit(7)),
@@ -3236,7 +3242,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         case = next(
             case
             for case in cases
-            if ast_nodes._case_labels(case.name)
+            if ast_case_split._case_labels(case.name)
             == {
                 "output.0.0": "zero",
             }
@@ -3251,7 +3257,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 RealLit(7).eq(RealLit(7)),
             ],
         )
-        labels = ast_nodes._case_labels(case.name)
+        labels = ast_case_split._case_labels(case.name)
         self.assertEqual(labels, {"output.0.0": "zero"})
         status, _ = solver_engine.check_equivalence(
             case,
@@ -3265,7 +3271,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         outer = fp32.zero(ctx)
 
         with patch.object(ctx, "copy", wraps=ctx.copy) as copy_ctx:
-            cases = ast_nodes._split_classification_cases(
+            cases = ast_case_split._split_classification_cases(
                 ctx,
                 [],
                 inner,
@@ -3284,7 +3290,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         inner = fp32.fresh("inner", ctx)
         outer = fp32.fresh("outer", ctx)
 
-        cases = list(ast_nodes._split_classification_cases(
+        cases = list(ast_case_split._split_classification_cases(
             ctx,
             [],
             inner,
@@ -3293,7 +3299,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
         self.assertEqual(len(cases), len(inner.classification_flags()))
         for split_ctx in cases:
-            labels = ast_nodes._case_labels(split_ctx.name)
+            labels = ast_case_split._case_labels(split_ctx.name)
             self.assertEqual(set(labels), {"output"})
 
 
@@ -3842,15 +3848,16 @@ class TestUE4M3Spec(unittest.TestCase):
         source = Var("source", Float32T())
         design = fp32_to_ue4m3(source)
         target_name = "fp32_to_ue4m3[arg0=norm,output=norm]"
-        split_classification_cases = ast_nodes._split_classification_cases
+        split_classification_cases = ast_case_split._split_classification_cases
 
         def select_target_case(*args, **kwargs):
             cases = split_classification_cases(*args, **kwargs)
             return [next(case for case in cases if case.name == target_name)]
 
         with (
+            patch.object(ast_case_split, "_partition_for", return_value=None),
             patch.object(
-                ast_nodes,
+                ast_case_split,
                 "_split_classification_cases",
                 side_effect=select_target_case,
             ),
@@ -3860,7 +3867,10 @@ class TestUE4M3Spec(unittest.TestCase):
 
         case_result = result["case_results"][0]
         self.assertTrue(case_result["proved"])
-        self.assertEqual(case_result["proof_trace"][-1]["tool"], "egglog-rewrite")
+        self.assertIn(
+            case_result["proof_trace"][-1]["tool"],
+            {"simplify", "egglog-rewrite"},
+        )
         self.assertEqual(case_result["proof_trace"][-1]["status"], "unsat")
 
 
@@ -4788,17 +4798,15 @@ class TestBFloat16Add(unittest.TestCase):
         rhs = Var(name="rhs", sign=BFloat16T())
         return lhs, rhs, bf16_add(lhs, rhs)
 
-    def test_bf16_add_specifications_can_be_chained(self):
+    def test_bf16_add_specifications_cannot_be_chained(self):
         lhs = Var(name="lhs", sign=BFloat16T())
         rhs = Var(name="rhs", sign=BFloat16T())
         inner = bf16_add(lhs, rhs)
         outer = bf16_add(inner, lhs)
         ctx = SpecContext("chained-bf16-add")
 
-        output = ctx.spec_of(outer)
-
-        self.assertIsInstance(output, bf16)
-        ctx.validate_requirements(timeout_ms=1000)
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            ctx.spec_of(outer)
 
     def test_bf16_add_handles_rounding_subnormals_and_special_values(self):
         one = BFloat16.from_fields(sign=0, exponent=127, mantissa=0)
@@ -4905,17 +4913,15 @@ class TestBFloat16Mult(unittest.TestCase):
         rhs = Var(name="rhs", sign=BFloat16T())
         return lhs, rhs, bf16_mult(lhs, rhs)
 
-    def test_bf16_mult_specifications_can_be_chained(self):
+    def test_bf16_mult_specifications_cannot_be_chained(self):
         lhs = Var(name="lhs", sign=BFloat16T())
         rhs = Var(name="rhs", sign=BFloat16T())
         inner = bf16_mult(lhs, rhs)
         outer = bf16_mult(inner, lhs)
         ctx = SpecContext("chained-bf16-mult")
 
-        output = ctx.spec_of(outer)
-
-        self.assertIsInstance(output, bf16)
-        ctx.validate_requirements(timeout_ms=1000)
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            ctx.spec_of(outer)
 
     def test_bf16_mult_handles_rounding_subnormals_and_special_values(self):
         cases = (
@@ -5390,15 +5396,16 @@ class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
 
     def _assert_spec_case_proves(self, target_name):
         _, design = self._make_design()
-        split_classification_cases = ast_nodes._split_classification_cases
+        split_classification_cases = ast_case_split._split_classification_cases
 
         def select_target_case(*args, **kwargs):
             cases = split_classification_cases(*args, **kwargs)
             return [next(case for case in cases if case.name == target_name)]
 
         with (
+            patch.object(ast_case_split, "_partition_for", return_value=None),
             patch.object(
-                ast_nodes,
+                ast_case_split,
                 "_split_classification_cases",
                 side_effect=select_target_case,
             ),
@@ -5434,15 +5441,16 @@ class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
             "ue4m3x2_e2m1x2_add_fp32_determinism["
             "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
         )
-        split_classification_cases = ast_nodes._split_classification_cases
+        split_classification_cases = ast_case_split._split_classification_cases
 
         def select_target_case(*args, **kwargs):
             cases = split_classification_cases(*args, **kwargs)
             return [next(case for case in cases if case.name == target_name)]
 
         with (
+            patch.object(ast_case_split, "_partition_for", return_value=None),
             patch.object(
-                ast_nodes,
+                ast_case_split,
                 "_split_classification_cases",
                 side_effect=select_target_case,
             ),
@@ -5566,15 +5574,16 @@ class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
 
     def _assert_spec_case_proves(self, target_name):
         _, design = self._make_design()
-        split_classification_cases = ast_nodes._split_classification_cases
+        split_classification_cases = ast_case_split._split_classification_cases
 
         def select_target_case(*args, **kwargs):
             cases = split_classification_cases(*args, **kwargs)
             return [next(case for case in cases if case.name == target_name)]
 
         with (
+            patch.object(ast_case_split, "_partition_for", return_value=None),
             patch.object(
-                ast_nodes,
+                ast_case_split,
                 "_split_classification_cases",
                 side_effect=select_target_case,
             ),
@@ -5601,15 +5610,16 @@ class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
             "ue4m3x2_e2m1x2_mult_fp32_determinism["
             "arg0=norm,arg1=norm,arg2=norm,arg3=norm,output=norm]"
         )
-        split_classification_cases = ast_nodes._split_classification_cases
+        split_classification_cases = ast_case_split._split_classification_cases
 
         def select_target_case(*args, **kwargs):
             cases = split_classification_cases(*args, **kwargs)
             return [next(case for case in cases if case.name == target_name)]
 
         with (
+            patch.object(ast_case_split, "_partition_for", return_value=None),
             patch.object(
-                ast_nodes,
+                ast_case_split,
                 "_split_classification_cases",
                 side_effect=select_target_case,
             ),
@@ -5687,16 +5697,14 @@ class TestBFloat16ReLU(unittest.TestCase):
         value = Var(name="value", sign=BFloat16T())
         return value, bf16_relu(value)
 
-    def test_bf16_relu_specifications_can_be_chained(self):
+    def test_bf16_relu_specifications_cannot_be_chained(self):
         value = Var(name="value", sign=BFloat16T())
         inner = bf16_relu(value)
         outer = bf16_relu(inner)
         ctx = SpecContext("chained-bf16-relu")
 
-        output = ctx.spec_of(outer)
-
-        self.assertIsInstance(output, bf16)
-        ctx.validate_requirements(timeout_ms=1000)
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            ctx.spec_of(outer)
 
     def test_bf16_relu_handles_finite_and_special_values(self):
         cases = (
@@ -6437,6 +6445,199 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(trimmed.checks, [abs_check, if_check])
 
+class TestPartialCasesVerification(unittest.TestCase):
+    @staticmethod
+    def _result(case, status):
+        return CaseVerificationResult(
+            name=case.ctx.name,
+            proved=status == "unsat",
+            status=status,
+            feasibility_status="feasible",
+            proof_trace=[],
+            side_feasibility_reports=[],
+        )
+
+    def test_cases_metadata_is_ordered_and_copied(self):
+        ctx = SpecContext("case-metadata")
+        first = ctx.bool("first")
+        entries = (
+            case(first, ctx.real_val(1)),
+            case(~first, ctx.real_val(2)),
+        )
+
+        output = Cases(*entries, ctx=ctx)
+
+        self.assertEqual(len(ctx.case_partitions), 1)
+        self.assertEqual(ctx.case_partitions[0].entries, entries)
+        self.assertIs(ctx.case_partitions[0].value, output)
+        self.assertEqual(ctx.copy().case_partitions, ctx.case_partitions)
+
+    def test_second_cases_is_rejected(self):
+        nested_ctx = SpecContext("nested-cases")
+        first = nested_ctx.bool("first")
+        second = nested_ctx.bool("second")
+        inner = Cases(
+            case(first, nested_ctx.real_val(1)),
+            case(~first, nested_ctx.real_val(2)),
+            ctx=nested_ctx,
+        )
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            Cases(
+                case(second, inner),
+                case(~second, nested_ctx.real_val(3)),
+                ctx=nested_ctx,
+            )
+
+        independent_ctx = SpecContext("independent-cases")
+        selector = independent_ctx.bool("selector")
+        Cases(
+            case(selector, independent_ctx.real_val(1)),
+            case(~selector, independent_ctx.real_val(2)),
+            ctx=independent_ctx,
+        )
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            Cases(
+                case(selector, independent_ctx.real_val(3)),
+                case(~selector, independent_ctx.real_val(4)),
+                ctx=independent_ctx,
+            )
+
+    def test_fp32_add_unknown_nan_path_splits_only_guard_flags(self):
+        base_ctx = SpecContext("partial-fp32-add")
+        x = fp32.fresh("x", base_ctx)
+        y = fp32.fresh("y", base_ctx)
+        first_ctx = base_ctx.copy()
+        first_output = fp32.nan(first_ctx)
+        second_ctx = base_ctx.copy()
+        second_output = spec_fp32_add(x, y, second_ctx)
+        observer = Mock()
+        calls = []
+
+        def verify(case, *_args):
+            calls.append(case.ctx.name)
+            status = (
+                "unknown"
+                if case.ctx.name == "partial-fp32-add[path=0,output=nan]"
+                else "unsat"
+            )
+            return self._result(case, status)
+
+        with patch.object(
+            ast_case_split,
+            "_verify_adaptive_case",
+            side_effect=verify,
+        ):
+            results = ast_case_split.run_equivalence_cases(
+                combined_ctx=base_ctx.copy(),
+                side_contexts=(first_ctx, second_ctx),
+                outputs=(first_output, second_output),
+                inputs=[x, y],
+                schedule=[{"tool": "simplify"}],
+                observer=observer,
+                max_workers=1,
+                preferred_side=1,
+            )
+
+        refined_names = [
+            name
+            for name in calls
+            if "path=0,output=nan," in name
+        ]
+        self.assertEqual(len(calls), 5 * 5 + 16)
+        self.assertEqual(len(refined_names), 16)
+        self.assertEqual(len(results), 5 * 5 - 1 + 16)
+        self.assertEqual(observer.case_completed.call_count, len(results))
+        self.assertIn("partial-fp32-add[path=0,output=norm]", calls)
+        self.assertIn("partial-fp32-add[path=4,output=nan]", calls)
+        for name in refined_names:
+            self.assertIn("arg0.inf=", name)
+            self.assertIn("arg0.nan=", name)
+            self.assertIn("arg1.inf=", name)
+            self.assertIn("arg1.nan=", name)
+            self.assertNotIn(".norm=", name)
+            self.assertNotIn(".sub=", name)
+            self.assertNotIn(".zero=", name)
+            self.assertIn("output=nan", name)
+
+    def test_sat_coarse_path_is_terminal(self):
+        ctx = SpecContext("sat-is-terminal")
+        selector = ctx.bool("selector")
+        selected = Cases(
+            case(selector, ctx.real_val(1)),
+            case(~selector, ctx.real_val(2)),
+            ctx=ctx,
+        )
+        calls = []
+
+        def verify(case, *_args):
+            calls.append(case.ctx.name)
+            status = "sat" if "path=0" in case.ctx.name else "unsat"
+            return self._result(case, status)
+
+        with patch.object(
+            ast_case_split,
+            "_verify_adaptive_case",
+            side_effect=verify,
+        ):
+            results = ast_case_split.run_equivalence_cases(
+                combined_ctx=ctx.copy(),
+                side_contexts=(ctx.copy(), ctx),
+                outputs=(ctx.real_val(1), selected),
+                inputs=[selector],
+                schedule=[{"tool": "simplify"}],
+                observer=Mock(),
+                max_workers=1,
+                preferred_side=1,
+            )
+
+        self.assertEqual(calls, [
+            "sat-is-terminal[path=0]",
+            "sat-is-terminal[path=1]",
+        ])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["status"], "sat")
+
+    def test_classified_fp_checks_observe_zero_sign_but_not_nan_payload(self):
+        zero_ctx = SpecContext("partial-signed-zero")
+        positive_zero = fp32.zero(zero_ctx)
+        ast_case_split._assume_classification(
+            zero_ctx,
+            positive_zero,
+            "zero",
+        )
+        ast_case_split._add_classification_case_checks(
+            zero_ctx,
+            positive_zero,
+            fp32.nzero(zero_ctx),
+            {"output": "zero"},
+        )
+        zero_status, _ = solver_engine.check_equivalence(
+            zero_ctx,
+            schedule=[{"tool": "simplify"}],
+        )
+
+        nan_ctx = SpecContext("partial-nan")
+        selected_nan = fp32.nan(nan_ctx)
+        ast_case_split._assume_classification(
+            nan_ctx,
+            selected_nan,
+            "nan",
+        )
+        ast_case_split._add_classification_case_checks(
+            nan_ctx,
+            selected_nan,
+            fp32.nan(nan_ctx),
+            {"output": "nan"},
+        )
+        nan_status, _ = solver_engine.check_equivalence(
+            nan_ctx,
+            schedule=[{"tool": "simplify"}],
+        )
+
+        self.assertEqual(zero_status, "sat")
+        self.assertEqual(nan_status, "unsat")
+
+
 class TestStdoutVerificationObserver(unittest.TestCase):
     def test_default_schedule_restarts_rewrite_pipeline_three_times(self):
         schedule = ast_nodes._default_equivalence_schedule()
@@ -7122,7 +7323,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
 
         with (
             patch.object(
-                ast_nodes,
+                ast_case_split,
                 "simplify_ctx",
                 return_value={"feasibility_status": "unknown"},
             ),
@@ -7218,63 +7419,13 @@ class TestSpecificationDeterminism(unittest.TestCase):
 
 
 class TestSolverApis(unittest.TestCase):
-    def test_fp32_multiplier_check_spec_proves_zero_input_cases(self):
+    def test_fp32_multiplier_check_spec_rejects_multiple_cases(self):
         multiplier = fp32_mult(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
-        zero_input_pairs = {
-            ("zero", "zero"),
-            ("zero", "norm"),
-            ("norm", "zero"),
-            ("zero", "sub"),
-            ("sub", "zero"),
-            ("zero", "inf"),
-            ("inf", "zero"),
-            ("zero", "nan"),
-            ("nan", "zero"),
-        }
-        split_classification_cases = ast_nodes._split_classification_cases
-
-        def select_zero_input_cases(
-            ctx,
-            inputs,
-            spec_inner,
-            spec_outer,
-        ):
-            cases = split_classification_cases(
-                ctx,
-                inputs,
-                spec_inner,
-                spec_outer,
-            )
-            selected = [
-                case
-                for case in cases
-                if (
-                    ast_nodes._case_labels(case.name)["arg0"],
-                    ast_nodes._case_labels(case.name)["arg1"],
-                ) in zero_input_pairs
-            ]
-            self.assertEqual(len(selected), len(zero_input_pairs) * 5)
-            return selected
-
-        with (
-            patch.object(
-                ast_nodes,
-                "_split_classification_cases",
-                side_effect=select_zero_input_cases,
-            ),
-            open(os.devnull, "w") as devnull,
-            contextlib.redirect_stdout(devnull),
-        ):
-            check_result = multiplier.check_spec(schedule=[{"tool": "simplify"}])
-
-        self.assertTrue(check_result["proved"])
-        self.assertEqual(
-            len(check_result["proof_traces"]),
-            len(zero_input_pairs) * 5,
-        )
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            multiplier.check_spec(schedule=[{"tool": "simplify"}])
 
     def _assert_dot_product_check_spec_with_two_zero_inputs(
         self,
@@ -7355,19 +7506,19 @@ class TestSolverApis(unittest.TestCase):
                     case_ctx.assume(symbolic_field.eq(concrete_field))
 
             for name, value in named_inputs:
-                ast_nodes._assume_classification_case(
+                ast_case_split._assume_classification_case(
                     case_ctx,
                     name,
                     value,
                     labels[name],
                 )
-            ast_nodes._assume_classification_case(
+            ast_case_split._assume_classification_case(
                 case_ctx,
                 "output",
                 spec_inner,
                 labels["output"],
             )
-            ast_nodes._assume_classification(
+            ast_case_split._assume_classification(
                 case_ctx,
                 spec_outer,
                 labels["output"],
@@ -7380,7 +7531,7 @@ class TestSolverApis(unittest.TestCase):
                 case_ctx.name,
                 f"{ctx.name}[{expected_labels},output=norm]",
             )
-            ast_nodes._add_classification_case_checks(
+            ast_case_split._add_classification_case_checks(
                 case_ctx,
                 spec_inner,
                 spec_outer,
@@ -7389,8 +7540,9 @@ class TestSolverApis(unittest.TestCase):
             return [case_ctx]
 
         with (
+            patch.object(ast_case_split, "_partition_for", return_value=None),
             patch.object(
-                ast_nodes,
+                ast_case_split,
                 "_split_classification_cases",
                 side_effect=select_normal_result_case,
             ),
@@ -7433,53 +7585,30 @@ class TestSolverApis(unittest.TestCase):
                 proof_trace,
             )
 
-    def test_conventional_check_spec_with_two_zero_inputs(self):
-        self._assert_dot_product_check_spec_with_two_zero_inputs(
-            bf16x8_dot_fp32_conventional,
-            expect_egglog=False,
-        )
+    def test_conventional_check_spec_rejects_multiple_cases(self):
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            self._assert_dot_product_check_spec_with_two_zero_inputs(
+                bf16x8_dot_fp32_conventional,
+                expect_egglog=False,
+            )
 
-    def test_optimized_check_spec_with_two_zero_inputs(self):
-        self._assert_dot_product_check_spec_with_two_zero_inputs(
-            bf16x8_dot_fp32_optimized,
-            expect_egglog=True,
-        )
+    def test_optimized_check_spec_rejects_multiple_cases(self):
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            self._assert_dot_product_check_spec_with_two_zero_inputs(
+                bf16x8_dot_fp32_optimized,
+                expect_egglog=True,
+            )
 
-    def test_fp32_adder_norm_inf_inf_inf_is_trimmed_before_egglog(self):
+    def test_fp32_adder_inner_tree_rejects_multiple_cases(self):
         adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
         ctx = adder.ctx.copy()
-        spec_inner = ctx.spec_of(adder.inner_tree)
-        inputs = [ctx.spec_of(arg) for arg in adder.inner_args]
-        spec_outer = adder.spec(*inputs, ctx=ctx)
-        target_name = (
-            "fp32_add["
-            "arg0=norm,arg1=inf,output=inf]"
-        )
-        case = next(
-            case
-            for case in ast_nodes._split_classification_cases(
-                ctx,
-                inputs,
-                spec_inner,
-                spec_outer,
-            )
-            if case.name == target_name
-        )
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            ctx.spec_of(adder.inner_tree)
 
-        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
-            status, trace = solver_engine.check_equivalence(
-                case,
-                schedule=[{"tool": "simplify"}],
-            )
-
-        self.assertEqual(status, "unsat")
-        self.assertEqual(trace[-1]["new_ctx"].checks, [])
-
-
-    def test_fp32_adder_inf_inf_norm_side_case_uses_only_real_and_bool_exprs(self):
+    def test_collecting_fp32_adder_inner_spec_rejects_multiple_cases(self):
         adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
@@ -7493,22 +7622,16 @@ class TestSolverApis(unittest.TestCase):
 
         base_ctx = adder.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in adder.inner_args]
-        simplified = ast_nodes._collect_classified_spec(
-            ast_nodes._Spec(
-                "inner_spec",
-                lambda ctx: ctx.spec_of(adder.inner_tree),
-            ),
-            base_ctx=base_ctx,
-            inputs=inputs,
-            case_labels=labels,
-        ).simplify()
-
-        def uses_only_supported_exprs(node):
-            return isinstance(node, (RealExpr, BoolExpr)) and all(
-                uses_only_supported_exprs(child) for child in children(node)
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            ast_case_split._collect_classified_spec(
+                ast_nodes._Spec(
+                    "inner_spec",
+                    lambda ctx: ctx.spec_of(adder.inner_tree),
+                ),
+                base_ctx=base_ctx,
+                inputs=inputs,
+                case_labels=labels,
             )
-
-        self.assertTrue(all(uses_only_supported_exprs(expr) for expr in simplified.assumes))
 
     def test_fp32_adder_inf_inf_cannot_have_normal_outer_spec(self):
         adder = fp32_add(
@@ -7517,7 +7640,7 @@ class TestSolverApis(unittest.TestCase):
         )
         base_ctx = adder.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in adder.inner_args]
-        simplified = ast_nodes._collect_classified_spec(
+        simplified = ast_case_split._collect_classified_spec(
             ast_nodes._Spec(
                 "outer_spec",
                 lambda ctx: adder.spec(*inputs, ctx=ctx),
@@ -7614,62 +7737,23 @@ class TestSolverApis(unittest.TestCase):
 
         self.assertIn("Unknown schedule tool rival_feasibility_check", str(raised.exception))
 
-    def test_fp32_adder_norm_sub_zero_zero_is_proved_infeasible(self):
+    def test_fp32_adder_norm_sub_check_rejects_multiple_cases(self):
         adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
-        target_name = (
-            "fp32_add["
-            "arg0=norm,arg1=sub,output=zero]"
-        )
-        split_classification_cases = ast_nodes._split_classification_cases
-
-        def select_target_case(*args, **kwargs):
-            cases = split_classification_cases(*args, **kwargs)
-            return [next(case for case in cases if case.name == target_name)]
-
-        with (
-            patch.object(
-                ast_nodes,
-                "_split_classification_cases",
-                side_effect=select_target_case,
-            ),
-            open(os.devnull, "w") as devnull,
-            contextlib.redirect_stdout(devnull),
-        ):
-            check_result = adder.check_spec(
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            adder.check_spec(
                 schedule=[{"tool": "simplify"}],
             )
 
-        self.assertTrue(check_result["proved"])
-        self.assertEqual(
-            check_result["proof_traces"][0][0]["feasibility_status"],
-            "not feasible",
-        )
-
-    def test_fp32_adder_norm_norm_proves_with_egglog(self):
+    def test_fp32_adder_norm_check_rejects_multiple_cases(self):
         adder = fp32_add(
             Var(name="a", sign=Float32T()),
             Var(name="b", sign=Float32T()),
         )
-        target_name = "fp32_add[arg0=norm,arg1=norm,output=norm]"
-        split_classification_cases = ast_nodes._split_classification_cases
-
-        def select_norm_norm_case(*args, **kwargs):
-            cases = split_classification_cases(*args, **kwargs)
-            return [next(case for case in cases if case.name == target_name)]
-
-        with (
-            patch.object(
-                ast_nodes,
-                "_split_classification_cases",
-                side_effect=select_norm_norm_case,
-            ),
-            open(os.devnull, "w") as devnull,
-            contextlib.redirect_stdout(devnull),
-        ):
-            check_result = adder.check_spec(
+        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
+            adder.check_spec(
                 schedule=[
                     {"tool": "simplify"},
                     {
@@ -7679,21 +7763,6 @@ class TestSolverApis(unittest.TestCase):
                     },
                 ]
             )
-
-        self.assertTrue(check_result["proved"])
-        matching_traces = [
-            proof_trace
-            for proof_trace in check_result["proof_traces"]
-            if proof_trace and proof_trace[0]["name"] == target_name
-        ]
-        self.assertEqual(len(matching_traces), 1)
-        self.assertTrue(
-            any(
-                report["tool"] == "egglog-rewrite" and report["status"] == "unsat"
-                for report in matching_traces[0]
-            ),
-            matching_traces[0],
-        )
 
     def test_z3_check_eq_returns_single_report(self):
         ctx = SpecContext("z3-api")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .spec_ast import *
+from .spec_ast import _CasePartition
 from ..egglog import *
 from egglog import rewrite, vars_
 from ..solver.report import ProofReport, build_proof_report
@@ -29,6 +30,7 @@ class SpecContext:
         self.assumes: list[BoolExpr] = []
         self.checks: list[BoolExpr] = []
         self.requirements: list[BoolExpr] = []
+        self.case_partitions: list[_CasePartition] = []
         self._sym_counter = 0
         self.name = name
         self.spec_cache = {}
@@ -352,6 +354,7 @@ class SpecContext:
         self.assumes.clear()
         self.checks.clear()
         self.requirements.clear()
+        self.case_partitions.clear()
         self._sym_counter = 0
         self.spec_cache.clear()
         self._spec_cache_valid = True
@@ -380,7 +383,13 @@ class SpecContext:
         lines.extend(format_section("Requirements", self.requirements))
         return "\n".join(lines)
     
-    def copy(self, assumes=None, checks=None, requirements=None):
+    def copy(
+        self,
+        assumes=None,
+        checks=None,
+        requirements=None,
+        case_partitions=None,
+    ):
         if assumes is None:
             # Spec AST nodes are immutable, so a shallow list copy is enough here.
             # Deep-copying rebuilds nodes such as Eq via pickle-style protocols,
@@ -390,11 +399,14 @@ class SpecContext:
             checks = list(self.checks)
         if requirements is None:
             requirements = list(self.requirements)
+        if case_partitions is None:
+            case_partitions = list(self.case_partitions)
         
         new_ctx = SpecContext(self.name)
         new_ctx.assumes = assumes
         new_ctx.checks = checks
         new_ctx.requirements = requirements
+        new_ctx.case_partitions = case_partitions
         new_ctx._sym_counter = self._sym_counter
         new_ctx.spec_cache = dict(self.spec_cache)
         new_ctx._spec_cache_valid = self._spec_cache_valid
@@ -419,7 +431,8 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
     seen_states = set()
     max_passes = 32
 
-    for _ in range(max_passes):
+    for i in range(max_passes):
+        print(i)
         current_state = _context_expression_state(current)
         if current_state in seen_states:
             warnings.warn(f"Simplification cycle detected for {ctx.name!r}", RuntimeWarning)

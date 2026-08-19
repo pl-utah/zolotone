@@ -88,6 +88,7 @@ def _normalize_schedule(
 
 def _run_tool(ctx: SpecContext, step: dict[str, Any]):
     tool = step["tool"]
+    print(tool)
     tool_fn = TOOL_FNS[tool]
     kwargs = {key: value for key, value in step.items() if key != "tool"}
     return _normalize_tool_reports(tool_fn(ctx, **kwargs))

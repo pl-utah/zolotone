@@ -712,10 +712,7 @@ class If(RealExpr):
     def __str__(self):
         return f"(if {self.cond} then {self.on_true} else {self.on_false})"
 
-
-_CaseValue = BoolExpr | RealExpr | FPExpr
-
-
+    
 def _coerce_case_value(value: object) -> _CaseValue:
     if isinstance(value, (BoolExpr, RealExpr, FPExpr)):
         return value
@@ -728,7 +725,15 @@ def _coerce_case_value(value: object) -> _CaseValue:
 @dataclass(frozen=True)
 class _CaseEntry:
     condition: BoolExpr
-    value: _CaseValue
+    value: SpecNode
+
+
+@dataclass(frozen=True)
+class _CasePartition:
+    """Source-level Cases entries paired with their lowered expression."""
+
+    entries: tuple[_CaseEntry, ...]
+    value: SpecNode
 
 
 def case(condition: BoolExpr, value: _CaseValue) -> _CaseEntry:
@@ -774,6 +779,9 @@ def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
         raise ValueError("Cases requires at least one case() entry")
     if not hasattr(ctx, "require"):
         raise TypeError("Cases ctx must be a SpecContext")
+    # TODO: WE CAN UNION NESTED CASES
+    # if ctx.case_partitions:
+    #     raise NotImplementedError("Multiple Cases are not supported")
 
     coverage = entries[0].condition
     for entry in entries[1:]:
@@ -783,6 +791,7 @@ def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
     for entry in reversed(entries[:-1]):
         result = _select_case_value(entry.condition, entry.value, result)
     ctx.require(coverage)
+    ctx.case_partitions.append(_CasePartition(tuple(entries), result))
     return result
 
 
