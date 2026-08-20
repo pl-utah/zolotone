@@ -22,10 +22,7 @@ __all__ = [
 
 
 MAX_RECTS_ENV = "ZOLOTONE_RIVAL_MAX_RECTS"
-# Rectangles scale with the number of free variables because every candidate
-# intersection scans the full domain. Keep the default below the point where
-# wide floating-point contexts become expensive even before retaining results.
-DEFAULT_MAX_RECTS = 10_000
+DEFAULT_MAX_RECTS = 50_000
 
 
 class RivalRectLimitExceeded(RuntimeError):
@@ -269,6 +266,29 @@ def _rewrite_proven_expressions(
 ) -> list[SpecNode]:
     proof_cache: dict[BoolExpr, bool | None] = {}
 
+    def unit_sign_magnitude(value: RealExpr) -> RealExpr | None:
+        """Return the other factor when ``value`` multiplies by a unit sign."""
+
+        if not isinstance(value, Mul):
+            return None
+
+        def is_unit_sign(expr: RealExpr) -> bool:
+            if isinstance(expr, RealLit):
+                return expr.value in {-1, 1}
+            if not isinstance(expr, If):
+                return False
+            branches = (expr.on_true, expr.on_false)
+            return all(
+                isinstance(branch, RealLit) and branch.value in {-1, 1}
+                for branch in branches
+            )
+
+        if is_unit_sign(value.lhs):
+            return value.rhs
+        if is_unit_sign(value.rhs):
+            return value.lhs
+        return None
+
     def prove(predicate: BoolExpr) -> bool | None:
         predicate = predicate.constant_fold()
         if isinstance(predicate, BoolLit):
@@ -328,6 +348,12 @@ def _rewrite_proven_expressions(
             return rewritten
 
         if isinstance(rewritten, Abs):
+            magnitude = unit_sign_magnitude(rewritten.value)
+            if magnitude is not None:
+                # abs((+/-1) * x) == abs(x). Re-enter the rewrite so the
+                # existing sign proof below can also reduce abs(x) to x.
+                return rewrite(Abs(magnitude))
+
             zero = RealLit(0)
             nonnegative = prove(rewritten.value >= zero)
             if nonnegative is True:

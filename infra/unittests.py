@@ -6518,6 +6518,20 @@ class TestRivalTranslation(unittest.TestCase):
         self.assertEqual(rival_trim_context(nonnegative_ctx).checks, [])
         self.assertEqual(rival_trim_context(nonpositive_ctx).checks, [])
 
+    def test_rival_trim_context_prunes_unit_sign_before_abs(self):
+        ctx = SpecContext("rival-trim-unit-sign-abs")
+        sign = ctx.real("sign")
+        magnitude = ctx.real("magnitude")
+        one = ctx.one()
+        unit_sign = If(sign.eq(one), ctx.real_val(-1), one)
+        reverse_unit_sign = If(sign.eq(one), one, ctx.real_val(-1))
+
+        ctx.assume(magnitude >= ctx.zero())
+        ctx.check(abs(unit_sign * magnitude).eq(magnitude))
+        ctx.check(abs(magnitude * reverse_unit_sign).eq(magnitude))
+
+        self.assertEqual(rival_trim_context(ctx).checks, [])
+
     def test_rival_trim_context_selects_if_branch_from_assumptions(self):
         ctx = SpecContext("rival-trim-bounded-if")
         x = ctx.real("x")

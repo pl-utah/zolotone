@@ -102,8 +102,6 @@ class fp32(FPExpr):
         ctx.assume((is_zero | is_inf).implies(mantissa.eq(zero)))
         ctx.assume((is_inf | is_nan).implies(exponent.eq(max_exponent)))
         ctx.assume((is_sub | is_nan).implies(mantissa >= one))
-        ctx.assume(is_norm.implies(abs(value).eq(normal_magnitude)))
-        ctx.assume(is_sub.implies(abs(value).eq(subnormal_magnitude)))
 
         return out
     
