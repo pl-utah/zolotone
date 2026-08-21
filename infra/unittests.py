@@ -272,7 +272,7 @@ class TestMakeDesignsHtml(unittest.TestCase):
         self.assertIn("<h2>Determinism cases</h2>", html)
         self.assertIn("<h2>Specification cases</h2>", html)
 
-    def test_designs_are_grouped_in_category_order(self):
+    def test_designs_preserve_execution_order_across_categories(self):
         report = {
             "started_at": "2026-08-04T01:02:03Z",
             "finished_at": "2026-08-04T01:03:03Z",
@@ -301,16 +301,58 @@ class TestMakeDesignsHtml(unittest.TestCase):
             Path("reports/run_designs.json"),
         )
 
-        headings = [
-            html.index(f'colspan="6">{label}</th>')
-            for label in ("Arithmetic", "Dot product", "Converter", "Uncategorized")
+        positions = [
+            html.index(f">{name}</button>")
+            for name in ("legacy", "convert", "dot", "add")
         ]
-        self.assertEqual(headings, sorted(headings))
-        self.assertLess(html.index(">Arithmetic</th>"), html.index(">add</button>"))
-        self.assertLess(
-            html.index(">Uncategorized</th>"),
-            html.index(">legacy</button>"),
+        self.assertEqual(positions, sorted(positions))
+        for label, name in (
+            ("Uncategorized", "legacy"),
+            ("Converter", "convert"),
+            ("Dot product", "dot"),
+            ("Arithmetic", "add"),
+        ):
+            self.assertLess(
+                html.index(f">{label}</th>"),
+                html.index(f">{name}</button>"),
+            )
+
+    def test_cases_preserve_execution_order(self):
+        def case() -> dict[str, object]:
+            return {
+                "status": "unsat",
+                "feasibility": "feasible",
+                "proved": True,
+                "elapsed_s": 0.1,
+            }
+
+        report = {
+            "started_at": "2026-08-04T01:02:03Z",
+            "finished_at": "2026-08-04T01:03:03Z",
+            "designs": {
+                "demo": {
+                    "elapsed_s": 0.2,
+                    "checks": {
+                        "determinism": {
+                            "status": "passed",
+                            "proved": True,
+                            "elapsed_s": 0.2,
+                            "cases": {
+                                "case-z": case(),
+                                "case-a": case(),
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
+        html = make_designs_html.build_html(
+            report,
+            Path("reports/run_designs.json"),
         )
+
+        self.assertLess(html.index(">case-z</th>"), html.index(">case-a</th>"))
 
     def test_timeout_displays_only_completed_cases(self):
         report = {
@@ -692,6 +734,7 @@ class TestRunDesigns(unittest.TestCase):
             {name: result["status"] for name, result in report["designs"].items()},
             {"first": "passed", "broken": "timeout", "last": "failed"},
         )
+        self.assertEqual(list(report["designs"]), ["first", "broken", "last"])
         self.assertEqual(
             report["designs"]["broken"]["checks"]["determinism"][
                 "elapsed_s"

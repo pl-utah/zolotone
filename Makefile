@@ -10,7 +10,7 @@ DESIGN_TIMEOUT_S ?= 600
 DESIGN_MAX_WORKERS ?= 8
 DOCKER_IMAGE ?= zolotone
 DOCKER_PLATFORM ?= linux/amd64
-DOCKER_TIMEOUT_S ?= 1800
+DOCKER_TIMEOUT_S ?= 259200
 
 DREAL_REPO ?= https://github.com/dreal/dreal4
 

@@ -162,33 +162,26 @@ def _render_design_rows(
     return summary_row + detail_row
 
 
-def _render_design_groups(designs: dict[str, dict[str, Any]]) -> str:
-    grouped = {category: [] for category in CATEGORY_LABELS}
-    grouped["uncategorized"] = []
-    for name, result in designs.items():
+def _render_designs(designs: dict[str, dict[str, Any]]) -> str:
+    sections = []
+    previous_category = None
+    for index, (name, result) in enumerate(designs.items()):
         category = result.get("category")
         key = category if category in CATEGORY_LABELS else "uncategorized"
-        grouped[key].append((name, result))
-
-    sections = []
-    index = 0
-    for category, entries in grouped.items():
-        if not entries:
-            continue
-        label = CATEGORY_LABELS.get(category, "Uncategorized")
-        sections.append(
-            '<tr class="category-row">'
-            f'<th scope="colgroup" colspan="6">{label}</th></tr>'
-        )
-        for name, result in entries:
-            sections.append(_render_design_rows(name, result, index))
-            index += 1
+        if key != previous_category:
+            label = CATEGORY_LABELS.get(key, "Uncategorized")
+            sections.append(
+                '<tr class="category-row">'
+                f'<th scope="colgroup" colspan="6">{label}</th></tr>'
+            )
+            previous_category = key
+        sections.append(_render_design_rows(name, result, index))
     return "".join(sections)
 
 
 def build_html(report: dict[str, Any], source_path: Path) -> str:
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    rows = _render_design_groups(report["designs"]) or EMPTY_TABLE_ROW
+    rows = _render_designs(report["designs"]) or EMPTY_TABLE_ROW
 
     return f"""<!doctype html>
 <html lang="en">
