@@ -33,7 +33,7 @@ def _default_equivalence_schedule() -> list[dict[str, tp.Any]]:
                 {"tool": "simplify"},
                 {
                     "tool": "egglog-rewrite",
-                    "iterations": 6,
+                    "iterations": 7,
                     "scheduler": {
                         "match_limit": 500_000,
                         "ban_length": 1,
