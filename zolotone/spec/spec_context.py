@@ -444,10 +444,14 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
             break
         seen_states.add(current_state)
 
-        rewritten = rival_trim_context(current.simplify())
+        simplified = current.simplify()
+        regular_state = _context_expression_state(simplified)
+        rewritten = rival_trim_context(simplified)
         rewritten_state = _context_expression_state(rewritten)
         current = rewritten
-        if rewritten_state == current_state:
+        # Ordinary simplification already reached its own fixpoint. If Rival
+        # then made no change, another identical combined pass cannot help.
+        if rewritten_state == regular_state or rewritten_state == current_state:
             break
     else:
         warnings.warn(f"Simplification did not saturate after {max_passes} passes for {ctx.name!r}", RuntimeWarning)
