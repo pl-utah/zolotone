@@ -186,6 +186,7 @@ def _get_rival_rects_and_contributors(
     max_rects: int,
 ) -> tuple[list[list[tuple[float, float]]], list[bool]]:
     domain = _RivalRectDomain.build(free_vars, bool_var_names)
+    variable_kind_cache: dict[int, tuple[bool, bool]] = {}
     rects = [domain.new_rect()]
     contributors = [False] * len(assumes)
     for index, assume in enumerate(assumes):
@@ -193,6 +194,7 @@ def _get_rival_rects_and_contributors(
             assume,
             domain,
             max_rects,
+            variable_kind_cache,
         )
         if alternatives is None:
             continue
@@ -605,15 +607,20 @@ def _rival_rect_alternatives(
     expr: BoolExpr,
     domain: _RivalRectDomain,
     max_rects: int,
+    variable_kind_cache: dict[int, tuple[bool, bool]],
 ) -> list[list[tuple[float, float]]] | None:
     if isinstance(expr, BoolLit):
         return None if expr.value else []
 
-    expr_vars = variables(expr)
+    has_bool_vars, has_real_vars = _variable_kinds(expr, variable_kind_cache)
     if (
-        expr_vars
-        and all(isinstance(var, BoolVar) for var in expr_vars)
-        and all(var.name in domain.bool_var_names for var in expr_vars)
+        has_bool_vars
+        and not has_real_vars
+        and all(
+            var.name in domain.bool_var_names
+            for var in variables(expr)
+            if isinstance(var, BoolVar)
+        )
     ):
         return _rival_boolean_rect_alternatives(
             expr,
@@ -622,8 +629,12 @@ def _rival_rect_alternatives(
         )
 
     if isinstance(expr, And):
-        lhs = _rival_rect_alternatives(expr.lhs, domain, max_rects)
-        rhs = _rival_rect_alternatives(expr.rhs, domain, max_rects)
+        lhs = _rival_rect_alternatives(
+            expr.lhs, domain, max_rects, variable_kind_cache
+        )
+        rhs = _rival_rect_alternatives(
+            expr.rhs, domain, max_rects, variable_kind_cache
+        )
         if lhs == [] or rhs == []:
             return []
         if lhs is None:
@@ -633,14 +644,45 @@ def _rival_rect_alternatives(
         return _intersect_rival_rect_sets(lhs, rhs, max_rects)
 
     if isinstance(expr, Or):
-        lhs = _rival_rect_alternatives(expr.lhs, domain, max_rects)
-        rhs = _rival_rect_alternatives(expr.rhs, domain, max_rects)
+        lhs = _rival_rect_alternatives(
+            expr.lhs, domain, max_rects, variable_kind_cache
+        )
+        rhs = _rival_rect_alternatives(
+            expr.rhs, domain, max_rects, variable_kind_cache
+        )
         if lhs is None or rhs is None:
             return None
         _check_rect_limit(len(lhs) + len(rhs), max_rects)
         return lhs + rhs
 
     return _rival_comparison_rect(expr, domain)
+
+
+def _variable_kinds(
+    expr: SpecNode,
+    cache: dict[int, tuple[bool, bool]],
+) -> tuple[bool, bool]:
+    """Return (has BoolVar, has RealVar), caching by immutable node identity."""
+    cache_key = id(expr)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if isinstance(expr, BoolVar):
+        result = (True, False)
+    elif isinstance(expr, RealVar):
+        result = (False, True)
+    else:
+        has_bool_vars = False
+        has_real_vars = False
+        for child in children(expr):
+            child_has_bool, child_has_real = _variable_kinds(child, cache)
+            has_bool_vars = has_bool_vars or child_has_bool
+            has_real_vars = has_real_vars or child_has_real
+        result = (has_bool_vars, has_real_vars)
+
+    cache[cache_key] = result
+    return result
 
 
 def _rival_boolean_rect_alternatives(

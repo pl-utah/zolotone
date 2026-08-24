@@ -15,12 +15,17 @@ import warnings
 
 def _assumption_conjuncts(assume: BoolExpr) -> tuple[BoolExpr, ...]:
     """Return the facts asserted by a possibly nested conjunction."""
-    if isinstance(assume, And):
-        return (
-            *_assumption_conjuncts(assume.lhs),
-            *_assumption_conjuncts(assume.rhs),
-        )
-    return (assume,)
+    conjuncts = []
+    pending = [assume]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, And):
+            # Stack order preserves the original left-to-right traversal.
+            pending.append(current.rhs)
+            pending.append(current.lhs)
+        else:
+            conjuncts.append(current)
+    return tuple(conjuncts)
 
 
 class SpecContext:
@@ -206,8 +211,9 @@ class SpecContext:
         if isinstance(assume, Not):
             return assume.value, BoolLit(False)
         if isinstance(assume, Eq):
-            rhs_folded = assume.rhs.constant_fold()
-            lhs_folded = assume.lhs.constant_fold()
+            # constant_fold() already returns a node with folded children.
+            rhs_folded = assume.rhs
+            lhs_folded = assume.lhs
             if (
                 isinstance(lhs_folded, RealExpr)
                 and not isinstance(lhs_folded, RealLit)
@@ -222,8 +228,8 @@ class SpecContext:
                 return rhs_folded, lhs_folded
         
         elif isinstance(assume, BoolEq):
-            rhs_folded = assume.rhs.constant_fold()
-            lhs_folded = assume.lhs.constant_fold()
+            rhs_folded = assume.rhs
+            lhs_folded = assume.lhs
             if (
                 isinstance(lhs_folded, BoolExpr)
                 and not isinstance(lhs_folded, BoolLit)
@@ -480,10 +486,14 @@ def simplify_ctx(ctx: SpecContext):
         if any([identical_nodes(x, BoolLit(False)) for x in simplified_ctx.checks]):
              satisfiability_status = "sat"
         else:
-            if rival_feasibility_check(simplified_ctx, max_depth=0, checks=True) == "not feasible":
+            # With no checks, checks=True analyzes exactly the assumptions that
+            # were just analyzed above, so a second Rival run is redundant.
+            if len(simplified_ctx.checks) == 0:
+                satisfiability_status = "unsat"
+            elif rival_feasibility_check(simplified_ctx, max_depth=0, checks=True) == "not feasible":
                 satisfiability_status = "sat"
             else:
-                satisfiability_status = "unsat" if len(simplified_ctx.checks) == 0 else "unknown"
+                satisfiability_status = "unknown"
     ##############################################
     
     return build_proof_report(

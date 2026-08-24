@@ -35,26 +35,12 @@ class SpecNode:
             return self
         
         folded_args = tuple(arg.constant_fold() for arg in args)
-        
-        # Try shortcut
-        shortcut = _shortcut_fold(self, folded_args)
-        if shortcut is not None:
-            return shortcut.constant_fold()
-        
-        # Else, general case
-        output_type = _literal_type(self)
-        fold = self.fold()
-        if all(isinstance(arg, (RealLit, BoolLit)) for arg in folded_args):
-            folded_value = fold(*(arg.value for arg in folded_args))
-            if folded_value is not None and _can_constant_fold_literal(output_type, folded_value):
-                # Successfully folded
-                return output_type(folded_value)
-        
-        # Nothing got folded
-        if all(old is new for old, new in zip(args, folded_args)):
-            return self
-        # Partially folded
-        return type(self)(*folded_args)
+        rebuilt = (
+            self
+            if all(old is new for old, new in zip(args, folded_args))
+            else type(self)(*folded_args)
+        )
+        return _fold_node_with_folded_args(rebuilt, folded_args)
     
     def fold(self):
         raise NotImplementedError
@@ -1144,7 +1130,32 @@ def substitute_literals(
         if all(old is new for old, new in zip(args, substituted_args))
         else type(node)(*substituted_args)
     )
+    # The recursive calls already folded every child. Folding only this node
+    # avoids revisiting the full subtree at each parent of a deep expression.
+    if isinstance(rebuilt, (RealExpr, BoolExpr)):
+        return _fold_node_with_folded_args(rebuilt, substituted_args)
     return rebuilt.constant_fold()
+
+
+def _fold_node_with_folded_args(
+    node: SpecNode,
+    folded_args: tuple[SpecNode, ...],
+) -> SpecNode:
+    """Apply one node's fold rules when its children are already folded."""
+    shortcut = _shortcut_fold(node, folded_args)
+    if shortcut is not None:
+        return shortcut.constant_fold()
+
+    output_type = _literal_type(node)
+    fold = node.fold()
+    if all(isinstance(arg, (RealLit, BoolLit)) for arg in folded_args):
+        folded_value = fold(*(arg.value for arg in folded_args))
+        if (
+            folded_value is not None
+            and _can_constant_fold_literal(output_type, folded_value)
+        ):
+            return output_type(folded_value)
+    return node
 
 
 def _shortcut_fold(
