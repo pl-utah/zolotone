@@ -7391,6 +7391,7 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
     def test_broken_pool_retries_unfinished_cases_serially(self):
         serial_calls = []
+        executors = []
 
         def result_for(case_ctx):
             return CaseVerificationResult(
@@ -7423,7 +7424,7 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
         class FakeExecutor:
             def __init__(self, **_kwargs):
-                pass
+                executors.append(self)
 
             def __enter__(self):
                 return self
@@ -7439,7 +7440,7 @@ class TestParallelClassificationVerification(unittest.TestCase):
                     done=index != 2,
                 )
 
-        completion_order = iter((0, 1))
+        completion_order = iter((0, 1, 3))
 
         def complete_expected(futures, return_when):
             self.assertEqual(return_when, parallel_runner.FIRST_COMPLETED)
@@ -7465,7 +7466,8 @@ class TestParallelClassificationVerification(unittest.TestCase):
             [result["name"] for result in results],
             ["case-0", "case-1", "case-2", "case-3"],
         )
-        self.assertEqual(serial_calls, ["case-1", "case-2", "case-3"])
+        self.assertEqual(serial_calls, ["case-1", "case-2"])
+        self.assertEqual(len(executors), 2)
         self.assertEqual(
             [event.args[0]["name"] for event in observer.case_completed.call_args_list],
             ["case-0", "case-1", "case-2", "case-3"],
@@ -7473,6 +7475,7 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
     def test_broken_pool_during_submission_retries_the_unsubmitted_case(self):
         serial_calls = []
+        executors = []
 
         def verify(case_ctx):
             serial_calls.append(case_ctx.name)
@@ -7505,6 +7508,7 @@ class TestParallelClassificationVerification(unittest.TestCase):
         class FakeExecutor:
             def __init__(self, **_kwargs):
                 self.submissions = 0
+                executors.append(self)
 
             def __enter__(self):
                 return self
@@ -7518,13 +7522,19 @@ class TestParallelClassificationVerification(unittest.TestCase):
                     raise parallel_runner.BrokenProcessPool("worker died")
                 return CompletedFuture(case_ctx)
 
+        def complete_one(futures, return_when):
+            self.assertEqual(return_when, parallel_runner.FIRST_COMPLETED)
+            completed = next(iter(futures))
+            return {completed}, set(futures) - {completed}
+
         observer = Mock()
         with (
             patch.object(parallel_runner, "ProcessPoolExecutor", FakeExecutor),
+            patch.object(parallel_runner, "wait", side_effect=complete_one),
             contextlib.redirect_stderr(io.StringIO()),
         ):
             results = parallel_runner._run_in_parallel(
-                (SpecContext(f"case-{index}") for index in range(3)),
+                (SpecContext(f"case-{index}") for index in range(5)),
                 verify_case=verify,
                 verification_args=(),
                 observer=observer,
@@ -7533,12 +7543,13 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
         self.assertEqual(
             [result["name"] for result in results],
-            ["case-0", "case-1", "case-2"],
+            ["case-0", "case-1", "case-2", "case-3", "case-4"],
         )
-        self.assertEqual(serial_calls, ["case-1", "case-2"])
+        self.assertEqual(serial_calls, ["case-1", "case-3"])
+        self.assertEqual(len(executors), 3)
         self.assertEqual(
             [event.args[0]["name"] for event in observer.case_completed.call_args_list],
-            ["case-0", "case-1", "case-2"],
+            ["case-0", "case-1", "case-2", "case-3", "case-4"],
         )
 
     def test_max_workers_one_runs_serially_without_an_executor(self):
