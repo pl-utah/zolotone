@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import multiprocessing
 import os
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+import sys
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    CancelledError,
+    ProcessPoolExecutor,
+    wait,
+)
+from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Callable, Iterable
 
 from ..solver.report import CaseVerificationResult, VerificationObserver
@@ -101,34 +108,82 @@ def _run_in_parallel(
     in_flight_limit = max_workers
     results_by_index: dict[int, CaseVerificationResult] = {}
     process_ctx = multiprocessing.get_context("spawn")
+    in_flight = {}
+    failed_submission = None
 
-    with ProcessPoolExecutor(
-        max_workers=max_workers,
-        mp_context=process_ctx,
-    ) as executor:
-        in_flight = {}
+    try:
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=process_ctx,
+        ) as executor:
 
-        def submit_until_full() -> None:
-            while len(in_flight) < in_flight_limit:
-                try:
-                    index, case_ctx = next(indexed_cases)
-                except StopIteration:
-                    return
-                future = executor.submit(
-                    verify_case,
-                    case_ctx,
-                    *verification_args,
-                )
-                in_flight[future] = index
+            def submit_until_full() -> None:
+                nonlocal failed_submission
+                while len(in_flight) < in_flight_limit:
+                    try:
+                        index, case_ctx = next(indexed_cases)
+                    except StopIteration:
+                        return
+                    try:
+                        future = executor.submit(
+                            verify_case,
+                            case_ctx,
+                            *verification_args,
+                        )
+                    except BrokenProcessPool:
+                        failed_submission = (index, case_ctx)
+                        raise
+                    in_flight[future] = (index, case_ctx)
 
-        submit_until_full()
-        while in_flight:
-            completed, _ = wait(in_flight, return_when=FIRST_COMPLETED)
-            for future in completed:
-                index = in_flight.pop(future)
-                result = future.result()
-                results_by_index[index] = result
-                observer.case_completed(result)
             submit_until_full()
+            while in_flight:
+                completed, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    index, _ = in_flight[future]
+                    result = future.result()
+                    del in_flight[future]
+                    results_by_index[index] = result
+                    observer.case_completed(result)
+                submit_until_full()
+    except BrokenProcessPool:
+        # A killed worker makes the complete executor unusable. Preserve any
+        # results which reached the parent, then retry every other submitted
+        # case and the remainder of the lazy case stream without a pool. This
+        # both bounds recovery memory and keeps completed-case journals useful.
+        for future, (index, _) in list(in_flight.items()):
+            if not future.done():
+                continue
+            try:
+                result = future.result()
+            except (BrokenProcessPool, CancelledError):
+                continue
+            results_by_index[index] = result
+            observer.case_completed(result)
+
+        retry_cases = {
+            index: case_ctx
+            for _, (index, case_ctx) in in_flight.items()
+            if index not in results_by_index
+        }
+        if failed_submission is not None:
+            index, case_ctx = failed_submission
+            retry_cases[index] = case_ctx
+        in_flight.clear()
+
+        print(
+            "Verification worker pool terminated abruptly; "
+            "retrying unfinished cases serially.",
+            file=sys.stderr,
+            flush=True,
+        )
+        for index in sorted(retry_cases):
+            case_ctx = retry_cases.pop(index)
+            result = verify_case(case_ctx, *verification_args)
+            results_by_index[index] = result
+            observer.case_completed(result)
+        for index, case_ctx in indexed_cases:
+            result = verify_case(case_ctx, *verification_args)
+            results_by_index[index] = result
+            observer.case_completed(result)
 
     return [results_by_index[index] for index in range(len(results_by_index))]

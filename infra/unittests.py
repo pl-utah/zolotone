@@ -2395,7 +2395,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(report["feasibility_status"], "not feasible")
         self.assertEqual(report["status"], "sat")
 
-    def test_simplify_ctx_alternates_regular_and_rival_until_saturated(self):
+    def test_simplify_ctx_alternates_regular_and_rival_until_converged(self):
         ctx = SpecContext("alternating-simplification")
         x = ctx.real("x")
         zero = ctx.zero()
@@ -2411,6 +2411,66 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(report["status"], "unsat")
         self.assertEqual(ctx.assumes, [x >= zero, abs(x).eq(one)])
         self.assertEqual(ctx.checks, [x.eq(one)])
+
+    def test_simplify_ctx_stops_when_regular_converges_and_rival_is_unchanged(self):
+        ctx = SpecContext("simplify-converged-without-rival-change")
+        ctx.check(BoolLit(True))
+
+        with patch(
+            "zolotone.spec.spec_context.rival_trim_context",
+            side_effect=lambda current: current,
+        ) as trim:
+            report = simplify_ctx(ctx)
+
+        trim.assert_called_once()
+        self.assertEqual(report["status"], "unsat")
+
+    def test_simplify_ctx_retries_when_regular_did_not_converge(self):
+        ctx = SpecContext("simplify-regular-not-converged")
+        original = ctx.bool("original")
+        rewritten = ctx.bool("rewritten")
+        ctx.check(original)
+        first_pass = ctx.copy(checks=[rewritten])
+        converged_pass = first_pass.copy()
+
+        with (
+            patch.object(
+                SpecContext,
+                "_simplify_with_convergence",
+                autospec=True,
+                side_effect=[
+                    (first_pass, False),
+                    (converged_pass, True),
+                ],
+            ) as regular,
+            patch(
+                "zolotone.spec.spec_context.rival_trim_context",
+                side_effect=lambda current: current,
+            ) as trim,
+            patch(
+                "zolotone.spec.spec_context.rival_feasibility_check",
+                return_value="feasible",
+            ),
+        ):
+            report = simplify_ctx(ctx)
+
+        self.assertEqual(regular.call_count, 2)
+        self.assertEqual(trim.call_count, 2)
+        self.assertEqual(report["new_ctx"].checks, [rewritten])
+
+    def test_simplify_ctx_reuses_assumption_feasibility_when_checks_are_gone(self):
+        ctx = SpecContext("simplify-no-redundant-feasibility")
+        ctx.check(BoolLit(True))
+
+        with patch(
+            "zolotone.spec.spec_context.rival_feasibility_check",
+            return_value="feasible",
+        ) as feasibility:
+            report = simplify_ctx(ctx)
+
+        feasibility.assert_called_once()
+        self.assertEqual(feasibility.call_args.kwargs["checks"], False)
+        self.assertEqual(report["status"], "unsat")
 
 class TestEgglogFloatLiterals(unittest.TestCase):
     def exact_literal_value(self, expr):
@@ -2629,6 +2689,43 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         expr = ((RealLit(2) + RealLit(3)) * RealLit(4)).eq(RealLit(20))
 
         self.assertEqual(expr.constant_fold(), BoolLit(True))
+
+    def test_substitution_bottom_up_fold_matches_recursive_refold(self):
+        x = RealVar("x")
+        p = BoolVar("p")
+        q = BoolVar("q")
+        expressions = [
+            ((x + RealLit(1)) * RealLit(0)).eq(RealLit(0)),
+            (p & q) | (p & ~q),
+            If(p, x + RealLit(2), x - RealLit(2)).eq(RealLit(5)),
+        ]
+        replacements = {
+            x: RealLit(3),
+            p: BoolLit(True),
+            q: BoolLit(False),
+        }
+
+        def recursive_refold(node):
+            replacement = replacements.get(node)
+            if replacement is not None:
+                return recursive_refold(replacement)
+            args = children(node)
+            if not args:
+                return node
+            rebuilt_args = tuple(recursive_refold(arg) for arg in args)
+            rebuilt = (
+                node
+                if all(old is new for old, new in zip(args, rebuilt_args))
+                else type(node)(*rebuilt_args)
+            )
+            return rebuilt.constant_fold()
+
+        for expression in expressions:
+            with self.subTest(expression=str(expression)):
+                self.assertEqual(
+                    substitute_literals(expression, replacements),
+                    recursive_refold(expression),
+                )
 
     def test_constant_fold_can_produce_false(self):
         expr = (RealLit(2) + RealLit(3)).eq(RealLit(6))
@@ -5985,6 +6082,28 @@ class TestRivalTranslation(unittest.TestCase):
             [[(1.0, 1.0), (0.0, math.inf)]],
         )
 
+    def test_rival_rects_do_not_rescan_variables_for_each_real_conjunction(self):
+        ctx = SpecContext("rival-rects-linear-conjunction-walk")
+        variables_ = [ctx.real(f"x{index}") for index in range(64)]
+        bounds = [variable >= ctx.zero() for variable in variables_]
+        conjunction = bounds[0]
+        for bound in bounds[1:]:
+            conjunction = conjunction & bound
+        ctx.assume(conjunction)
+
+        with patch("zolotone.rival.variables", wraps=variables) as collect:
+            rects = get_rival_rects(
+                ctx.assumes,
+                [variable.name for variable in variables_],
+                bool_var_names=[],
+            )
+
+        collect.assert_not_called()
+        self.assertEqual(
+            rects,
+            [[(0.0, math.inf)] * len(variables_)],
+        )
+
     def test_rival_rects_extract_closed_bounds(self):
         ctx = SpecContext("rival-rects-closed")
         x = ctx.real("x")
@@ -7268,6 +7387,158 @@ class TestParallelClassificationVerification(unittest.TestCase):
         self.assertEqual(
             [event.args[0]["name"] for event in observer.case_completed.call_args_list],
             ["case-1", "case-2", "case-0", "case-3"],
+        )
+
+    def test_broken_pool_retries_unfinished_cases_serially(self):
+        serial_calls = []
+
+        def result_for(case_ctx):
+            return CaseVerificationResult(
+                name=case_ctx.name,
+                proved=True,
+                status="unsat",
+                feasibility_status="feasible",
+                proof_trace=[],
+                side_feasibility_reports=[],
+            )
+
+        def verify(case_ctx):
+            serial_calls.append(case_ctx.name)
+            return result_for(case_ctx)
+
+        class FakeFuture:
+            def __init__(self, case_ctx, *, broken=False, done=True):
+                self.case_ctx = case_ctx
+                self.index = int(case_ctx.name.rsplit("-", 1)[1])
+                self.broken = broken
+                self._done = done
+
+            def done(self):
+                return self._done
+
+            def result(self):
+                if self.broken:
+                    raise parallel_runner.BrokenProcessPool("worker died")
+                return result_for(self.case_ctx)
+
+        class FakeExecutor:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def submit(self, _fn, case_ctx, *_args):
+                index = int(case_ctx.name.rsplit("-", 1)[1])
+                return FakeFuture(
+                    case_ctx,
+                    broken=index == 1,
+                    done=index != 2,
+                )
+
+        completion_order = iter((0, 1))
+
+        def complete_expected(futures, return_when):
+            self.assertEqual(return_when, parallel_runner.FIRST_COMPLETED)
+            expected = next(completion_order)
+            completed = next(future for future in futures if future.index == expected)
+            return {completed}, set(futures) - {completed}
+
+        observer = Mock()
+        with (
+            patch.object(parallel_runner, "ProcessPoolExecutor", FakeExecutor),
+            patch.object(parallel_runner, "wait", side_effect=complete_expected),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            results = parallel_runner._run_in_parallel(
+                (SpecContext(f"case-{index}") for index in range(4)),
+                verify_case=verify,
+                verification_args=(),
+                observer=observer,
+                max_workers=2,
+            )
+
+        self.assertEqual(
+            [result["name"] for result in results],
+            ["case-0", "case-1", "case-2", "case-3"],
+        )
+        self.assertEqual(serial_calls, ["case-1", "case-2", "case-3"])
+        self.assertEqual(
+            [event.args[0]["name"] for event in observer.case_completed.call_args_list],
+            ["case-0", "case-1", "case-2", "case-3"],
+        )
+
+    def test_broken_pool_during_submission_retries_the_unsubmitted_case(self):
+        serial_calls = []
+
+        def verify(case_ctx):
+            serial_calls.append(case_ctx.name)
+            return CaseVerificationResult(
+                name=case_ctx.name,
+                proved=True,
+                status="unsat",
+                feasibility_status="feasible",
+                proof_trace=[],
+                side_feasibility_reports=[],
+            )
+
+        class CompletedFuture:
+            def __init__(self, case_ctx):
+                self.case_ctx = case_ctx
+
+            def done(self):
+                return True
+
+            def result(self):
+                return CaseVerificationResult(
+                    name=self.case_ctx.name,
+                    proved=True,
+                    status="unsat",
+                    feasibility_status="feasible",
+                    proof_trace=[],
+                    side_feasibility_reports=[],
+                )
+
+        class FakeExecutor:
+            def __init__(self, **_kwargs):
+                self.submissions = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def submit(self, _fn, case_ctx, *_args):
+                self.submissions += 1
+                if self.submissions == 2:
+                    raise parallel_runner.BrokenProcessPool("worker died")
+                return CompletedFuture(case_ctx)
+
+        observer = Mock()
+        with (
+            patch.object(parallel_runner, "ProcessPoolExecutor", FakeExecutor),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            results = parallel_runner._run_in_parallel(
+                (SpecContext(f"case-{index}") for index in range(3)),
+                verify_case=verify,
+                verification_args=(),
+                observer=observer,
+                max_workers=2,
+            )
+
+        self.assertEqual(
+            [result["name"] for result in results],
+            ["case-0", "case-1", "case-2"],
+        )
+        self.assertEqual(serial_calls, ["case-1", "case-2"])
+        self.assertEqual(
+            [event.args[0]["name"] for event in observer.case_completed.call_args_list],
+            ["case-0", "case-1", "case-2"],
         )
 
     def test_max_workers_one_runs_serially_without_an_executor(self):
