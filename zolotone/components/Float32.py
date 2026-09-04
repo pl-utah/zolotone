@@ -16,7 +16,7 @@ from .rounding_routines import (
 
 def _fp32_mantissa(x: Node) -> Op:
     def impl(x: Float32) -> UQ:
-        return UQ(Float32.mantissa_bits, 0).value(x.mantissa)
+        return UQ(Float32.mantissa_bits, 0).from_bits(x.mantissa)
 
     def sign(x: Float32) -> UQ:
         return UQ(Float32.mantissa_bits, 0)
@@ -32,7 +32,7 @@ def _fp32_mantissa(x: Node) -> Op:
 
 def _fp32_exponent(x: Node) -> Op:
     def impl(x: Float32) -> UQ:
-        return UQ(Float32.exponent_bits, 0).value(x.exponent)
+        return UQ(Float32.exponent_bits, 0).from_bits(x.exponent)
 
     def sign(x: Float32) -> UQ:
         return UQ(Float32.exponent_bits, 0)
@@ -48,7 +48,7 @@ def _fp32_exponent(x: Node) -> Op:
 
 def _fp32_sign(x: Node) -> Op:
     def impl(x: Float32) -> UQ:
-        return UQ(1, 0).value(x.sign)
+        return UQ(1, 0).from_bits(x.sign)
 
     def sign(x: Float32) -> UQ:
         return UQ(1, 0)
@@ -170,7 +170,7 @@ def fp32_decode(x: Node) -> DecodedFP32:
         exponent = _fp32_exponent(x)
         mantissa = _fp32_mantissa(x)
 
-        bit = Const(UQ(1, 0).value(0))
+        bit = Const(UQ(1, 0).from_bits(0))
         mantissa_is_nonzero = basic_or_reduce(mantissa, bit)
         mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit.copy())
         exponent_is_all_ones = basic_and_reduce(exponent, bit.copy())
@@ -240,11 +240,11 @@ def fp32_encodings(m_rounded: Node, e_rounded: Node):
         final_e_wide,
         Const(UQ.from_int(Float32.inf_code)),
     )
-    is_inf = basic_and_reduce(final_e, Const(UQ(1, 0).value(0)))
+    is_inf = basic_and_reduce(final_e, Const(UQ(1, 0).from_bits(0)))
     final_m = basic_mux_2_1(
         is_inf,
         m_rounded,
-        Const(UQ(1, 0).value(0)),
+        Const(UQ(1, 0).from_bits(0)),
         m_rounded.copy(),
     )
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)

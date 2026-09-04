@@ -16,7 +16,7 @@ def _est_global_shift(E_max: Node, E_p: Node) -> Node:
     out_frac_bits = Const(UQ.from_int(0))
     out = uq_alloc(out_int_bits, out_frac_bits)
 
-    return basic_concat(uq_sub(E_max, E_p), Const(UQ(s, 0).value(0)), out)
+    return basic_concat(uq_sub(E_max, E_p), Const(UQ(s, 0).from_bits(0)), out)
 
 
 def spec_est_local_shift(E_trail, ctx):
@@ -139,7 +139,7 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     # A zero product has no meaningful exponent and must not control
     # alignment of the nonzero products.
     zero_product_exponent = Const(
-        UQ(E_p[0].dtype.int_bits, E_p[0].dtype.frac_bits).value(0)
+        UQ(E_p[0].dtype.int_bits, E_p[0].dtype.frac_bits).from_bits(0)
     )
     E_p_for_alignment = [
         if_then_else(

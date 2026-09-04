@@ -27,7 +27,7 @@ def ue4m3_to_fp32(x: Node) -> Node:
     )
 
     result = fp32_encode(
-        Const(UQ(1, 0).value(0)),
+        Const(UQ(1, 0).from_bits(0)),
         target_exponent,
         significand,
     )

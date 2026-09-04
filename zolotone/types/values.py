@@ -22,6 +22,14 @@ class RuntimeValue:
     def to_spec(self, ctx):
         raise NotImplementedError
 
+    def to_bitstring(self) -> str:
+        """Return the packed encoding, padded to the descriptor width."""
+        if not isinstance(self.raw, int):
+            raise TypeError(
+                f"{type(self).__name__} does not have a scalar bit encoding"
+            )
+        return format(self.raw, f"0{self.dtype.total_bits()}b")
+
     def _fingerprint(self):
         return (type(self).__name__, self.dtype._fingerprint(), self.raw)
 
@@ -70,15 +78,21 @@ class FixedValue(RuntimeValue):
                 f"{self.dtype.total_bits()} bits"
             )
 
-    def to_python(self) -> float:
+    def _scaled_integer(self) -> int:
         from .descriptors import Q
         raw = self.raw
         if isinstance(self.dtype, Q) and raw >> (self.dtype.total_bits() - 1):
             raw -= 1 << self.dtype.total_bits()
-        return float(raw) / (2 ** self.dtype.frac_bits)
+        return raw
+
+    def to_python(self) -> float:
+        return float(self._scaled_integer()) / (2 ** self.dtype.frac_bits)
 
     def to_spec(self, ctx):
-        return ctx.real_val(self.to_python())
+        scaled = ctx.real_val(self._scaled_integer())
+        if self.dtype.frac_bits == 0:
+            return scaled
+        return scaled * (ctx.two() ** ctx.real_val(-self.dtype.frac_bits))
 
     def __str__(self) -> str:
         return (

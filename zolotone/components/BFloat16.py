@@ -12,7 +12,7 @@ from .UQ import *
 
 def _bf16_mantissa(x: Node) -> Op:
     def impl(x: BFloat16) -> UQ:
-        return UQ(7, 0).value(x.mantissa)
+        return UQ(7, 0).from_bits(x.mantissa)
 
     def sign(x: BFloat16) -> UQ:
         return UQ(7, 0)
@@ -26,7 +26,7 @@ def _bf16_mantissa(x: Node) -> Op:
 
 def _bf16_exponent(x: Node) -> Op:
     def impl(x: BFloat16) -> UQ:
-        return UQ(8, 0).value(x.exponent)
+        return UQ(8, 0).from_bits(x.exponent)
     
     def sign(x: BFloat16) -> UQ:
         return UQ(8, 0)
@@ -40,7 +40,7 @@ def _bf16_exponent(x: Node) -> Op:
 
 def _bf16_sign(x: Node) -> Op:
     def impl(x: BFloat16) -> UQ:
-        return UQ(1, 0).value(x.sign)
+        return UQ(1, 0).from_bits(x.sign)
     
     def sign(x: BFloat16) -> UQ:
         return UQ(1, 0)
@@ -175,19 +175,19 @@ def bf16_decode(x: Node) -> DecodedBF16:
         exponent = _bf16_exponent(x)
         mantissa = _bf16_mantissa(x)
 
-        mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(UQ(1, 0).value(0)))
-        mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(UQ(1, 0).value(0)))
+        mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(UQ(1, 0).from_bits(0)))
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(UQ(1, 0).from_bits(0)))
 
-        exponent_is_all_ones = basic_and_reduce(exponent, out=Const(UQ(1, 0).value(0)))
-        exponent_is_not_all_ones = basic_invert(exponent_is_all_ones, out=Const(UQ(1, 0).value(0)))
-        exponent_is_nonzero = basic_or_reduce(exponent, out=Const(UQ(1, 0).value(0)))
-        exponent_is_zero = basic_invert(exponent_is_nonzero, out=Const(UQ(1, 0).value(0)))
+        exponent_is_all_ones = basic_and_reduce(exponent, out=Const(UQ(1, 0).from_bits(0)))
+        exponent_is_not_all_ones = basic_invert(exponent_is_all_ones, out=Const(UQ(1, 0).from_bits(0)))
+        exponent_is_nonzero = basic_or_reduce(exponent, out=Const(UQ(1, 0).from_bits(0)))
+        exponent_is_zero = basic_invert(exponent_is_nonzero, out=Const(UQ(1, 0).from_bits(0)))
 
-        is_normal = basic_and(exponent_is_nonzero, exponent_is_not_all_ones, Const(UQ(1, 0).value(0)))
-        is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, Const(UQ(1, 0).value(0)))
-        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, Const(UQ(1, 0).value(0)))
-        is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, Const(UQ(1, 0).value(0)))
-        is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, Const(UQ(1, 0).value(0)))
+        is_normal = basic_and(exponent_is_nonzero, exponent_is_not_all_ones, Const(UQ(1, 0).from_bits(0)))
+        is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, Const(UQ(1, 0).from_bits(0)))
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, Const(UQ(1, 0).from_bits(0)))
+        is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, Const(UQ(1, 0).from_bits(0)))
+        is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, Const(UQ(1, 0).from_bits(0)))
 
         return make_Tuple(
             sign,
@@ -227,11 +227,11 @@ def bf16_encodings(m_rounded: Node, e_rounded: Node):
         final_e_wide,
         Const(UQ.from_int(BFloat16.inf_code)),
     )
-    is_inf = basic_and_reduce(final_e, Const(UQ(1, 0).value(0)))
+    is_inf = basic_and_reduce(final_e, Const(UQ(1, 0).from_bits(0)))
     final_m = basic_mux_2_1(
         is_inf,
         m_rounded,
-        Const(UQ(1, 0).value(0)),
+        Const(UQ(1, 0).from_bits(0)),
         m_rounded.copy(),
     )
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)

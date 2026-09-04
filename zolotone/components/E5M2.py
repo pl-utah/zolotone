@@ -12,7 +12,7 @@ from .UQ import *
 
 def _e5m2_mantissa(x: Node) -> Op:
     def impl(value: E5M2) -> UQ:
-        return UQ(E5M2.mantissa_bits, 0).value(value.mantissa)
+        return UQ(E5M2.mantissa_bits, 0).from_bits(value.mantissa)
     
     def sign(value_type: E5M2) -> UQ:
         return UQ(E5M2.mantissa_bits, 0)
@@ -28,7 +28,7 @@ def _e5m2_mantissa(x: Node) -> Op:
 
 def _e5m2_exponent(x: Node) -> Op:
     def impl(value: E5M2) -> UQ:
-        return UQ(E5M2.exponent_bits, 0).value(value.exponent)
+        return UQ(E5M2.exponent_bits, 0).from_bits(value.exponent)
     
     def sign(value_type: E5M2) -> UQ:
         return UQ(E5M2.exponent_bits, 0)
@@ -44,7 +44,7 @@ def _e5m2_exponent(x: Node) -> Op:
 
 def _e5m2_sign(x: Node) -> Op:
     def impl(value: E5M2) -> UQ:
-        return UQ(1, 0).value(value.sign)
+        return UQ(1, 0).from_bits(value.sign)
     
     def sign(value_type: E5M2) -> UQ:
         return UQ(1, 0)
@@ -163,7 +163,7 @@ def e5m2_decode(x: Node) -> DecodedE5M2:
         sign = _e5m2_sign(x)
         exponent = _e5m2_exponent(x)
         mantissa = _e5m2_mantissa(x)
-        bit = Const(UQ(1, 0).value(0))
+        bit = Const(UQ(1, 0).from_bits(0))
         exponent_is_all_ones = basic_and_reduce(exponent, bit.copy())
         exponent_is_not_all_ones = basic_invert(
             exponent_is_all_ones, bit.copy()
@@ -210,11 +210,11 @@ def e5m2_encodings(m_rounded: Node, e_rounded: Node):
         uq_min(e_rounded, Const(UQ.from_int(E5M2.inf_code))),
         Const(UQ.from_int(E5M2.inf_code)),
     )
-    is_inf = basic_and_reduce(final_e, Const(UQ(1, 0).value(0)))
+    is_inf = basic_and_reduce(final_e, Const(UQ(1, 0).from_bits(0)))
     final_m = basic_mux_2_1(
         is_inf,
         m_rounded,
-        Const(UQ(1, 0).value(0)),
+        Const(UQ(1, 0).from_bits(0)),
         m_rounded.copy(),
     )
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)

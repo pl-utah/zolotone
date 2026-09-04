@@ -9,7 +9,7 @@ def basic_tuple_maker(*args) -> Op:
     
     def op(*vals: RuntimeValue) -> TupleValue:
         dtype = Tuple(*(value.dtype for value in vals))
-        return dtype.value(*vals)
+        return dtype.from_values(*vals)
     
     return Op(
         impl=make_fixed_arguments(op, [RuntimeValue] * len(args)),

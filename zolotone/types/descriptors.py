@@ -7,9 +7,11 @@ bits live in :mod:`zolotone.types.values`; a descriptor never carries a value.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+import math
 import random
 import time
 from typing import ClassVar, TYPE_CHECKING
+import warnings
 
 if TYPE_CHECKING:
     from .values import RuntimeValue, BoolValue, FixedValue, FloatValue, TupleValue
@@ -21,14 +23,24 @@ class DataType:
     def total_bits(self) -> int:
         raise NotImplementedError
 
-    def value(self, raw):
+    def from_bits(self, raw):
+        """Construct a concrete value from its packed bit encoding."""
         raise NotImplementedError
+
+    def value(self, raw):
+        """Deprecated compatibility alias for :meth:`from_bits`."""
+        warnings.warn(
+            "DataType.value() is deprecated; use from_bits()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.from_bits(raw)
 
     def to_spec(self, name, ctx):
         raise NotImplementedError
 
     def random_value(self, rng: random.Random) -> "RuntimeValue":
-        return self.value(rng.getrandbits(self.total_bits()))
+        return self.from_bits(rng.getrandbits(self.total_bits()))
 
     def to_cpp_type(self, jittable: bool = True) -> str:
         total_bits = self.total_bits()
@@ -58,7 +70,8 @@ class Bool(DataType):
     def total_bits(self) -> int:
         return 1
 
-    def value(self, raw: int) -> "BoolValue":
+    def from_bits(self, raw: int) -> "BoolValue":
+        """Construct a Boolean from its one-bit encoding."""
         from .values import BoolValue
         return BoolValue(self, raw)
 
@@ -92,7 +105,8 @@ class Q(DataType):
     def total_bits(self) -> int:
         return self.int_bits + self.frac_bits
 
-    def value(self, raw: int) -> "FixedValue":
+    def from_bits(self, raw: int) -> "FixedValue":
+        """Construct a value from packed two's-complement bits."""
         from .values import FixedValue
         return FixedValue(self, raw)
 
@@ -107,13 +121,18 @@ class Q(DataType):
         else:
             int_bits = max(2, x.bit_length() + 1)
             raw = x
-        return cls(int_bits, 0).value(raw)
+        return cls(int_bits, 0).from_bits(raw)
 
     def from_float(self, x: float) -> "FixedValue":
+        """Quantize a number using ties-to-even rounding and saturation."""
+        if not isinstance(x, (int, float)):
+            raise TypeError(f"Q.from_float expects int or float, got {type(x).__name__}")
+        if isinstance(x, float) and not math.isfinite(x):
+            raise ValueError(f"Q.from_float expects a finite number, got {x}")
         width = self.total_bits()
         scaled = int(round(x * (1 << self.frac_bits)))
         scaled = min(max(scaled, -(1 << (width - 1))), (1 << (width - 1)) - 1)
-        return self.value(scaled & ((1 << width) - 1))
+        return self.from_bits(scaled & ((1 << width) - 1))
 
     def to_spec(self, name, ctx):
         return ctx.fresh_real(name)
@@ -145,7 +164,8 @@ class UQ(DataType):
     def total_bits(self) -> int:
         return self.int_bits + self.frac_bits
 
-    def value(self, raw: int) -> "FixedValue":
+    def from_bits(self, raw: int) -> "FixedValue":
+        """Construct a value from packed unsigned bits."""
         from .values import FixedValue
         return FixedValue(self, raw)
 
@@ -155,12 +175,17 @@ class UQ(DataType):
             raise TypeError(f"UQ.from_int expects int, got {type(x).__name__}")
         if x < 0:
             raise ValueError(f"UQ.from_int expects a non-negative integer, got {x}")
-        return cls(max(1, x.bit_length()), 0).value(x)
+        return cls(max(1, x.bit_length()), 0).from_bits(x)
 
     def from_float(self, x: float) -> "FixedValue":
+        """Quantize a number using ties-to-even rounding and saturation."""
+        if not isinstance(x, (int, float)):
+            raise TypeError(f"UQ.from_float expects int or float, got {type(x).__name__}")
+        if isinstance(x, float) and not math.isfinite(x):
+            raise ValueError(f"UQ.from_float expects a finite number, got {x}")
         scaled = int(round(x * (1 << self.frac_bits)))
         scaled = min(max(scaled, 0), (1 << self.total_bits()) - 1)
-        return self.value(scaled)
+        return self.from_bits(scaled)
 
     def to_spec(self, name, ctx):
         variable = ctx.fresh_real(name)
@@ -193,7 +218,8 @@ class _FloatDescriptor(DataType):
     def _packed_bits(self) -> int:
         return self.total_bits() if self.raw_bits is None else self.raw_bits
 
-    def value(self, raw: int) -> "FloatValue":
+    def from_bits(self, raw: int) -> "FloatValue":
+        """Construct a floating-point value from its packed encoding."""
         from .values import FloatValue
         return FloatValue(self, raw)
 
@@ -219,7 +245,7 @@ class _FloatDescriptor(DataType):
             raise ValueError(f"{type(self).__name__} exponent out of range: {exponent}")
         if not isinstance(mantissa, int) or not (0 <= mantissa < (1 << self.mantissa_bits)):
             raise ValueError(f"{type(self).__name__} mantissa out of range: {mantissa}")
-        return self.value(
+        return self.from_bits(
             (sign << (self.exponent_bits + self.mantissa_bits))
             | (exponent << self.mantissa_bits)
             | mantissa
@@ -325,7 +351,7 @@ class _FloatDescriptor(DataType):
         return spec_type(**kwargs)
 
     def random_value(self, rng: random.Random) -> "FloatValue":
-        return self.value(rng.getrandbits(self._packed_bits()))
+        return self.from_bits(rng.getrandbits(self._packed_bits()))
 
     def random_generator(self, seed=None, shared_exponent_bits: int = 0):
         if seed is None:
@@ -375,7 +401,7 @@ class _FloatDescriptor(DataType):
         if isinstance(self, E5M2FNUZ):
             if payload is not None:
                 raise ValueError("E5M2FNUZ has a single NaN encoding")
-            return self.value(0x80)
+            return self.from_bits(0x80)
         if self.nan_code is None:
             raise AttributeError(f"{type(self).__name__} has no NaN")
         if self.nan_mantissa is not None:
@@ -610,9 +636,19 @@ class Tuple(DataType):
     def total_bits(self) -> int:
         return sum(item.total_bits() for item in self.items)
 
-    def value(self, *values: "RuntimeValue") -> "TupleValue":
+    def from_values(self, *values: "RuntimeValue") -> "TupleValue":
+        """Construct a tuple value from concrete component values."""
         from .values import TupleValue
         return TupleValue(self, tuple(values))
+
+    def value(self, *values: "RuntimeValue") -> "TupleValue":
+        """Deprecated compatibility alias for :meth:`from_values`."""
+        warnings.warn(
+            "Tuple.value() is deprecated; use from_values()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.from_values(*values)
 
     def to_spec(self, name, ctx):
         return tuple(
@@ -621,7 +657,7 @@ class Tuple(DataType):
         )
 
     def random_value(self, rng: random.Random) -> "TupleValue":
-        return self.value(*(item.random_value(rng) for item in self.items))
+        return self.from_values(*(item.random_value(rng) for item in self.items))
 
     def to_cpp_type(self, jittable: bool = True) -> str:
         if jittable:

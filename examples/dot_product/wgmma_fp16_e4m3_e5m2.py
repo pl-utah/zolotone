@@ -62,8 +62,8 @@ def wgmma_fp16_e4m3_e5m2(
     product_signs = [bit_xor(A[i].sign, B[i].sign) for i in range(N)]
     positive_infinity = bit_and(C.is_inf, bit_neg(C.sign))
     negative_infinity = bit_and(C.is_inf, C.sign)
-    invalid_product = Const(UQ(1, 0).value(0))
-    encode_nan = Const(UQ(1, 0).value(0))
+    invalid_product = Const(UQ(1, 0).from_bits(0))
+    encode_nan = Const(UQ(1, 0).from_bits(0))
     for i in range(N):
         positive_infinity = bit_or(
             positive_infinity,
@@ -100,7 +100,7 @@ def wgmma_fp16_e4m3_e5m2(
         if_then_else(
             bit_or(A[i].is_zero, B[i].is_zero),
             Const(
-                UQ(product_exponents[i].dtype.int_bits, product_exponents[i].dtype.frac_bits).value(0)
+                UQ(product_exponents[i].dtype.int_bits, product_exponents[i].dtype.frac_bits).from_bits(0)
             ),
             product_exponents[i],
         )
@@ -152,7 +152,7 @@ def wgmma_fp16_e4m3_e5m2(
     product_exponent = if_then_else(
         q_is_zero(product_sum),
         Const(
-            UQ(maximum_product_exponent.dtype.int_bits, maximum_product_exponent.dtype.frac_bits).value(0)
+            UQ(maximum_product_exponent.dtype.int_bits, maximum_product_exponent.dtype.frac_bits).from_bits(0)
         ),
         maximum_product_exponent,
     )
@@ -171,7 +171,7 @@ def wgmma_fp16_e4m3_e5m2(
     )
     c_exponent = if_then_else(
         C.is_zero,
-        Const(UQ(c_exponent.dtype.int_bits, 0).value(0)),
+        Const(UQ(c_exponent.dtype.int_bits, 0).from_bits(0)),
         c_exponent,
     )
     common_exponent = uq_max(product_exponent, c_exponent)

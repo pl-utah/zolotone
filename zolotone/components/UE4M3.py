@@ -12,7 +12,7 @@ from .basics import *
 
 def _ue4m3_mantissa(x: Node) -> Op:
     def impl(x: UE4M3) -> UQ:
-        return UQ(UE4M3.mantissa_bits, 0).value(x.mantissa)
+        return UQ(UE4M3.mantissa_bits, 0).from_bits(x.mantissa)
 
     def sign(x: UE4M3) -> UQ:
         return UQ(UE4M3.mantissa_bits, 0)
@@ -28,7 +28,7 @@ def _ue4m3_mantissa(x: Node) -> Op:
 
 def _ue4m3_exponent(x: Node) -> Op:
     def impl(x: UE4M3) -> UQ:
-        return UQ(UE4M3.exponent_bits, 0).value(x.exponent)
+        return UQ(UE4M3.exponent_bits, 0).from_bits(x.exponent)
 
     def sign(x: UE4M3) -> UQ:
         return UQ(UE4M3.exponent_bits, 0)
@@ -129,7 +129,7 @@ def ue4m3_decode(x: Node) -> DecodedUE4M3:
         exponent = _ue4m3_exponent(x)
         mantissa = _ue4m3_mantissa(x)
 
-        bit = UQ(1, 0).value(0)
+        bit = UQ(1, 0).from_bits(0)
         mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(bit))
         mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(bit))
         mantissa_is_all_ones = basic_and_reduce(mantissa, out=Const(bit))
@@ -180,21 +180,21 @@ def ue4m3_encodings(m_rounded: Node, e_rounded: Node):
     exponent_overflow = uq_gt(e_rounded, max_exponent)
     final_e = basic_identity(
         uq_min(e_rounded, max_exponent),
-        Const(UQ(UE4M3.exponent_bits, 0).value(0)),
+        Const(UQ(UE4M3.exponent_bits, 0).from_bits(0)),
     )
     final_m = uq_fraction_to_integer(m_rounded)
 
     exponent_is_15 = uq_eq(final_e, max_exponent)
-    mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(1, 0).value(0)))
+    mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(1, 0).from_bits(0)))
     reserved_nan = basic_and(
         exponent_is_15,
         mantissa_is_7,
-        Const(UQ(1, 0).value(0)),
+        Const(UQ(1, 0).from_bits(0)),
     )
     saturate = basic_or(
         exponent_overflow,
         reserved_nan,
-        Const(UQ(1, 0).value(0)),
+        Const(UQ(1, 0).from_bits(0)),
     )
     final_m = basic_mux_2_1(
         saturate,

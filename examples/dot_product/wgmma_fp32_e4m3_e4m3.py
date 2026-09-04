@@ -65,7 +65,7 @@ def wgmma_fp32_e4m3_e4m3(
         if_then_else(
             bit_or(A[i].is_zero, B[i].is_zero),
             Const(
-                UQ(product_exponents[i].dtype.int_bits, product_exponents[i].dtype.frac_bits).value(0)
+                UQ(product_exponents[i].dtype.int_bits, product_exponents[i].dtype.frac_bits).from_bits(0)
             ),
             product_exponents[i],
         )
@@ -122,7 +122,7 @@ def wgmma_fp32_e4m3_e4m3(
     product_exponent = if_then_else(
         q_is_zero(product_sum),
         Const(
-            UQ(product_exponent.dtype.int_bits, product_exponent.dtype.frac_bits).value(0)
+            UQ(product_exponent.dtype.int_bits, product_exponent.dtype.frac_bits).from_bits(0)
         ),
         product_exponent,
     )

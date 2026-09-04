@@ -28,7 +28,7 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
         target_bits = total_bits - bits_to_cut
         target_int_bits = min(m.dtype.int_bits, target_bits)
         target_frac_bits = max(target_bits - target_int_bits, 0)
-        bit = Const(UQ(1, 0).value(0))
+        bit = Const(UQ(1, 0).from_bits(0))
 
         guard = bit.copy()
         round_bit = bit.copy()
@@ -56,7 +56,7 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
         incremented = basic_add(
             truncated,
             increment,
-            Const(UQ(target_int_bits, target_frac_bits).value(0)),
+            Const(UQ(target_int_bits, target_frac_bits).from_bits(0)),
         )
         return make_Tuple(incremented, overflow)
 
@@ -89,13 +89,13 @@ def round_mantissa(
         was_subnormal = uq_is_zero(e)
         became_normal = basic_and(
             was_subnormal,
-            basic_or_reduce(incremented_e, Const(UQ(1, 0).value(0))),
-            Const(UQ(1, 0).value(0)),
+            basic_or_reduce(incremented_e, Const(UQ(1, 0).from_bits(0))),
+            Const(UQ(1, 0).from_bits(0)),
         )
         rounded = basic_mux_2_1(
             became_normal,
             rounded,
-            Const(UQ(rounded.dtype.int_bits, rounded.dtype.frac_bits).value(0)),
+            Const(UQ(rounded.dtype.int_bits, rounded.dtype.frac_bits).from_bits(0)),
             rounded.copy(),
         )
         return make_Tuple(rounded, incremented_e)
@@ -127,10 +127,10 @@ def lzc(x: Node) -> Node:
 
     @Primitive(name="lzc", spec=lzc_spec, c_inline=True, c_lowering=lowering)
     def impl(x):
-        count = Const(UQ(count_bits, 0).value(0))
-        still_zero = Const(UQ(1, 0).value(1))
+        count = Const(UQ(count_bits, 0).from_bits(0))
+        still_zero = Const(UQ(1, 0).from_bits(1))
         for pos in range(width - 1, -1, -1):
-            is_zero = basic_invert(uq_select(x, pos, pos), Const(UQ(1, 0).value(0)))
+            is_zero = basic_invert(uq_select(x, pos, pos), Const(UQ(1, 0).from_bits(0)))
             still_zero = basic_and(still_zero, is_zero, still_zero.copy())
             count = basic_add(count, still_zero, count.copy())
         return count
@@ -162,7 +162,7 @@ def normalize_to_1_xxx(m: Node, e: Node):
             shift_sign,
             uq_lshift(resized, shift_magnitude),
             uq_rshift_jam(resized, shift_magnitude),
-            Const(UQ(1, target_frac_bits).value(0)),
+            Const(UQ(1, target_frac_bits).from_bits(0)),
         )
         right_e = q_add(e, shift_magnitude_q)
         normalized_e = basic_mux_2_1(
@@ -201,19 +201,19 @@ def shift_if_subnormal(
     @Primitive(name="shift_if_subnormal", spec=shift_if_subnormal_spec)
     def impl(m: Node, e: Node):
         is_subnormal = basic_or(
-            q_is_zero(e), q_sign_bit(e), Const(UQ(1, 0).value(0))
+            q_is_zero(e), q_sign_bit(e), Const(UQ(1, 0).from_bits(0))
         )
         exponent_magnitude = q_to_uq(q_abs(e))
         shifted_e = basic_mux_2_1(
             is_subnormal,
             exponent_magnitude,
-            Const(UQ(1, 0).value(0)),
+            Const(UQ(1, 0).from_bits(0)),
             exponent_magnitude.copy(),
         )
-        subnormal_shift = uq_add(Const(UQ(1, 0).value(1)), exponent_magnitude)
+        subnormal_shift = uq_add(Const(UQ(1, 0).from_bits(1)), exponent_magnitude)
         shift_amount = basic_mux_2_1(
             is_subnormal,
-            Const(UQ(1, 0).value(0)),
+            Const(UQ(1, 0).from_bits(0)),
             subnormal_shift,
             subnormal_shift.copy(),
         )
@@ -221,7 +221,7 @@ def shift_if_subnormal(
             m,
             Const(UQ.from_int(subnormal_extra_bits)),
             Const(
-                UQ(m.dtype.int_bits, m.dtype.frac_bits + subnormal_extra_bits).value(0)
+                UQ(m.dtype.int_bits, m.dtype.frac_bits + subnormal_extra_bits).from_bits(0)
             ),
         )
         return make_Tuple(uq_rshift_jam(widened, shift_amount), shifted_e)

@@ -14,7 +14,7 @@ def _q_is_min_val(x: Node) -> Op:
             res = 1
         else:
             res = 0
-        return UQ(1, 0).value(res)
+        return UQ(1, 0).from_bits(res)
     
     def sign(x: Q) -> UQ:
         return UQ(1, 0)
@@ -39,7 +39,7 @@ def q_alloc(int_bits: Node, frac_bits: Node) -> Op:
         return result_dtype
 
     def impl(x: RuntimeValue, y: RuntimeValue) -> FixedValue:
-        return result_dtype.value(0)
+        return result_dtype.from_bits(0)
 
     return Op(
         sign=sign,
@@ -69,7 +69,7 @@ def q_signs_xor(x: Node, y: Node) -> Node:
     return basic_xor(
         q_sign_bit(x),
         q_sign_bit(y),
-        out=Const(UQ(1, 0).value(0))
+        out=Const(UQ(1, 0).from_bits(0))
     )
 
 
@@ -78,13 +78,13 @@ def q_lt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
         sel=q_signs_xor(x, y),
-        in0=basic_less(aligned_x, aligned_y, Const(Bool().value(0))),  # same signs
+        in0=basic_less(aligned_x, aligned_y, Const(Bool().from_bits(0))),  # same signs
         in1=basic_mux_2_1(  # different signs!
             sel=q_sign_bit(x),
-            in0=Const(Bool().value(0)),  # x > y
-            in1=Const(Bool().value(1)),  # x < y
-            out=Const(Bool().value(0))),
-        out=Const(Bool().value(0)))
+            in0=Const(Bool().from_bits(0)),  # x > y
+            in1=Const(Bool().from_bits(1)),  # x < y
+            out=Const(Bool().from_bits(0))),
+        out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="q_le", spec=lambda x, y, ctx: x <= y)
@@ -92,13 +92,13 @@ def q_le(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
         sel=q_signs_xor(x, y),
-        in0=basic_less_or_equal(aligned_x, aligned_y, Const(Bool().value(0))),  # same signs
+        in0=basic_less_or_equal(aligned_x, aligned_y, Const(Bool().from_bits(0))),  # same signs
         in1=basic_mux_2_1(  # different signs!
             sel=q_sign_bit(x),
-            in0=Const(Bool().value(0)),  # x > y
-            in1=Const(Bool().value(1)),  # x < y
-            out=Const(Bool().value(0))),
-        out=Const(Bool().value(0)))
+            in0=Const(Bool().from_bits(0)),  # x > y
+            in1=Const(Bool().from_bits(1)),  # x < y
+            out=Const(Bool().from_bits(0))),
+        out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="q_gt", spec=lambda x, y, ctx: x > y)
@@ -106,13 +106,13 @@ def q_gt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
         sel=q_signs_xor(x, y),
-        in0=basic_greater(aligned_x, aligned_y, Const(Bool().value(0))),  # same signs
+        in0=basic_greater(aligned_x, aligned_y, Const(Bool().from_bits(0))),  # same signs
         in1=basic_mux_2_1(  # different signs!
             sel=q_sign_bit(x),
-            in0=Const(Bool().value(1)),  # x > y
-            in1=Const(Bool().value(0)),  # x < y
-            out=Const(Bool().value(0))),
-        out=Const(Bool().value(0)))
+            in0=Const(Bool().from_bits(1)),  # x > y
+            in1=Const(Bool().from_bits(0)),  # x < y
+            out=Const(Bool().from_bits(0))),
+        out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="q_ge", spec=lambda x, y, ctx: x >= y)
@@ -120,25 +120,25 @@ def q_ge(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
         sel=q_signs_xor(x, y),
-        in0=basic_greater_or_equal(aligned_x, aligned_y, Const(Bool().value(0))),  # same signs
+        in0=basic_greater_or_equal(aligned_x, aligned_y, Const(Bool().from_bits(0))),  # same signs
         in1=basic_mux_2_1(  # different signs!
             sel=q_sign_bit(x),
-            in0=Const(Bool().value(1)),  # x > y
-            in1=Const(Bool().value(0)),  # x < y
-            out=Const(Bool().value(0))),
-        out=Const(Bool().value(0)))
+            in0=Const(Bool().from_bits(1)),  # x > y
+            in1=Const(Bool().from_bits(0)),  # x < y
+            out=Const(Bool().from_bits(0))),
+        out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="q_eq", spec=lambda x, y, ctx: x.eq(y))
 def q_eq(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
-    return basic_equal(aligned_x, aligned_y, out=Const(Bool().value(0)))
+    return basic_equal(aligned_x, aligned_y, out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="q_ne", spec=lambda x, y, ctx: x.ne(y))
 def q_ne(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
-    return basic_not_equal(aligned_x, aligned_y, out=Const(Bool().value(0)))
+    return basic_not_equal(aligned_x, aligned_y, out=Const(Bool().from_bits(0)))
 
 
 def q_aligner(x: Node,
@@ -159,7 +159,7 @@ def q_aligner(x: Node,
                 x = basic_lshift(
                     x,
                     Const(UQ.from_int(shift)), 
-                    Const(Q(x.dtype.int_bits, frac_bits).value(0)))
+                    Const(Q(x.dtype.int_bits, frac_bits).from_bits(0)))
             
             # Step 2. Align integer bits
             shift = int_bits - x.dtype.int_bits
@@ -187,7 +187,7 @@ def q_sign_bit(x: Node) -> Node:
         x=x,
         start=start,
         end=start,
-        out=Const(UQ(1, 0).value(0)),
+        out=Const(UQ(1, 0).from_bits(0)),
     )
 
 
@@ -208,13 +208,13 @@ def q_sign_extend(x: Node, n: int) -> Node:
         shifted = basic_lshift(
             x=sign_bit,
             amount=shift_amount,
-            out=Const(UQ(n + 1, 0).value(0)),
+            out=Const(UQ(n + 1, 0).from_bits(0)),
         )
 
         upper_bits = basic_sub(
             x=shifted,
             y=sign_bit,
-            out=Const(UQ(n, 0).value(0)),
+            out=Const(UQ(n, 0).from_bits(0)),
         )
 
         int_bits = Const(UQ.from_int(x.dtype.int_bits + n))
@@ -256,7 +256,7 @@ def q_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
         return basic_lshift(
             resized,
             Const(UQ.from_int(fractional_extension)),
-            Const(Q(int_bits, frac_bits).value(0)),
+            Const(Q(int_bits, frac_bits).from_bits(0)),
         )
     
     return impl(x)
@@ -302,7 +302,7 @@ def q_mul(x: Node, y: Node) -> Node:
     target_frac_bits = x.dtype.frac_bits + y.dtype.frac_bits
     x_adj = q_sign_extend(x, y.dtype.total_bits())
     y_adj = q_sign_extend(y, x.dtype.total_bits())
-    out = Const(Q(target_int_bits, target_frac_bits).value(0))
+    out = Const(Q(target_int_bits, target_frac_bits).from_bits(0))
     return basic_mul(x=x_adj, y=y_adj, out=out)
 
 
@@ -316,7 +316,7 @@ def q_lshift(x: Node, n: Node) -> Node:
 def q_to_uq(x: Node) -> Node:
     int_bits = x.dtype.int_bits - 1
     frac_bits = x.dtype.frac_bits
-    return basic_identity(x=x, out=Const(UQ(int_bits, frac_bits).value(0)))
+    return basic_identity(x=x, out=Const(UQ(int_bits, frac_bits).from_bits(0)))
 
 
 @Primitive(name="q_rshift", spec=lambda x, n, ctx: x * (ctx.two() ** (-n)))
@@ -352,7 +352,7 @@ def q_rshift_jam(x: Node, n: Node) -> Node:
     signed_result = q_add_sign(uq_to_q(shifted_magnitude), sign)
     return basic_identity(
         signed_result,
-        Const(Q(x.dtype.int_bits, x.dtype.frac_bits).value(0)),
+        Const(Q(x.dtype.int_bits, x.dtype.frac_bits).from_bits(0)),
     )
 
 
@@ -382,4 +382,4 @@ def q_is_zero_spec(x, ctx):
 
 @Primitive(name="q_is_zero", spec=q_is_zero_spec)
 def q_is_zero(x: Node) -> Node:
-    return basic_invert(basic_or_reduce(x, Const(UQ(1, 0).value(0))), Const(UQ(1, 0).value(0)))
+    return basic_invert(basic_or_reduce(x, Const(UQ(1, 0).from_bits(0))), Const(UQ(1, 0).from_bits(0)))

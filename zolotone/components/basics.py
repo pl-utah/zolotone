@@ -31,7 +31,7 @@ def _impl_constructor(op):
         val = op(*op_args)
         # TODO: check for truncation
         val = mask(val, out.dtype.total_bits())
-        return out.dtype.value(val)
+        return out.dtype.from_bits(val)
     return impl
 
 def _sign_constructor() -> DataType:

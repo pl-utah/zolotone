@@ -1298,16 +1298,16 @@ class TestConstantFolding(unittest.TestCase):
 
         try:
             for lhs_bits, rhs_bits, expected in add_cases:
-                add_x.load_value(UQ(32, 0).value(lhs_bits))
-                add_y.load_value(UQ(32, 0).value(rhs_bits))
+                add_x.load_value(UQ(32, 0).from_bits(lhs_bits))
+                add_y.load_value(UQ(32, 0).from_bits(rhs_bits))
                 with self.subTest(op="uq_add", lhs=hex(lhs_bits), rhs=hex(rhs_bits)):
                     self.assertEqual(add_design.evaluate().raw, expected)
                     self.assertEqual(add_fn_jit(lhs_bits, rhs_bits), expected)
                     self.assertEqual(add_fn_no_jit(lhs_bits, rhs_bits), expected)
 
             for lhs_bits, rhs_bits, expected in sub_cases:
-                sub_x.load_value(UQ(32, 0).value(lhs_bits))
-                sub_y.load_value(UQ(32, 0).value(rhs_bits))
+                sub_x.load_value(UQ(32, 0).from_bits(lhs_bits))
+                sub_y.load_value(UQ(32, 0).from_bits(rhs_bits))
                 with self.subTest(op="uq_sub", lhs=hex(lhs_bits), rhs=hex(rhs_bits)):
                     self.assertEqual(sub_design.evaluate().raw, expected)
                     self.assertEqual(sub_fn_jit(lhs_bits, rhs_bits), expected)
@@ -1339,8 +1339,8 @@ class TestConstantFolding(unittest.TestCase):
 
         try:
             for lhs_bits, rhs_bits, expected_bits in cases:
-                x.load_value(Float32().value(lhs_bits))
-                y.load_value(Float32().value(rhs_bits))
+                x.load_value(Float32().from_bits(lhs_bits))
+                y.load_value(Float32().from_bits(rhs_bits))
                 with self.subTest(lhs=hex(lhs_bits), rhs=hex(rhs_bits)):
                     self.assertEqual(design.evaluate().raw, expected_bits)
                     self.assertEqual(fn_jit(lhs_bits, rhs_bits), expected_bits)
@@ -1398,8 +1398,8 @@ class TestConstantFolding(unittest.TestCase):
 
         try:
             for name, lhs_bits, rhs_bits, expected_bits in cases:
-                x.load_value(Float32().value(lhs_bits))
-                y.load_value(Float32().value(rhs_bits))
+                x.load_value(Float32().from_bits(lhs_bits))
+                y.load_value(Float32().from_bits(rhs_bits))
                 with self.subTest(name=name, lhs=hex(lhs_bits), rhs=hex(rhs_bits)):
                     self.assertEqual(design.evaluate().raw, expected_bits)
                     self.assertEqual(fn_jit(lhs_bits, rhs_bits), expected_bits)
@@ -1417,44 +1417,44 @@ class TestConstantFolding(unittest.TestCase):
         for name, descriptor_type in cases:
             with self.subTest(descriptor_type=name):
                 folded = basic_add(
-                    Const(descriptor_type().value(1)),
-                    Const(descriptor_type().value(2)),
-                    out=Const(descriptor_type().value(0)),
+                    Const(descriptor_type().from_bits(1)),
+                    Const(descriptor_type().from_bits(2)),
+                    out=Const(descriptor_type().from_bits(0)),
                 )
 
                 self.assert_folded_value(folded, descriptor_type, 3)
 
     def test_basic_add_masks_to_output_width(self):
         folded = basic_add(
-            Const(UQ(3, 0).value(7)),
-            Const(UQ(3, 0).value(3)),
-            out=Const(UQ(3, 0).value(0)),
+            Const(UQ(3, 0).from_bits(7)),
+            Const(UQ(3, 0).from_bits(3)),
+            out=Const(UQ(3, 0).from_bits(0)),
         )
 
         self.assert_folded_value(folded, UQ, 2)
 
     def test_comparison_folds_to_bool(self):
         folded = basic_less(
-            Const(UQ(2, 0).value(1)),
-            Const(UQ(2, 0).value(2)),
-            out=Const(Bool().value(0)),
+            Const(UQ(2, 0).from_bits(1)),
+            Const(UQ(2, 0).from_bits(2)),
+            out=Const(Bool().from_bits(0)),
         )
 
         self.assert_folded_value(folded, Bool, 1)
 
     def test_tuple_get_item_is_constant_folded(self):
         folded = make_Tuple(
-            Const(UQ(3, 0).value(5)),
-            Const(Bool().value(1)),
+            Const(UQ(3, 0).from_bits(5)),
+            Const(Bool().from_bits(1)),
         )[0]
 
         self.assert_folded_value(folded, UQ, 5)
 
     def test_if_then_else_is_constant_folded(self):
         folded = if_then_else(
-            Const(Bool().value(1)),
-            Const(UQ(3, 0).value(5)),
-            Const(UQ(3, 0).value(2)),
+            Const(Bool().from_bits(1)),
+            Const(UQ(3, 0).from_bits(5)),
+            Const(UQ(3, 0).from_bits(2)),
         )
 
         self.assert_folded_value(folded, UQ, 5)
@@ -1463,13 +1463,13 @@ class TestConstantFolding(unittest.TestCase):
         x = Var("x", dtype=UQ(3, 0))
         node = basic_add(
             x,
-            Const(UQ(3, 0).value(1)),
-            out=Const(UQ(3, 0).value(0)),
+            Const(UQ(3, 0).from_bits(1)),
+            out=Const(UQ(3, 0).from_bits(0)),
         )
 
         self.assertIsNone(node.constant)
 
-        x.load_value(UQ(3, 0).value(6))
+        x.load_value(UQ(3, 0).from_bits(6))
         self.assertEqual(node.evaluate().raw, 7)
         self.assertIsNone(node.constant)
 
@@ -1482,7 +1482,7 @@ class TestConstantFolding(unittest.TestCase):
         for x_val, amount_val, expected in cases:
             with self.subTest(x=x_val, amount=amount_val):
                 folded = uq_rshift_jam(
-                    Const(UQ(4, 0).value(x_val)),
+                    Const(UQ(4, 0).from_bits(x_val)),
                     Const(UQ.from_int(amount_val)),
                 )
                 self.assert_folded_value(folded, UQ, expected)
@@ -1510,8 +1510,8 @@ class TestConstantFolding(unittest.TestCase):
         )
         try:
             for input_bits, shift, expected_bits in cases:
-                value.load_value(Q(5, 0).value(input_bits))
-                amount.load_value(UQ(4, 0).value(shift))
+                value.load_value(Q(5, 0).from_bits(input_bits))
+                amount.load_value(UQ(4, 0).from_bits(shift))
                 with self.subTest(input_bits=input_bits, shift=shift):
                     self.assertEqual(design.evaluate().raw, expected_bits)
                     self.assertEqual(compiled_jit(input_bits, shift), expected_bits)
@@ -1536,7 +1536,7 @@ class TestConstantFolding(unittest.TestCase):
                     (input_bits - (1 << 6) if input_bits & (1 << 5) else input_bits)
                     << 3
                 ) & ((1 << 11) - 1)
-                value.load_value(Q(4, 2).value(input_bits))
+                value.load_value(Q(4, 2).from_bits(input_bits))
                 with self.subTest(input_bits=input_bits):
                     self.assertEqual(design.evaluate().raw, expected_bits)
                     self.assertEqual(compiled_jit(input_bits), expected_bits)
@@ -1556,9 +1556,9 @@ class TestConstantFolding(unittest.TestCase):
         b = [Var(name=f"b_{i}", dtype=BFloat16()) for i in range(4)]
 
         for i, bits in enumerate(vals[:4]):
-            a[i].load_value(BFloat16().value(bits))
+            a[i].load_value(BFloat16().from_bits(bits))
         for i, bits in enumerate(vals[4:]):
-            b[i].load_value(BFloat16().value(bits))
+            b[i].load_value(BFloat16().from_bits(bits))
 
         conventional = bf16x8_dot_fp32_conventional(*a, *b).evaluate()
         optimized = bf16x8_dot_fp32_optimized(*a, *b).evaluate()
@@ -1575,9 +1575,9 @@ class TestConstantFolding(unittest.TestCase):
         b = [Var(name=f"b_{i}", dtype=BFloat16()) for i in range(4)]
 
         for variable, bits in zip(a, a_values, strict=True):
-            variable.load_value(BFloat16().value(bits))
+            variable.load_value(BFloat16().from_bits(bits))
         for variable, bits in zip(b, b_values, strict=True):
-            variable.load_value(BFloat16().value(bits))
+            variable.load_value(BFloat16().from_bits(bits))
 
         designs = {
             "conventional": bf16x8_dot_fp32_conventional(*a, *b),
@@ -1680,7 +1680,7 @@ class TestConstantFolding(unittest.TestCase):
                     *(value.to_spec(outer_ctx) for value in (*a_values, *b_values)),
                     ctx=outer_ctx,
                 ).constant_fold()
-                expected_result = Float32().value(expected).to_spec(outer_ctx)
+                expected_result = Float32().from_bits(expected).to_spec(outer_ctx)
                 if (
                     expected_result.is_inf.constant_fold().value
                     or expected_result.is_nan.constant_fold().value
@@ -1699,14 +1699,14 @@ class TestConstantFolding(unittest.TestCase):
 
 class TestFingerprint(unittest.TestCase):
     def test_runtime_type_fingerprint_depends_on_structure_and_value(self):
-        self.assertEqual(UQ(3, 0).value(3)._fingerprint(), UQ(3, 0).value(3)._fingerprint())
-        self.assertNotEqual(UQ(3, 0).value(3)._fingerprint(), UQ(3, 0).value(4)._fingerprint())
-        self.assertNotEqual(UQ(3, 0).value(3)._fingerprint(), UQ(4, 0).value(3)._fingerprint())
+        self.assertEqual(UQ(3, 0).from_bits(3)._fingerprint(), UQ(3, 0).from_bits(3)._fingerprint())
+        self.assertNotEqual(UQ(3, 0).from_bits(3)._fingerprint(), UQ(3, 0).from_bits(4)._fingerprint())
+        self.assertNotEqual(UQ(3, 0).from_bits(3)._fingerprint(), UQ(4, 0).from_bits(3)._fingerprint())
 
         dtype = Tuple(UQ(3, 0), Bool())
-        lhs = dtype.value(UQ(3, 0).value(5), Bool().value(1))
-        rhs = dtype.value(UQ(3, 0).value(5), Bool().value(1))
-        different = dtype.value(UQ(3, 0).value(5), Bool().value(0))
+        lhs = dtype.from_values(UQ(3, 0).from_bits(5), Bool().from_bits(1))
+        rhs = dtype.from_values(UQ(3, 0).from_bits(5), Bool().from_bits(1))
+        different = dtype.from_values(UQ(3, 0).from_bits(5), Bool().from_bits(0))
         self.assertEqual(lhs._fingerprint(), rhs._fingerprint())
         self.assertNotEqual(lhs._fingerprint(), different._fingerprint())
 
@@ -1715,9 +1715,9 @@ class TestFingerprint(unittest.TestCase):
         same = UQ(3, 0)
         self.assertEqual(plain._fingerprint(), same._fingerprint())
 
-        first = Const(plain.value(1))
-        same_value = Const(plain.value(1))
-        different = Const(plain.value(2))
+        first = Const(plain.from_bits(1))
+        same_value = Const(plain.from_bits(1))
+        different = Const(plain.from_bits(2))
 
         self.assertEqual(plain._fingerprint(), first.dtype._fingerprint())
         self.assertEqual(first._fingerprint(), same_value._fingerprint())
@@ -1729,8 +1729,8 @@ class TestFingerprint(unittest.TestCase):
         x2 = Var("x", dtype=UQ(3, 0))
         y2 = Var("y", dtype=UQ(3, 0))
 
-        lhs = basic_add(x1, y1, Const(UQ(3, 0).value(0)))
-        rhs = basic_add(x2, y2, Const(UQ(3, 0).value(0)))
+        lhs = basic_add(x1, y1, Const(UQ(3, 0).from_bits(0)))
+        rhs = basic_add(x2, y2, Const(UQ(3, 0).from_bits(0)))
 
         self.assertEqual(lhs._fingerprint(), rhs._fingerprint())
 
@@ -1738,27 +1738,27 @@ class TestFingerprint(unittest.TestCase):
         x = Var("x", dtype=UQ(3, 0))
         y = Var("y", dtype=UQ(3, 0))
 
-        add_node = basic_add(x, y, Const(UQ(3, 0).value(0)))
-        sub_node = basic_sub(x, y, Const(UQ(3, 0).value(0)))
-        different_const = basic_add(x, y, Const(UQ(3, 0).value(1)))
+        add_node = basic_add(x, y, Const(UQ(3, 0).from_bits(0)))
+        sub_node = basic_sub(x, y, Const(UQ(3, 0).from_bits(0)))
+        different_const = basic_add(x, y, Const(UQ(3, 0).from_bits(1)))
 
         self.assertNotEqual(add_node._fingerprint(), sub_node._fingerprint())
         self.assertNotEqual(add_node._fingerprint(), different_const._fingerprint())
 
     def test_fingerprint_depends_on_jittable_lowering_when_codegen_differs(self):
-        node = make_Tuple(Const(UQ(3, 0).value(1)), Const(UQ(3, 0).value(2)))
+        node = make_Tuple(Const(UQ(3, 0).from_bits(1)), Const(UQ(3, 0).from_bits(2)))
 
         self.assertNotEqual(node._fingerprint(jittable=True), node._fingerprint(jittable=False))
 
     def test_fingerprint_is_stable_across_runtime_variable_bindings(self):
         x = Var("x", dtype=UQ(3, 0))
         y = Var("y", dtype=UQ(3, 0))
-        node = basic_add(x, y, Const(UQ(3, 0).value(0)))
+        node = basic_add(x, y, Const(UQ(3, 0).from_bits(0)))
 
         before = node._fingerprint()
 
-        x.load_value(UQ(3, 0).value(6))
-        y.load_value(UQ(3, 0).value(1))
+        x.load_value(UQ(3, 0).from_bits(6))
+        y.load_value(UQ(3, 0).from_bits(1))
         self.assertEqual(node.evaluate().raw, 7)
 
         after = node._fingerprint()
@@ -3035,7 +3035,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         for sign in (0, 1):
             with self.subTest(sign=sign):
                 design = fp32_encode(
-                    Const(UQ(1, 0).value(sign)),
+                    Const(UQ(1, 0).from_bits(sign)),
                     Const(Q.from_int(127)),
                     Const(UQ(1, Float32.mantissa_bits).from_float(0)),
                 )
@@ -3060,7 +3060,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
     def test_fp32_encode_design_preserves_negative_underflow_sign(self):
-        sign = Const(UQ(1, 0).value(1))
+        sign = Const(UQ(1, 0).from_bits(1))
         exponent = Const(Q.from_int(-22))
 
         cases = (
@@ -3120,8 +3120,8 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             with self.subTest(name=name):
                 ctx = SpecContext(f"fp32-mult-{name}")
                 result = spec_fp32_mult(
-                    Float32().value(lhs_bits).to_spec(ctx),
-                    Float32().value(rhs_bits).to_spec(ctx),
+                    Float32().from_bits(lhs_bits).to_spec(ctx),
+                    Float32().from_bits(rhs_bits).to_spec(ctx),
                     ctx,
                 )
                 ctx.check(getattr(result, predicate))
@@ -3146,8 +3146,8 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             with self.subTest(name=name):
                 ctx = SpecContext(f"fp32-mult-{name}")
                 result = spec_fp32_mult(
-                    Float32().value(lhs_bits).to_spec(ctx),
-                    Float32().value(rhs_bits).to_spec(ctx),
+                    Float32().from_bits(lhs_bits).to_spec(ctx),
+                    Float32().from_bits(rhs_bits).to_spec(ctx),
                     ctx,
                 )
                 ctx.check(getattr(result, predicate))
@@ -3466,20 +3466,20 @@ class TestFloat16Spec(unittest.TestCase):
         self.assertEqual(largest_negative.mantissa, 1023)
         self.assertEqual(largest_negative.dtype, Float16())
 
-        self.assertEqual(Float16().value(0x0001).to_python(), 2 ** -24)
-        self.assertEqual(Float16().value(0x03FF).to_python(), 1023 * (2 ** -24))
-        self.assertEqual(Float16().value(0x0400).to_python(), 2 ** -14)
-        self.assertEqual(Float16().value(0x3C00).to_python(), 1.0)
-        self.assertEqual(Float16().value(0x7BFF).to_python(), 65504.0)
+        self.assertEqual(Float16().from_bits(0x0001).to_python(), 2 ** -24)
+        self.assertEqual(Float16().from_bits(0x03FF).to_python(), 1023 * (2 ** -24))
+        self.assertEqual(Float16().from_bits(0x0400).to_python(), 2 ** -14)
+        self.assertEqual(Float16().from_bits(0x3C00).to_python(), 1.0)
+        self.assertEqual(Float16().from_bits(0x7BFF).to_python(), 65504.0)
         self.assertTrue(math.isinf(Float16().Inf().to_python()))
         self.assertTrue(math.isnan(Float16().NaN().to_python()))
         self.assertLess(math.copysign(1.0, Float16().nZero().to_python()), 0)
 
     def test_float16_runtime_rejects_invalid_encodings(self):
         with self.assertRaisesRegex(TypeError, "packed bits as int"):
-            Float16().value(1.0)
+            Float16().from_bits(1.0)
         with self.assertRaisesRegex(ValueError, "packed bits must fit"):
-            Float16().value(1 << 16)
+            Float16().from_bits(1 << 16)
         with self.assertRaisesRegex(ValueError, "sign must be 0 or 1"):
             Float16().from_fields(2, 0, 0)
         with self.assertRaisesRegex(ValueError, "exponent out of range"):
@@ -3522,8 +3522,8 @@ class TestFloat16Spec(unittest.TestCase):
         runtime_cases = (
             (Float16().Zero(), "is_pzero"),
             (Float16().nZero(), "is_nzero"),
-            (Float16().value(0x0001), "is_sub"),
-            (Float16().value(0x3C00), "is_norm"),
+            (Float16().from_bits(0x0001), "is_sub"),
+            (Float16().from_bits(0x3C00), "is_norm"),
             (Float16().Inf(), "is_pinf"),
             (Float16().nInf(), "is_ninf"),
             (Float16().NaN(), "is_nan"),
@@ -3573,8 +3573,8 @@ class TestFloat16Spec(unittest.TestCase):
         cases = (
             (Float16().Zero(), (0, 0, 0, 0, 0, 1, 0, 0)),
             (Float16().nZero(), (1, 0, 0, 0, 0, 1, 0, 0)),
-            (Float16().value(0x0001), (0, 0, 1, 0, 1, 0, 0, 0)),
-            (Float16().value(0x3C00), (0, 15, 0, 1, 0, 0, 0, 0)),
+            (Float16().from_bits(0x0001), (0, 0, 1, 0, 1, 0, 0, 0)),
+            (Float16().from_bits(0x3C00), (0, 15, 0, 1, 0, 0, 0, 0)),
             (Float16().Inf(), (0, 31, 0, 0, 0, 0, 1, 0)),
             (Float16().NaN(), (0, 31, 512, 0, 0, 0, 0, 1)),
         )
@@ -3606,7 +3606,7 @@ class TestFloat16Spec(unittest.TestCase):
         try:
             for bits in cases:
                 with self.subTest(bits=bits):
-                    value.load_value(Float16().value(bits))
+                    value.load_value(Float16().from_bits(bits))
                     self.assertEqual(design.evaluate().raw, bits)
                     self.assertEqual(compiled(bits), bits)
         finally:
@@ -3639,13 +3639,13 @@ class TestE4M3FNSpec(unittest.TestCase):
         self.assertEqual(E4M3FN().Zero().raw, 0x00)
         self.assertEqual(E4M3FN().nZero().raw, 0x80)
         self.assertEqual(E4M3FN().NaN().raw, 0x7F)
-        self.assertEqual(E4M3FN().value(0x01).to_python(), 2 ** -9)
-        self.assertEqual(E4M3FN().value(0x07).to_python(), 7 * 2 ** -9)
-        self.assertEqual(E4M3FN().value(0x08).to_python(), 2 ** -6)
-        self.assertEqual(E4M3FN().value(0x7E).to_python(), 448.0)
-        self.assertEqual(E4M3FN().value(0xFE).to_python(), -448.0)
-        self.assertTrue(math.isnan(E4M3FN().value(0x7F).to_python()))
-        self.assertTrue(math.isnan(E4M3FN().value(0xFF).to_python()))
+        self.assertEqual(E4M3FN().from_bits(0x01).to_python(), 2 ** -9)
+        self.assertEqual(E4M3FN().from_bits(0x07).to_python(), 7 * 2 ** -9)
+        self.assertEqual(E4M3FN().from_bits(0x08).to_python(), 2 ** -6)
+        self.assertEqual(E4M3FN().from_bits(0x7E).to_python(), 448.0)
+        self.assertEqual(E4M3FN().from_bits(0xFE).to_python(), -448.0)
+        self.assertTrue(math.isnan(E4M3FN().from_bits(0x7F).to_python()))
+        self.assertTrue(math.isnan(E4M3FN().from_bits(0xFF).to_python()))
 
         value = E4M3FN().from_fields(1, 15, 6)
         self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 15, 6))
@@ -3655,7 +3655,7 @@ class TestE4M3FNSpec(unittest.TestCase):
         for invalid in (-1, 256, 1.5, "0"):
             with self.subTest(packed=invalid):
                 with self.assertRaises((TypeError, ValueError)):
-                    E4M3FN().value(invalid)
+                    E4M3FN().from_bits(invalid)
         for fields in ((2, 0, 0), (0, -1, 0), (0, 16, 0), (0, 0, -1), (0, 0, 8)):
             with self.subTest(fields=fields):
                 with self.assertRaises(ValueError):
@@ -3665,7 +3665,7 @@ class TestE4M3FNSpec(unittest.TestCase):
         counts = {"norm": 0, "sub": 0, "zero": 0, "nan": 0}
         names = tuple(counts)
         for bits in range(256):
-            runtime = E4M3FN().value(bits)
+            runtime = E4M3FN().from_bits(bits)
             decoded = e4m3fn_decode(Const(runtime))
             fields = tuple(node.evaluate().raw for node in decoded)
             self.assertEqual(fields[:3], (bits >> 7, (bits >> 3) & 15, bits & 7))
@@ -3689,7 +3689,7 @@ class TestE4M3FNSpec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
         try:
             for bits in range(256):
-                value.load_value(E4M3FN().value(bits))
+                value.load_value(E4M3FN().from_bits(bits))
                 self.assertEqual(design.evaluate().raw, bits)
                 self.assertEqual(compiled(bits), bits)
         finally:
@@ -3740,7 +3740,7 @@ class TestE4M3FNSpec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
 
         def q8(value):
-            return Q(8, 0).value(value & 0xFF)
+            return Q(8, 0).from_bits(value & 0xFF)
 
         cases = (
             (0, 7, 0.0, 0x00),
@@ -3767,7 +3767,7 @@ class TestE4M3FNSpec(unittest.TestCase):
                     exponent=exponent_value,
                     mantissa=mantissa_value,
                 ):
-                    sign_runtime = UQ(1, 0).value(sign_value)
+                    sign_runtime = UQ(1, 0).from_bits(sign_value)
                     exponent_runtime = q8(exponent_value)
                     mantissa_runtime = UQ(12, 12).from_float(mantissa_value)
                     sign.load_value(sign_runtime)
@@ -3793,7 +3793,7 @@ class TestE4M3FNSpec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
         try:
             for bits in range(256):
-                runtime = E4M3FN().value(bits)
+                runtime = E4M3FN().from_bits(bits)
                 if runtime.is_nan:
                     continue
                 if runtime.exponent == 0:
@@ -3803,8 +3803,8 @@ class TestE4M3FNSpec(unittest.TestCase):
                     exponent_value = runtime.exponent
                     mantissa_value = 1 + runtime.mantissa / 8
 
-                sign_value = UQ(1, 0).value(runtime.sign)
-                exponent_value = Q(8, 0).value(exponent_value)
+                sign_value = UQ(1, 0).from_bits(runtime.sign)
+                exponent_value = Q(8, 0).from_bits(exponent_value)
                 mantissa_value = UQ(2, 12).from_float(mantissa_value)
                 sign.load_value(sign_value)
                 exponent.load_value(exponent_value)
@@ -3825,7 +3825,7 @@ class TestE4M3FNSpec(unittest.TestCase):
         @Composite(name="e4m3fn_encode_saturation_proof", spec=spec)
         def saturation_design():
             return e4m3fn_encode(
-                Const(UQ(1, 0).value(0)),
+                Const(UQ(1, 0).from_bits(0)),
                 Const(Q.from_int(20)),
                 Const(UQ.from_int(1)),
             )
@@ -3843,12 +3843,12 @@ class TestUE4M3Spec(unittest.TestCase):
     def test_runtime_layout_values_and_validation(self):
         self.assertEqual(UE4M3().Zero().raw, 0x00)
         self.assertEqual(UE4M3().NaN().raw, 0x7F)
-        self.assertEqual(UE4M3().value(0x01).to_python(), 2 ** -9)
-        self.assertEqual(UE4M3().value(0x07).to_python(), 7 * 2 ** -9)
-        self.assertEqual(UE4M3().value(0x08).to_python(), 2 ** -6)
-        self.assertEqual(UE4M3().value(0x38).to_python(), 1.0)
-        self.assertEqual(UE4M3().value(0x7E).to_python(), 448.0)
-        self.assertTrue(math.isnan(UE4M3().value(0x7F).to_python()))
+        self.assertEqual(UE4M3().from_bits(0x01).to_python(), 2 ** -9)
+        self.assertEqual(UE4M3().from_bits(0x07).to_python(), 7 * 2 ** -9)
+        self.assertEqual(UE4M3().from_bits(0x08).to_python(), 2 ** -6)
+        self.assertEqual(UE4M3().from_bits(0x38).to_python(), 1.0)
+        self.assertEqual(UE4M3().from_bits(0x7E).to_python(), 448.0)
+        self.assertTrue(math.isnan(UE4M3().from_bits(0x7F).to_python()))
 
         value = UE4M3().from_fields(15, 6)
         self.assertEqual((value.exponent, value.mantissa), (15, 6))
@@ -3858,7 +3858,7 @@ class TestUE4M3Spec(unittest.TestCase):
         for invalid in (-1, 128, 255, 1.5, "0"):
             with self.subTest(packed=invalid):
                 with self.assertRaises((TypeError, ValueError)):
-                    UE4M3().value(invalid)
+                    UE4M3().from_bits(invalid)
         for fields in ((-1, 0), (16, 0), (0, -1), (0, 8)):
             with self.subTest(fields=fields):
                 with self.assertRaises(ValueError):
@@ -3877,7 +3877,7 @@ class TestUE4M3Spec(unittest.TestCase):
         names = tuple(counts)
         try:
             for bits in range(128):
-                runtime = UE4M3().value(bits)
+                runtime = UE4M3().from_bits(bits)
                 decoded = ue4m3_decode(Const(runtime))
                 fields = tuple(node.evaluate().raw for node in decoded)
                 self.assertEqual(fields[:2], ((bits >> 3) & 15, bits & 7))
@@ -3938,7 +3938,7 @@ class TestUE4M3Spec(unittest.TestCase):
         )
         try:
             for exponent_value, mantissa_value, expected in cases:
-                exponent_runtime = Q(8, 0).value(exponent_value & 0xFF)
+                exponent_runtime = Q(8, 0).from_bits(exponent_value & 0xFF)
                 mantissa_runtime = UQ(12, 12).from_float(mantissa_value)
                 exponent.load_value(exponent_runtime)
                 mantissa.load_value(mantissa_runtime)
@@ -3974,7 +3974,7 @@ class TestUE4M3Spec(unittest.TestCase):
         )
         try:
             for source_bits, expected in cases:
-                source.load_value(Float32().value(source_bits))
+                source.load_value(Float32().from_bits(source_bits))
                 with self.subTest(source=hex(source_bits)):
                     self.assertEqual(design.evaluate().raw, expected)
                     self.assertEqual(compiled(source_bits), expected)
@@ -4064,15 +4064,15 @@ class TestE5M2Spec(unittest.TestCase):
             [E5M2().NaN(payload).raw for payload in range(1, 4)],
             [0x7D, 0x7E, 0x7F],
         )
-        self.assertEqual(E5M2().value(0x01).to_python(), 2 ** -16)
-        self.assertEqual(E5M2().value(0x03).to_python(), 3 * 2 ** -16)
-        self.assertEqual(E5M2().value(0x04).to_python(), 2 ** -14)
-        self.assertEqual(E5M2().value(0x7B).to_python(), 57344.0)
-        self.assertEqual(E5M2().value(0xFB).to_python(), -57344.0)
-        self.assertEqual(E5M2().value(0x7C).to_python(), float("inf"))
-        self.assertEqual(E5M2().value(0xFC).to_python(), float("-inf"))
+        self.assertEqual(E5M2().from_bits(0x01).to_python(), 2 ** -16)
+        self.assertEqual(E5M2().from_bits(0x03).to_python(), 3 * 2 ** -16)
+        self.assertEqual(E5M2().from_bits(0x04).to_python(), 2 ** -14)
+        self.assertEqual(E5M2().from_bits(0x7B).to_python(), 57344.0)
+        self.assertEqual(E5M2().from_bits(0xFB).to_python(), -57344.0)
+        self.assertEqual(E5M2().from_bits(0x7C).to_python(), float("inf"))
+        self.assertEqual(E5M2().from_bits(0xFC).to_python(), float("-inf"))
         for bits in (0x7D, 0x7E, 0x7F, 0xFD, 0xFE, 0xFF):
-            self.assertTrue(math.isnan(E5M2().value(bits).to_python()))
+            self.assertTrue(math.isnan(E5M2().from_bits(bits).to_python()))
 
         value = E5M2().from_fields(1, 30, 3)
         self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 30, 3))
@@ -4088,7 +4088,7 @@ class TestE5M2Spec(unittest.TestCase):
             with self.subTest(packed=invalid), self.assertRaises(
                 (TypeError, ValueError)
             ):
-                E5M2().value(invalid)
+                E5M2().from_bits(invalid)
         for fields in (
             (2, 0, 0),
             (0, -1, 0),
@@ -4118,7 +4118,7 @@ class TestE5M2Spec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
         try:
             for bits in range(256):
-                runtime = E5M2().value(bits)
+                runtime = E5M2().from_bits(bits)
                 decoded = e5m2_decode(Const(runtime))
                 fields = tuple(node.evaluate().raw for node in decoded)
                 self.assertEqual(
@@ -4172,8 +4172,8 @@ class TestE5M2Spec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
 
         def run(sign_value, exponent_value, mantissa_value):
-            sign_runtime = UQ(1, 0).value(sign_value)
-            exponent_runtime = Q(8, 0).value(exponent_value & 0xFF)
+            sign_runtime = UQ(1, 0).from_bits(sign_value)
+            exponent_runtime = Q(8, 0).from_bits(exponent_value & 0xFF)
             mantissa_runtime = UQ(2, 12).from_float(mantissa_value)
             sign.load_value(sign_runtime)
             exponent.load_value(exponent_runtime)
@@ -4212,7 +4212,7 @@ class TestE5M2Spec(unittest.TestCase):
                     )
 
             for bits in range(256):
-                runtime = E5M2().value(bits)
+                runtime = E5M2().from_bits(bits)
                 if runtime.is_inf or runtime.is_nan:
                     continue
                 exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
@@ -4236,7 +4236,7 @@ class TestE5M2Spec(unittest.TestCase):
         @Composite(name="e5m2_encode_overflow_proof", spec=spec)
         def overflow_design():
             return e5m2_encode(
-                Const(UQ(1, 0).value(0)),
+                Const(UQ(1, 0).from_bits(0)),
                 Const(Q.from_int(39)),
                 Const(UQ.from_int(1)),
             )
@@ -4252,12 +4252,12 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         self.assertEqual(E5M2FNUZ().Zero().raw, 0x00)
         self.assertEqual(E5M2FNUZ().NaN().raw, 0x80)
         self.assertEqual(E5M2FNUZ.exponent_bias, 16)
-        self.assertEqual(E5M2FNUZ().value(0x01).to_python(), 2 ** -17)
-        self.assertEqual(E5M2FNUZ().value(0x03).to_python(), 3 * 2 ** -17)
-        self.assertEqual(E5M2FNUZ().value(0x04).to_python(), 2 ** -15)
-        self.assertEqual(E5M2FNUZ().value(0x7F).to_python(), 57344.0)
-        self.assertEqual(E5M2FNUZ().value(0xFF).to_python(), -57344.0)
-        self.assertTrue(math.isnan(E5M2FNUZ().value(0x80).to_python()))
+        self.assertEqual(E5M2FNUZ().from_bits(0x01).to_python(), 2 ** -17)
+        self.assertEqual(E5M2FNUZ().from_bits(0x03).to_python(), 3 * 2 ** -17)
+        self.assertEqual(E5M2FNUZ().from_bits(0x04).to_python(), 2 ** -15)
+        self.assertEqual(E5M2FNUZ().from_bits(0x7F).to_python(), 57344.0)
+        self.assertEqual(E5M2FNUZ().from_bits(0xFF).to_python(), -57344.0)
+        self.assertTrue(math.isnan(E5M2FNUZ().from_bits(0x80).to_python()))
 
         value = E5M2FNUZ().from_fields(1, 31, 3)
         self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 31, 3))
@@ -4272,7 +4272,7 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         for invalid in (-1, 256, 1.5, "0"):
             with self.subTest(packed=invalid):
                 with self.assertRaises((TypeError, ValueError)):
-                    E5M2FNUZ().value(invalid)
+                    E5M2FNUZ().from_bits(invalid)
         for fields in (
             (2, 0, 0),
             (0, -1, 0),
@@ -4297,7 +4297,7 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
         try:
             for bits in range(256):
-                runtime = E5M2FNUZ().value(bits)
+                runtime = E5M2FNUZ().from_bits(bits)
                 decoded = e5m2fnuz_decode(Const(runtime))
                 fields = tuple(node.evaluate().raw for node in decoded)
                 self.assertEqual(fields[:3], (bits >> 7, (bits >> 2) & 31, bits & 3))
@@ -4358,8 +4358,8 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
 
         def run(sign_value, exponent_value, mantissa_value):
-            sign_runtime = UQ(1, 0).value(sign_value)
-            exponent_runtime = Q(8, 0).value(exponent_value & 0xFF)
+            sign_runtime = UQ(1, 0).from_bits(sign_value)
+            exponent_runtime = Q(8, 0).from_bits(exponent_value & 0xFF)
             mantissa_runtime = UQ(2, 12).from_float(mantissa_value)
             sign.load_value(sign_runtime)
             exponent.load_value(exponent_runtime)
@@ -4394,7 +4394,7 @@ class TestE5M2FNUZSpec(unittest.TestCase):
                     )
 
             for bits in range(256):
-                runtime = E5M2FNUZ().value(bits)
+                runtime = E5M2FNUZ().from_bits(bits)
                 if runtime.is_nan:
                     continue
                 exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
@@ -4416,7 +4416,7 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         @Composite(name="e5m2fnuz_encode_saturation_proof", spec=spec)
         def saturation_design():
             return e5m2fnuz_encode(
-                Const(UQ(1, 0).value(0)),
+                Const(UQ(1, 0).from_bits(0)),
                 Const(Q.from_int(40)),
                 Const(UQ.from_int(1)),
             )
@@ -4431,10 +4431,10 @@ class TestE2M1Spec(unittest.TestCase):
     def test_descriptor_layout_and_value_validation(self):
         self.assertEqual(E2M1().Zero().raw, 0x0)
         self.assertEqual(E2M1().nZero().raw, 0x8)
-        self.assertEqual(E2M1().value(0x1).to_python(), 0.5)
-        self.assertEqual(E2M1().value(0x2).to_python(), 1.0)
-        self.assertEqual(E2M1().value(0x7).to_python(), 6.0)
-        self.assertEqual(E2M1().value(0xF).to_python(), -6.0)
+        self.assertEqual(E2M1().from_bits(0x1).to_python(), 0.5)
+        self.assertEqual(E2M1().from_bits(0x2).to_python(), 1.0)
+        self.assertEqual(E2M1().from_bits(0x7).to_python(), 6.0)
+        self.assertEqual(E2M1().from_bits(0xF).to_python(), -6.0)
         value = E2M1().from_fields(1, 3, 1)
         self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 3, 1))
         self.assertEqual(value.dtype, E2M1())
@@ -4450,7 +4450,7 @@ class TestE2M1Spec(unittest.TestCase):
         for invalid in (-1, 16, 1.5, "0"):
             with self.subTest(packed=invalid):
                 with self.assertRaises((TypeError, ValueError)):
-                    E2M1().value(invalid)
+                    E2M1().from_bits(invalid)
         for fields in ((2, 0, 0), (0, -1, 0), (0, 4, 0), (0, 0, -1), (0, 0, 2)):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 E2M1().from_fields(*fields)
@@ -4469,7 +4469,7 @@ class TestE2M1Spec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
         try:
             for bits in range(16):
-                runtime = E2M1().value(bits)
+                runtime = E2M1().from_bits(bits)
                 decoded = e2m1_decode(Const(runtime))
                 fields = tuple(node.evaluate().raw for node in decoded)
                 self.assertEqual(fields[:3], (bits >> 3, (bits >> 1) & 3, bits & 1))
@@ -4525,8 +4525,8 @@ class TestE2M1Spec(unittest.TestCase):
         tempdir, compiled = jit_compile(design)
 
         def run(sign_value, exponent_value, mantissa_value):
-            sign_runtime = UQ(1, 0).value(sign_value)
-            exponent_runtime = Q(8, 0).value(exponent_value & 0xFF)
+            sign_runtime = UQ(1, 0).from_bits(sign_value)
+            exponent_runtime = Q(8, 0).from_bits(exponent_value & 0xFF)
             mantissa_runtime = UQ(2, 12).from_float(mantissa_value)
             sign.load_value(sign_runtime)
             exponent.load_value(exponent_runtime)
@@ -4560,7 +4560,7 @@ class TestE2M1Spec(unittest.TestCase):
                     )
 
             for bits in range(16):
-                runtime = E2M1().value(bits)
+                runtime = E2M1().from_bits(bits)
                 exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
                 mantissa_value = (
                     runtime.mantissa / 2
@@ -4582,7 +4582,7 @@ class TestE2M1Spec(unittest.TestCase):
         @Composite(name="e2m1_encode_saturation_proof", spec=spec)
         def saturation_design():
             return e2m1_encode(
-                Const(UQ(1, 0).value(0)),
+                Const(UQ(1, 0).from_bits(0)),
                 Const(Q.from_int(5)),
                 Const(UQ.from_int(1)),
             )
@@ -4775,7 +4775,7 @@ class TestFloatFormatConversions(unittest.TestCase):
                 dtype = descriptor_type()
                 encoding_count = 128 if descriptor_type is UE4M3 else 1 << dtype.total_bits()
                 for source_bits in range(encoding_count):
-                    value = dtype.value(source_bits)
+                    value = dtype.from_bits(source_bits)
                     if math.isnan(value.to_python()):
                         expected = Float32().NaN().raw
                     elif math.isinf(value.to_python()):
@@ -4806,7 +4806,7 @@ class TestFloatFormatConversions(unittest.TestCase):
         try:
             for name, source_bits, expected_bits in cases:
                 with self.subTest(conversion=conversion.__name__, name=name):
-                    source.load_value(dtype.value(source_bits))
+                    source.load_value(dtype.from_bits(source_bits))
                     self.assertEqual(design.evaluate().raw, expected_bits)
                     self.assertEqual(compiled(source_bits), expected_bits)
         finally:
@@ -5059,8 +5059,8 @@ class TestBFloat16Add(unittest.TestCase):
             for _ in range(100):
                 lhs_bits = rng.getrandbits(16)
                 rhs_bits = rng.getrandbits(16)
-                lhs.load_value(BFloat16().value(lhs_bits))
-                rhs.load_value(BFloat16().value(rhs_bits))
+                lhs.load_value(BFloat16().from_bits(lhs_bits))
+                rhs.load_value(BFloat16().from_bits(rhs_bits))
                 self.assertEqual(
                     compiled(lhs_bits, rhs_bits),
                     design.evaluate().raw,
@@ -5124,8 +5124,8 @@ class TestBFloat16Mult(unittest.TestCase):
         lhs, rhs, design = self._make_design()
         for name, lhs_bits, rhs_bits, expected_bits in cases:
             with self.subTest(case=name):
-                lhs.load_value(BFloat16().value(lhs_bits))
-                rhs.load_value(BFloat16().value(rhs_bits))
+                lhs.load_value(BFloat16().from_bits(lhs_bits))
+                rhs.load_value(BFloat16().from_bits(rhs_bits))
                 self.assertEqual(design.evaluate().raw, expected_bits)
 
     def test_bf16_mult_matches_rne_reference_for_random_finite_inputs(self):
@@ -5161,8 +5161,8 @@ class TestBFloat16Mult(unittest.TestCase):
             for _ in range(100):
                 lhs_bits = rng.getrandbits(16)
                 rhs_bits = rng.getrandbits(16)
-                lhs.load_value(BFloat16().value(lhs_bits))
-                rhs.load_value(BFloat16().value(rhs_bits))
+                lhs.load_value(BFloat16().from_bits(lhs_bits))
+                rhs.load_value(BFloat16().from_bits(rhs_bits))
                 expected = design.evaluate().raw
                 self.assertEqual(compiled_jit(lhs_bits, rhs_bits), expected)
                 self.assertEqual(compiled_no_jit(lhs_bits, rhs_bits), expected)
@@ -5379,12 +5379,12 @@ class TestReducedWGMMA(unittest.TestCase):
             destination_zero = destination.Zero()
             cases = []
             cases.append(
-                [dtype.value(one[type(dtype)]) for dtype in value_dtypes]
+                [dtype.from_bits(one[type(dtype)]) for dtype in value_dtypes]
                 + [destination_zero]
             )
             cases.append(
                 [
-                    dtype.value(one[type(dtype)] | (0x80 if index == 0 else 0))
+                    dtype.from_bits(one[type(dtype)] | (0x80 if index == 0 else 0))
                     for index, dtype in enumerate(value_dtypes)
                 ]
                 + [destination_zero]
@@ -5393,15 +5393,15 @@ class TestReducedWGMMA(unittest.TestCase):
             for position in range(8):
                 cases.append(
                     [
-                        dtype.value(0x01 if index == position else one[type(dtype)])
+                        dtype.from_bits(0x01 if index == position else one[type(dtype)])
                         for index, dtype in enumerate(value_dtypes)
                     ]
                     + [destination_zero]
                 )
             # Exact product cancellation must leave C unchanged.
-            cancel = [dtype.value(one[type(dtype)]) for dtype in value_dtypes]
-            cancel[0] = value_dtypes[0].value(one[type(value_dtypes[0])] | 0x80)
-            cancel[1] = value_dtypes[1].value(one[type(value_dtypes[1])] | 0x80)
+            cancel = [dtype.from_bits(one[type(dtype)]) for dtype in value_dtypes]
+            cancel[0] = value_dtypes[0].from_bits(one[type(value_dtypes[0])] | 0x80)
+            cancel[1] = value_dtypes[1].from_bits(one[type(value_dtypes[1])] | 0x80)
             c_value = destination.from_fields(0, destination.exponent_bias - 3, 1)
             cases.append(cancel + [c_value])
 
@@ -5414,8 +5414,8 @@ class TestReducedWGMMA(unittest.TestCase):
                     )
 
     def test_nan_infinity_zero_product_and_overflow(self):
-        one4 = E4M3FN().value(0x38)
-        one5 = E5M2().value(0x3C)
+        one4 = E4M3FN().from_bits(0x38)
+        one5 = E5M2().from_bits(0x3C)
 
         variables, mixed = self._make_design(
             wgmma_fp32_e5m2_e4m3,
@@ -5438,7 +5438,7 @@ class TestReducedWGMMA(unittest.TestCase):
             wgmma_fp16_e4m3_e5m2,
             [E4M3FN()] * 4 + [E5M2()] * 4 + [Float16()],
         )
-        overflow_values = [E4M3FN().value(0x7E)] * 4 + [E5M2().value(0x7B)] * 4 + [Float16().Zero()]
+        overflow_values = [E4M3FN().from_bits(0x7E)] * 4 + [E5M2().from_bits(0x7B)] * 4 + [Float16().Zero()]
         self._load(variables, overflow_values)
         self.assertEqual(half.evaluate().raw, Float16().Inf().raw)
 
@@ -5452,15 +5452,15 @@ class TestReducedWGMMA(unittest.TestCase):
                 wgmma_fp16_e4m3_e5m2,
                 [E4M3FN()] * 4 + [E5M2()] * 4 + [Float16()],
                 [
-                    E4M3FN().value(0x7B),
-                    E4M3FN().value(0x9A),
-                    E4M3FN().value(0x54),
-                    E4M3FN().value(0x69),
-                    E5M2().value(0x3C),
-                    E5M2().value(0xD2),
-                    E5M2().value(0xC9),
-                    E5M2().value(0xAC),
-                    Float16().value(0xAFD0),
+                    E4M3FN().from_bits(0x7B),
+                    E4M3FN().from_bits(0x9A),
+                    E4M3FN().from_bits(0x54),
+                    E4M3FN().from_bits(0x69),
+                    E5M2().from_bits(0x3C),
+                    E5M2().from_bits(0xD2),
+                    E5M2().from_bits(0xC9),
+                    E5M2().from_bits(0xAC),
+                    Float16().from_bits(0xAFD0),
                 ],
                 0x5B39,
                 0x5B3A,
@@ -5469,15 +5469,15 @@ class TestReducedWGMMA(unittest.TestCase):
                 wgmma_fp32_e5m2_e4m3,
                 [E5M2()] * 4 + [E4M3FN()] * 4 + [Float32()],
                 [
-                    E5M2().value(0x35),
-                    E5M2().value(0xE5),
-                    E5M2().value(0x88),
-                    E5M2().value(0xC9),
-                    E4M3FN().value(0x79),
-                    E4M3FN().value(0x2A),
-                    E4M3FN().value(0xB6),
-                    E4M3FN().value(0x39),
-                    Float32().value(0xCF39B00F),
+                    E5M2().from_bits(0x35),
+                    E5M2().from_bits(0xE5),
+                    E5M2().from_bits(0x88),
+                    E5M2().from_bits(0xC9),
+                    E4M3FN().from_bits(0x79),
+                    E4M3FN().from_bits(0x2A),
+                    E4M3FN().from_bits(0xB6),
+                    E4M3FN().from_bits(0x39),
+                    Float32().from_bits(0xCF39B00F),
                 ],
                 0xCF39B010,
                 0xCF39B011,
@@ -5503,7 +5503,7 @@ class TestReducedWGMMA(unittest.TestCase):
                     for dtype in [*value_dtypes, destination]:
                         bits = 32 if isinstance(dtype, Float32) else 16 if isinstance(dtype, Float16) else 8
                         while True:
-                            value = dtype.value(rng.getrandbits(bits))
+                            value = dtype.from_bits(rng.getrandbits(bits))
                             exponent_is_special = (
                                 dtype.inf_code is not None
                                 and value.exponent == dtype.inf_code
@@ -5561,10 +5561,10 @@ class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
 
     @staticmethod
     def _load(variables, bits):
-        variables[0].load_value(UE4M3().value(bits[0]))
-        variables[1].load_value(UE4M3().value(bits[1]))
-        variables[2].load_value(E2M1().value(bits[2]))
-        variables[3].load_value(E2M1().value(bits[3]))
+        variables[0].load_value(UE4M3().from_bits(bits[0]))
+        variables[1].load_value(UE4M3().from_bits(bits[1]))
+        variables[2].load_value(E2M1().from_bits(bits[2]))
+        variables[3].load_value(E2M1().from_bits(bits[3]))
 
     def test_golden_spec_returns_fp32(self):
         ctx = SpecContext("ue4m3x2-e2m1x2-add-fp32-spec")
@@ -5654,10 +5654,10 @@ class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
         rng = random.Random(20260814)
         for _ in range(500):
             values = (
-                UE4M3().value(rng.randrange(0x80)),
-                UE4M3().value(rng.randrange(0x80)),
-                E2M1().value(rng.randrange(16)),
-                E2M1().value(rng.randrange(16)),
+                UE4M3().from_bits(rng.randrange(0x80)),
+                UE4M3().from_bits(rng.randrange(0x80)),
+                E2M1().from_bits(rng.randrange(16)),
+                E2M1().from_bits(rng.randrange(16)),
             )
             for variable, value in zip(variables, values):
                 variable.load_value(value)
@@ -5681,10 +5681,10 @@ class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
         try:
             for bits in inputs:
                 values = (
-                    UE4M3().value(bits[0]),
-                    UE4M3().value(bits[1]),
-                    E2M1().value(bits[2]),
-                    E2M1().value(bits[3]),
+                    UE4M3().from_bits(bits[0]),
+                    UE4M3().from_bits(bits[1]),
+                    E2M1().from_bits(bits[2]),
+                    E2M1().from_bits(bits[3]),
                 )
                 expected = self._reference_bits(*values)
                 self._load(variables, bits)
@@ -5739,10 +5739,10 @@ class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
 
     @staticmethod
     def _load(variables, bits):
-        variables[0].load_value(UE4M3().value(bits[0]))
-        variables[1].load_value(UE4M3().value(bits[1]))
-        variables[2].load_value(E2M1().value(bits[2]))
-        variables[3].load_value(E2M1().value(bits[3]))
+        variables[0].load_value(UE4M3().from_bits(bits[0]))
+        variables[1].load_value(UE4M3().from_bits(bits[1]))
+        variables[2].load_value(E2M1().from_bits(bits[2]))
+        variables[3].load_value(E2M1().from_bits(bits[3]))
 
     def test_golden_spec_returns_fp32(self):
         ctx = SpecContext("ue4m3x2-e2m1x2-mult-fp32-spec")
@@ -5824,10 +5824,10 @@ class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
         rng = random.Random(2)
         for _ in range(500):
             values = (
-                UE4M3().value(rng.choice(finite_ue4m3)),
-                UE4M3().value(rng.choice(finite_ue4m3)),
-                E2M1().value(rng.randrange(16)),
-                E2M1().value(rng.randrange(16)),
+                UE4M3().from_bits(rng.choice(finite_ue4m3)),
+                UE4M3().from_bits(rng.choice(finite_ue4m3)),
+                E2M1().from_bits(rng.randrange(16)),
+                E2M1().from_bits(rng.randrange(16)),
             )
             for variable, value in zip(variables, values):
                 variable.load_value(value)
@@ -5851,10 +5851,10 @@ class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
         try:
             for bits in inputs:
                 values = (
-                    UE4M3().value(bits[0]),
-                    UE4M3().value(bits[1]),
-                    E2M1().value(bits[2]),
-                    E2M1().value(bits[3]),
+                    UE4M3().from_bits(bits[0]),
+                    UE4M3().from_bits(bits[1]),
+                    E2M1().from_bits(bits[2]),
+                    E2M1().from_bits(bits[3]),
                 )
                 expected = self._reference_bits(*values)
                 self._load(variables, bits)
@@ -5908,7 +5908,7 @@ class TestBFloat16ReLU(unittest.TestCase):
         value, design = self._make_design()
         for name, input_bits, expected_bits in cases:
             with self.subTest(case=name):
-                value.load_value(BFloat16().value(input_bits))
+                value.load_value(BFloat16().from_bits(input_bits))
                 self.assertEqual(design.evaluate().raw, expected_bits)
 
     def test_bf16_relu_cpp_lowering_matches_reference_for_all_inputs(self):
@@ -5917,7 +5917,7 @@ class TestBFloat16ReLU(unittest.TestCase):
         tempdir_no_jit, compiled_no_jit = nonjit_compile(design)
         try:
             for input_bits in range(1 << 16):
-                expected = self._reference_bits(BFloat16().value(input_bits))
+                expected = self._reference_bits(BFloat16().from_bits(input_bits))
                 self.assertEqual(compiled_jit(input_bits), expected)
                 self.assertEqual(compiled_no_jit(input_bits), expected)
         finally:
@@ -7876,7 +7876,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         node = tuple_identity(
             Var(
                 name="x",
-                sign=Tuple(
+                dtype=Tuple(
                     UQ(2, 0),
                     Tuple(Bool(), UQ(1, 1)),
                 ),

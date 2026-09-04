@@ -12,7 +12,7 @@ from .basics import *
 
 def _e5m2fnuz_mantissa(x: Node) -> Op:
     def impl(value: E5M2FNUZ) -> UQ:
-        return UQ(E5M2FNUZ.mantissa_bits, 0).value(value.mantissa)
+        return UQ(E5M2FNUZ.mantissa_bits, 0).from_bits(value.mantissa)
 
     def sign(value_type: E5M2FNUZ) -> UQ:
         return UQ(E5M2FNUZ.mantissa_bits, 0)
@@ -28,7 +28,7 @@ def _e5m2fnuz_mantissa(x: Node) -> Op:
 
 def _e5m2fnuz_exponent(x: Node) -> Op:
     def impl(value: E5M2FNUZ) -> UQ:
-        return UQ(E5M2FNUZ.exponent_bits, 0).value(value.exponent)
+        return UQ(E5M2FNUZ.exponent_bits, 0).from_bits(value.exponent)
 
     def sign(value_type: E5M2FNUZ) -> UQ:
         return UQ(E5M2FNUZ.exponent_bits, 0)
@@ -44,7 +44,7 @@ def _e5m2fnuz_exponent(x: Node) -> Op:
 
 def _e5m2fnuz_sign(x: Node) -> Op:
     def impl(value: E5M2FNUZ) -> UQ:
-        return UQ(1, 0).value(value.sign)
+        return UQ(1, 0).from_bits(value.sign)
 
     def sign(value_type: E5M2FNUZ) -> UQ:
         return UQ(1, 0)
@@ -157,7 +157,7 @@ def e5m2fnuz_decode(x: Node) -> DecodedE5M2FNUZ:
         sign = _e5m2fnuz_sign(x)
         exponent = _e5m2fnuz_exponent(x)
         mantissa = _e5m2fnuz_mantissa(x)
-        bit = Const(UQ(1, 0).value(0))
+        bit = Const(UQ(1, 0).from_bits(0))
         exponent_is_nonzero = basic_or_reduce(exponent, bit.copy())
         exponent_is_zero = basic_invert(exponent_is_nonzero, bit.copy())
         mantissa_is_nonzero = basic_or_reduce(mantissa, bit.copy())
@@ -204,7 +204,7 @@ def e5m2fnuz_encodings(m_rounded: Node, e_rounded: Node):
     overflow = uq_gt(e_rounded, max_exponent)
     final_e = basic_identity(
         uq_min(e_rounded, max_exponent),
-        Const(UQ(E5M2FNUZ.exponent_bits, 0).value(0)),
+        Const(UQ(E5M2FNUZ.exponent_bits, 0).from_bits(0)),
     )
     final_m = uq_fraction_to_integer(m_rounded)
     final_m = basic_mux_2_1(

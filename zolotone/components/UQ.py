@@ -22,7 +22,7 @@ def uq_alloc(int_bits: Node,
         return result_dtype
     
     def impl(int_bits: RuntimeValue, frac_bits: RuntimeValue) -> FixedValue:
-        return result_dtype.value(0)
+        return result_dtype.from_bits(0)
     
     return Op(
         sign=sign,
@@ -35,37 +35,37 @@ def uq_alloc(int_bits: Node,
 @Primitive(name="uq_lt", spec=lambda x, y, ctx: x < y)
 def uq_lt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
-    return basic_less(aligned_x, aligned_y, out=Const(Bool().value(0)))
+    return basic_less(aligned_x, aligned_y, out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="uq_le", spec=lambda x, y, ctx: x <= y)
 def uq_le(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
-    return basic_less_or_equal(aligned_x, aligned_y, out=Const(Bool().value(0)))
+    return basic_less_or_equal(aligned_x, aligned_y, out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="uq_gt", spec=lambda x, y, ctx: x > y)
 def uq_gt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
-    return basic_greater(aligned_x, aligned_y, out=Const(Bool().value(0)))
+    return basic_greater(aligned_x, aligned_y, out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="uq_ge", spec=lambda x, y, ctx: x >= y)
 def uq_ge(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
-    return basic_greater_or_equal(aligned_x, aligned_y, out=Const(Bool().value(0)))
+    return basic_greater_or_equal(aligned_x, aligned_y, out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="uq_eq", spec=lambda x, y, ctx: x.eq(y))
 def uq_eq(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
-    return basic_equal(aligned_x, aligned_y, out=Const(Bool().value(0)))
+    return basic_equal(aligned_x, aligned_y, out=Const(Bool().from_bits(0)))
 
 
 @Primitive(name="uq_ne", spec=lambda x, y, ctx: x.ne(y))
 def uq_ne(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
-    return basic_not_equal(aligned_x, aligned_y, out=Const(Bool().value(0)))
+    return basic_not_equal(aligned_x, aligned_y, out=Const(Bool().from_bits(0)))
 
 
 def uq_aligner(x: Node,
@@ -88,14 +88,14 @@ def uq_aligner(x: Node,
             
             # frac bits extension
             if shift > 0:
-                return basic_lshift(x, Const(UQ.from_int(shift)), Const(UQ(int_bits, frac_bits).value(0)))
+                return basic_lshift(x, Const(UQ.from_int(shift)), Const(UQ(int_bits, frac_bits).from_bits(0)))
 
             # no extension
             if int_bits == x.dtype.int_bits and frac_bits == x.dtype.frac_bits:
                 return x
             
             # int bits extension
-            return basic_identity(x, Const(UQ(int_bits, frac_bits).value(0)))
+            return basic_identity(x, Const(UQ(int_bits, frac_bits).from_bits(0)))
         return make_Tuple(align(x), align(y))
     
     return impl(x, y)
@@ -127,7 +127,7 @@ def uq_fraction_to_integer(x: Node) -> Primitive:
 
     @Primitive(name="uq_fraction_to_integer", spec=spec, c_inline=True)
     def impl(x: Node):
-        return basic_identity(x=x, out=Const(UQ(frac_bits, 0).value(0)))
+        return basic_identity(x=x, out=Const(UQ(frac_bits, 0).from_bits(0)))
 
     return impl(x)
 
@@ -146,7 +146,7 @@ def uq_integer_to_fraction(x: Node) -> Primitive:
 
     @Primitive(name="uq_integer_to_fraction", spec=spec, c_inline=True)
     def impl(x: Node):
-        return basic_identity(x=x, out=Const(UQ(0, int_bits).value(0)))
+        return basic_identity(x=x, out=Const(UQ(0, int_bits).from_bits(0)))
 
     return impl(x)
 
@@ -181,7 +181,7 @@ def uq_add(x: Node, y: Node) -> Node:
     root = basic_add(
         x=x_adj,
         y=y_adj,
-        out=Const(UQ(target_int_bits, target_frac_bits).value(0)),
+        out=Const(UQ(target_int_bits, target_frac_bits).from_bits(0)),
     )
     return root
 
@@ -200,7 +200,7 @@ def uq_sub(x: Node, y: Node) -> Node:
     root = basic_sub(
         x=x_adj, 
         y=y_adj,
-        out=Const(UQ(target_int_bits, target_frac_bits).value(0)),
+        out=Const(UQ(target_int_bits, target_frac_bits).from_bits(0)),
     )
     return root
 
@@ -219,7 +219,7 @@ def uq_max(x: Node, y: Node) -> Node:
     root = basic_max(
         x=x_adj, 
         y=y_adj,
-        out=Const(UQ(target_int_bits, target_frac_bits).value(0)),
+        out=Const(UQ(target_int_bits, target_frac_bits).from_bits(0)),
     )
     return root
 
@@ -238,7 +238,7 @@ def uq_min(x: Node, y: Node) -> Node:
     root = basic_min(
         x=x_adj, 
         y=y_adj,
-        out=Const(UQ(target_int_bits, target_frac_bits).value(0)),
+        out=Const(UQ(target_int_bits, target_frac_bits).from_bits(0)),
     )
     return root
 
@@ -251,7 +251,7 @@ def uq_mul(x: Node, y: Node) -> Node:
     root = basic_mul(
         x=x,
         y=y,
-        out=Const(UQ(target_int_bits, target_frac_bits).value(0)),
+        out=Const(UQ(target_int_bits, target_frac_bits).from_bits(0)),
     )
     return root
 
@@ -276,7 +276,7 @@ def uq_rshift(x: Node, amount: Node) -> Node:
 @Primitive(name="uq_rshift_jam", spec=lambda x, amount, ctx: x * (ctx.two() ** (-amount)))
 def uq_rshift_jam(x: Node, amount: Node) -> Node:
     one = Const(
-        UQ(x.dtype.int_bits, x.dtype.frac_bits).value(1)
+        UQ(x.dtype.int_bits, x.dtype.frac_bits).from_bits(1)
     )
     shifted_bit_mask = basic_sub(
         basic_lshift(
@@ -288,7 +288,7 @@ def uq_rshift_jam(x: Node, amount: Node) -> Node:
         out=x.copy(),
     )
     sticky_masked_bits = basic_and(x, shifted_bit_mask, out=x.copy())
-    sticky_bit = basic_or_reduce(sticky_masked_bits, Const(UQ(1, 0).value(0)))
+    sticky_bit = basic_or_reduce(sticky_masked_bits, Const(UQ(1, 0).from_bits(0)))
     return basic_or(uq_rshift(x, amount), sticky_bit, x.copy())
 
 
@@ -318,7 +318,7 @@ def uq_select(x: Node, start: int, end: int) -> Node:
     
     @Primitive(name="uq_select", spec=spec, c_inline=True)
     def impl(x: Node) -> Node:
-        out = Const(UQ(int_bits, frac_bits).value(0))
+        out = Const(UQ(int_bits, frac_bits).from_bits(0))
         root = basic_select(x, start, end, out)
         return root
     
@@ -369,10 +369,10 @@ def uq_split(x: Node, idx: int) -> Node:
     
     @Primitive(name="uq_split", spec=spec)
     def impl(x: Node) -> Node:
-        lo = Const(UQ(lo_int_bits, lo_frac_bits).value(0))
+        lo = Const(UQ(lo_int_bits, lo_frac_bits).from_bits(0))
         lo = basic_select(x, idx - 1, 0, lo)
         
-        hi = Const(UQ(hi_int_bits, hi_frac_bits).value(0))
+        hi = Const(UQ(hi_int_bits, hi_frac_bits).from_bits(0))
         hi = basic_select(x, total_bits - 1, idx, hi)
         
         return make_Tuple(lo, hi)
@@ -390,7 +390,7 @@ def uq_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
     
     @Primitive(name="uq_resize", spec=lambda x, ctx: x)
     def impl(x: Node) -> Node:
-        out = Const(UQ(int_bits, frac_bits).value(0))
+        out = Const(UQ(int_bits, frac_bits).from_bits(0))
         if frac_shift > 0:
             return basic_lshift(
                 x=x,
@@ -409,4 +409,4 @@ def uq_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
 
 @Primitive(name="uq_is_zero", spec=lambda x, ctx: x.eq(ctx.zero()))
 def uq_is_zero(x: Node) -> Node:
-    return basic_invert(basic_or_reduce(x, Const(UQ(1, 0).value(0))), Const(UQ(1, 0).value(0)))
+    return basic_invert(basic_or_reduce(x, Const(UQ(1, 0).from_bits(0))), Const(UQ(1, 0).from_bits(0)))

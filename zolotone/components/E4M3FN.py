@@ -11,7 +11,7 @@ from .basics import *
 
 def _e4m3fn_mantissa(x: Node) -> Op:
     def impl(x: E4M3FN) -> UQ:
-        return UQ(E4M3FN.mantissa_bits, 0).value(x.mantissa)
+        return UQ(E4M3FN.mantissa_bits, 0).from_bits(x.mantissa)
 
     def sign(x: E4M3FN) -> UQ:
         return UQ(E4M3FN.mantissa_bits, 0)
@@ -27,7 +27,7 @@ def _e4m3fn_mantissa(x: Node) -> Op:
 
 def _e4m3fn_exponent(x: Node) -> Op:
     def impl(x: E4M3FN) -> UQ:
-        return UQ(E4M3FN.exponent_bits, 0).value(x.exponent)
+        return UQ(E4M3FN.exponent_bits, 0).from_bits(x.exponent)
 
     def sign(x: E4M3FN) -> UQ:
         return UQ(E4M3FN.exponent_bits, 0)
@@ -43,7 +43,7 @@ def _e4m3fn_exponent(x: Node) -> Op:
 
 def _e4m3fn_sign(x: Node) -> Op:
     def impl(x: E4M3FN) -> UQ:
-        return UQ(1, 0).value(x.sign)
+        return UQ(1, 0).from_bits(x.sign)
 
     def sign(x: E4M3FN) -> UQ:
         return UQ(1, 0)
@@ -162,7 +162,7 @@ def e4m3fn_decode(x: Node) -> DecodedE4M3FN:
         exponent = _e4m3fn_exponent(x)
         mantissa = _e4m3fn_mantissa(x)
         
-        bit = UQ(1, 0).value(0)
+        bit = UQ(1, 0).from_bits(0)
         mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(bit))
         mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(bit))
         mantissa_is_all_ones = basic_and_reduce(mantissa, out=Const(bit))
@@ -216,21 +216,21 @@ def e4m3fn_encodings(m_rounded: Node, e_rounded: Node):
     clamped_e_wide = uq_min(e_rounded, max_exponent)
     final_e = basic_identity(
         clamped_e_wide,
-        Const(UQ(E4M3FN.exponent_bits, 0).value(0)),
+        Const(UQ(E4M3FN.exponent_bits, 0).from_bits(0)),
     )
     final_m = uq_fraction_to_integer(m_rounded)
     
     exponent_is_15 = uq_eq(final_e, max_exponent)
-    mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(1, 0).value(0)))
+    mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(1, 0).from_bits(0)))
     reserved_nan = basic_and(
         exponent_is_15,
         mantissa_is_7,
-        Const(UQ(1, 0).value(0)),
+        Const(UQ(1, 0).from_bits(0)),
     )
     saturate = basic_or(
         exponent_overflow,
         reserved_nan,
-        Const(UQ(1, 0).value(0)),
+        Const(UQ(1, 0).from_bits(0)),
     )
     final_m = basic_mux_2_1(
         saturate,

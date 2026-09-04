@@ -23,7 +23,7 @@ class MathBool(Expr):
     @classmethod
     def Var(cls, name: StringLike) -> MathBool: ...
     
-    @method(egg_fn="Boolrue")
+    @method(egg_fn="BoolTrue")
     @classmethod
     def True_(cls) -> MathBool: ...
     
