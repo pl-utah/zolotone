@@ -65,11 +65,7 @@ def wgmma_fp32_e4m3_e4m3(
         if_then_else(
             bit_or(A[i].is_zero, B[i].is_zero),
             Const(
-                UQ(
-                    0,
-                    product_exponents[i].node_type.int_bits,
-                    product_exponents[i].node_type.frac_bits,
-                )
+                UQ(product_exponents[i].dtype.int_bits, product_exponents[i].dtype.frac_bits).value(0)
             ),
             product_exponents[i],
         )
@@ -126,11 +122,7 @@ def wgmma_fp32_e4m3_e4m3(
     product_exponent = if_then_else(
         q_is_zero(product_sum),
         Const(
-            UQ(
-                0,
-                product_exponent.node_type.int_bits,
-                product_exponent.node_type.frac_bits,
-            )
+            UQ(product_exponent.dtype.int_bits, product_exponent.dtype.frac_bits).value(0)
         ),
         product_exponent,
     )
@@ -140,14 +132,14 @@ def wgmma_fp32_e4m3_e4m3(
     # Add G/R/S positions, then use jam only where the product sum meets C.
     product_sum_with_grs = q_resize(
         product_sum,
-        product_sum.node_type.int_bits,
-        product_sum.node_type.frac_bits + 3,
+        product_sum.dtype.int_bits,
+        product_sum.dtype.frac_bits + 3,
     )
     c_significand = effective_significand(C)
     signed_c = q_resize(
         q_add_sign(uq_to_q(c_significand), C.sign),
-        product_sum_with_grs.node_type.int_bits,
-        product_sum_with_grs.node_type.frac_bits,
+        product_sum_with_grs.dtype.int_bits,
+        product_sum_with_grs.dtype.frac_bits,
     )
     aligned_product_sum = q_rshift_jam(
         product_sum_with_grs,
@@ -166,20 +158,20 @@ def wgmma_fp32_e4m3_e4m3(
 
     return if_then_else(
         encode_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         if_then_else(
             encode_ninf,
-            Const(Float32.nInf()),
-            if_then_else(encode_pinf, Const(Float32.Inf()), finite_result),
+            Const(Float32().nInf()),
+            if_then_else(encode_pinf, Const(Float32().Inf()), finite_result),
         ),
     )
 
 
 if __name__ == "__main__":
     design = wgmma_fp32_e4m3_e4m3(
-        *[Var(name=f"a{index}", sign=E4M3FNT()) for index in range(N)],
-        *[Var(name=f"b{index}", sign=E4M3FNT()) for index in range(N)],
-        Var(name="c", sign=Float32T()),
+        *[Var(name=f"a{index}", dtype=E4M3FN()) for index in range(N)],
+        *[Var(name=f"b{index}", dtype=E4M3FN()) for index in range(N)],
+        Var(name="c", dtype=Float32()),
     )
     design.check_determinism()
     design.check_spec()

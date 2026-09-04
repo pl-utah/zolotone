@@ -11,10 +11,10 @@ from .basics import *
 
 def _e4m3fn_mantissa(x: Node) -> Op:
     def impl(x: E4M3FN) -> UQ:
-        return UQ(x.mantissa, E4M3FN.mantissa_bits, 0)
+        return UQ(E4M3FN.mantissa_bits, 0).value(x.mantissa)
 
-    def sign(x: E4M3FNT) -> UQT:
-        return UQT(E4M3FN.mantissa_bits, 0)
+    def sign(x: E4M3FN) -> UQ:
+        return UQ(E4M3FN.mantissa_bits, 0)
 
     return Op(
         impl=impl,
@@ -27,10 +27,10 @@ def _e4m3fn_mantissa(x: Node) -> Op:
 
 def _e4m3fn_exponent(x: Node) -> Op:
     def impl(x: E4M3FN) -> UQ:
-        return UQ(x.exponent, E4M3FN.exponent_bits, 0)
+        return UQ(E4M3FN.exponent_bits, 0).value(x.exponent)
 
-    def sign(x: E4M3FNT) -> UQT:
-        return UQT(E4M3FN.exponent_bits, 0)
+    def sign(x: E4M3FN) -> UQ:
+        return UQ(E4M3FN.exponent_bits, 0)
 
     return Op(
         impl=impl,
@@ -43,10 +43,10 @@ def _e4m3fn_exponent(x: Node) -> Op:
 
 def _e4m3fn_sign(x: Node) -> Op:
     def impl(x: E4M3FN) -> UQ:
-        return UQ(x.sign, 1, 0)
+        return UQ(1, 0).value(x.sign)
 
-    def sign(x: E4M3FNT) -> UQT:
-        return UQT(1, 0)
+    def sign(x: E4M3FN) -> UQ:
+        return UQ(1, 0)
 
     return Op(
         impl=impl,
@@ -59,26 +59,26 @@ def _e4m3fn_sign(x: Node) -> Op:
 
 def _e4m3fn_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
     def sign(
-        sign_bit: StaticType,
-        exponent: StaticType,
-        mantissa: StaticType,
-    ) -> E4M3FNT:
-        return E4M3FNT()
+        sign_bit: DataType,
+        exponent: DataType,
+        mantissa: DataType,
+    ) -> E4M3FN:
+        return E4M3FN()
     
     def impl(
-        sign_bit: RuntimeType,
-        exponent: RuntimeType,
-        mantissa: RuntimeType,
+        sign_bit: RuntimeValue,
+        exponent: RuntimeValue,
+        mantissa: RuntimeValue,
     ) -> E4M3FN:
-        return E4M3FN.from_fields(sign_bit.val, exponent.val, mantissa.val)
+        return E4M3FN().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
     
     return Op(
         sign=sign,
         impl=impl,
         c_lowering=lambda args, jittable: (
-            f"(({E4M3FNT().to_cpp_type(jittable=jittable)}({args[0]}) << 7) | "
-            f"({E4M3FNT().to_cpp_type(jittable=jittable)}({args[1]}) << 3) | "
-            f"{E4M3FNT().to_cpp_type(jittable=jittable)}({args[2]}))"
+            f"(({E4M3FN().to_cpp_type(jittable=jittable)}({args[0]}) << 7) | "
+            f"({E4M3FN().to_cpp_type(jittable=jittable)}({args[1]}) << 3) | "
+            f"{E4M3FN().to_cpp_type(jittable=jittable)}({args[2]}))"
         ),
         args=[sign_bit, exponent, mantissa],
         name="_e4m3fn_alloc",
@@ -162,7 +162,7 @@ def e4m3fn_decode(x: Node) -> DecodedE4M3FN:
         exponent = _e4m3fn_exponent(x)
         mantissa = _e4m3fn_mantissa(x)
         
-        bit = UQ(0, 1, 0)
+        bit = UQ(1, 0).value(0)
         mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(bit))
         mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(bit))
         mantissa_is_all_ones = basic_and_reduce(mantissa, out=Const(bit))
@@ -216,21 +216,21 @@ def e4m3fn_encodings(m_rounded: Node, e_rounded: Node):
     clamped_e_wide = uq_min(e_rounded, max_exponent)
     final_e = basic_identity(
         clamped_e_wide,
-        Const(UQ(0, E4M3FN.exponent_bits, 0)),
+        Const(UQ(E4M3FN.exponent_bits, 0).value(0)),
     )
     final_m = uq_fraction_to_integer(m_rounded)
     
     exponent_is_15 = uq_eq(final_e, max_exponent)
-    mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(0, 1, 0)))
+    mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(1, 0).value(0)))
     reserved_nan = basic_and(
         exponent_is_15,
         mantissa_is_7,
-        Const(UQ(0, 1, 0)),
+        Const(UQ(1, 0).value(0)),
     )
     saturate = basic_or(
         exponent_overflow,
         reserved_nan,
-        Const(UQ(0, 1, 0)),
+        Const(UQ(1, 0).value(0)),
     )
     final_m = basic_mux_2_1(
         saturate,
@@ -254,7 +254,7 @@ def e4m3fn_encode_spec(s, e, m, ctx):
 def e4m3fn_encode(s: Node, e: Node, m: Node) -> Node:
     """Encode sign, biased exponent, and unsigned magnitude using RNE."""
     
-    if e.node_type.frac_bits != 0:
+    if e.dtype.frac_bits != 0:
         raise ValueError("e4m3fn_encode exponent must have zero fractional bits")
     
     encode_exact_zero = uq_is_zero(m)
@@ -272,6 +272,6 @@ def e4m3fn_encode(s: Node, e: Node, m: Node) -> Node:
     final_m, final_e = e4m3fn_encodings(rounded_m, rounded_e)
     return if_then_else(
         encode_exact_zero,
-        Const(E4M3FN.Zero()),
+        Const(E4M3FN().Zero()),
         e4m3fn_pack(s, final_e, final_m),
     )

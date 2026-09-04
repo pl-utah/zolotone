@@ -12,10 +12,10 @@ from .basics import *
 
 def _e5m2fnuz_mantissa(x: Node) -> Op:
     def impl(value: E5M2FNUZ) -> UQ:
-        return UQ(value.mantissa, E5M2FNUZ.mantissa_bits, 0)
+        return UQ(E5M2FNUZ.mantissa_bits, 0).value(value.mantissa)
 
-    def sign(value_type: E5M2FNUZT) -> UQT:
-        return UQT(E5M2FNUZ.mantissa_bits, 0)
+    def sign(value_type: E5M2FNUZ) -> UQ:
+        return UQ(E5M2FNUZ.mantissa_bits, 0)
 
     return Op(
         impl=impl,
@@ -28,10 +28,10 @@ def _e5m2fnuz_mantissa(x: Node) -> Op:
 
 def _e5m2fnuz_exponent(x: Node) -> Op:
     def impl(value: E5M2FNUZ) -> UQ:
-        return UQ(value.exponent, E5M2FNUZ.exponent_bits, 0)
+        return UQ(E5M2FNUZ.exponent_bits, 0).value(value.exponent)
 
-    def sign(value_type: E5M2FNUZT) -> UQT:
-        return UQT(E5M2FNUZ.exponent_bits, 0)
+    def sign(value_type: E5M2FNUZ) -> UQ:
+        return UQ(E5M2FNUZ.exponent_bits, 0)
 
     return Op(
         impl=impl,
@@ -44,10 +44,10 @@ def _e5m2fnuz_exponent(x: Node) -> Op:
 
 def _e5m2fnuz_sign(x: Node) -> Op:
     def impl(value: E5M2FNUZ) -> UQ:
-        return UQ(value.sign, 1, 0)
+        return UQ(1, 0).value(value.sign)
 
-    def sign(value_type: E5M2FNUZT) -> UQT:
-        return UQT(1, 0)
+    def sign(value_type: E5M2FNUZ) -> UQ:
+        return UQ(1, 0)
 
     return Op(
         impl=impl,
@@ -60,26 +60,26 @@ def _e5m2fnuz_sign(x: Node) -> Op:
 
 def _e5m2fnuz_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
     def sign(
-        sign_bit: StaticType,
-        exponent: StaticType,
-        mantissa: StaticType,
-    ) -> E5M2FNUZT:
-        return E5M2FNUZT()
+        sign_bit: DataType,
+        exponent: DataType,
+        mantissa: DataType,
+    ) -> E5M2FNUZ:
+        return E5M2FNUZ()
 
     def impl(
-        sign_bit: RuntimeType,
-        exponent: RuntimeType,
-        mantissa: RuntimeType,
+        sign_bit: RuntimeValue,
+        exponent: RuntimeValue,
+        mantissa: RuntimeValue,
     ) -> E5M2FNUZ:
-        return E5M2FNUZ.from_fields(sign_bit.val, exponent.val, mantissa.val)
+        return E5M2FNUZ().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
 
     return Op(
         sign=sign,
         impl=impl,
         c_lowering=lambda args, jittable: (
-            f"(({E5M2FNUZT().to_cpp_type(jittable=jittable)}({args[0]}) << 7) | "
-            f"({E5M2FNUZT().to_cpp_type(jittable=jittable)}({args[1]}) << 2) | "
-            f"{E5M2FNUZT().to_cpp_type(jittable=jittable)}({args[2]}))"
+            f"(({E5M2FNUZ().to_cpp_type(jittable=jittable)}({args[0]}) << 7) | "
+            f"({E5M2FNUZ().to_cpp_type(jittable=jittable)}({args[1]}) << 2) | "
+            f"{E5M2FNUZ().to_cpp_type(jittable=jittable)}({args[2]}))"
         ),
         args=[sign_bit, exponent, mantissa],
         name="_e5m2fnuz_alloc",
@@ -157,7 +157,7 @@ def e5m2fnuz_decode(x: Node) -> DecodedE5M2FNUZ:
         sign = _e5m2fnuz_sign(x)
         exponent = _e5m2fnuz_exponent(x)
         mantissa = _e5m2fnuz_mantissa(x)
-        bit = Const(UQ(0, 1, 0))
+        bit = Const(UQ(1, 0).value(0))
         exponent_is_nonzero = basic_or_reduce(exponent, bit.copy())
         exponent_is_zero = basic_invert(exponent_is_nonzero, bit.copy())
         mantissa_is_nonzero = basic_or_reduce(mantissa, bit.copy())
@@ -204,7 +204,7 @@ def e5m2fnuz_encodings(m_rounded: Node, e_rounded: Node):
     overflow = uq_gt(e_rounded, max_exponent)
     final_e = basic_identity(
         uq_min(e_rounded, max_exponent),
-        Const(UQ(0, E5M2FNUZ.exponent_bits, 0)),
+        Const(UQ(E5M2FNUZ.exponent_bits, 0).value(0)),
     )
     final_m = uq_fraction_to_integer(m_rounded)
     final_m = basic_mux_2_1(
@@ -229,7 +229,7 @@ def e5m2fnuz_encode_spec(s, e, m, ctx):
 def e5m2fnuz_encode(s: Node, e: Node, m: Node) -> Node:
     """Encode using RNE, canonical unsigned zero, and finite saturation."""
 
-    if e.node_type.frac_bits != 0:
+    if e.dtype.frac_bits != 0:
         raise ValueError("e5m2fnuz_encode exponent must have zero fractional bits")
     encode_exact_zero = uq_is_zero(m)
     normalized_m, normalized_e = normalize_to_1_xxx(m, e)
@@ -246,6 +246,6 @@ def e5m2fnuz_encode(s: Node, e: Node, m: Node) -> Node:
     use_zero = bit_or(encode_exact_zero, rounded_zero)
     return if_then_else(
         use_zero,
-        Const(E5M2FNUZ.Zero()),
+        Const(E5M2FNUZ().Zero()),
         e5m2fnuz_pack(s, final_e, final_m),
     )

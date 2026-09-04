@@ -62,8 +62,8 @@ def wgmma_fp16_e4m3_e5m2(
     product_signs = [bit_xor(A[i].sign, B[i].sign) for i in range(N)]
     positive_infinity = bit_and(C.is_inf, bit_neg(C.sign))
     negative_infinity = bit_and(C.is_inf, C.sign)
-    invalid_product = Const(UQ(0, 1, 0))
-    encode_nan = Const(UQ(0, 1, 0))
+    invalid_product = Const(UQ(1, 0).value(0))
+    encode_nan = Const(UQ(1, 0).value(0))
     for i in range(N):
         positive_infinity = bit_or(
             positive_infinity,
@@ -100,11 +100,7 @@ def wgmma_fp16_e4m3_e5m2(
         if_then_else(
             bit_or(A[i].is_zero, B[i].is_zero),
             Const(
-                UQ(
-                    0,
-                    product_exponents[i].node_type.int_bits,
-                    product_exponents[i].node_type.frac_bits,
-                )
+                UQ(product_exponents[i].dtype.int_bits, product_exponents[i].dtype.frac_bits).value(0)
             ),
             product_exponents[i],
         )
@@ -156,11 +152,7 @@ def wgmma_fp16_e4m3_e5m2(
     product_exponent = if_then_else(
         q_is_zero(product_sum),
         Const(
-            UQ(
-                0,
-                maximum_product_exponent.node_type.int_bits,
-                maximum_product_exponent.node_type.frac_bits,
-            )
+            UQ(maximum_product_exponent.dtype.int_bits, maximum_product_exponent.dtype.frac_bits).value(0)
         ),
         maximum_product_exponent,
     )
@@ -179,21 +171,21 @@ def wgmma_fp16_e4m3_e5m2(
     )
     c_exponent = if_then_else(
         C.is_zero,
-        Const(UQ(0, c_exponent.node_type.int_bits, 0)),
+        Const(UQ(c_exponent.dtype.int_bits, 0).value(0)),
         c_exponent,
     )
     common_exponent = uq_max(product_exponent, c_exponent)
 
     product_sum_with_grs = q_resize(
         product_sum,
-        product_sum.node_type.int_bits,
-        product_sum.node_type.frac_bits + 3,
+        product_sum.dtype.int_bits,
+        product_sum.dtype.frac_bits + 3,
     )
     c_significand = effective_significand(C)
     signed_c = q_resize(
         q_add_sign(uq_to_q(c_significand), C.sign),
-        product_sum_with_grs.node_type.int_bits,
-        product_sum_with_grs.node_type.frac_bits,
+        product_sum_with_grs.dtype.int_bits,
+        product_sum_with_grs.dtype.frac_bits,
     )
     aligned_product_sum = q_rshift_jam(
         product_sum_with_grs,
@@ -222,20 +214,20 @@ def wgmma_fp16_e4m3_e5m2(
 
     return if_then_else(
         encode_nan,
-        Const(Float16.NaN()),
+        Const(Float16().NaN()),
         if_then_else(
             encode_ninf,
-            Const(Float16.nInf()),
-            if_then_else(encode_pinf, Const(Float16.Inf()), finite_result),
+            Const(Float16().nInf()),
+            if_then_else(encode_pinf, Const(Float16().Inf()), finite_result),
         ),
     )
 
 
 if __name__ == "__main__":
     design = wgmma_fp16_e4m3_e5m2(
-        *[Var(name=f"a{index}", sign=E4M3FNT()) for index in range(N)],
-        *[Var(name=f"b{index}", sign=E5M2T()) for index in range(N)],
-        Var(name="c", sign=Float16T()),
+        *[Var(name=f"a{index}", dtype=E4M3FN()) for index in range(N)],
+        *[Var(name=f"b{index}", dtype=E5M2()) for index in range(N)],
+        Var(name="c", dtype=Float16()),
     )
     design.check_determinism()
     design.check_spec()

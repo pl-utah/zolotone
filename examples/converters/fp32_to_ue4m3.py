@@ -30,13 +30,13 @@ def fp32_to_ue4m3(x: Node) -> Node:
     result = ue4m3_encode(target_exponent, significand)
     result = if_then_else(
         X.is_zero,
-        Const(UE4M3.Zero()),
+        Const(UE4M3().Zero()),
         result,
     )
     result = if_then_else(
         X.is_inf,
         Const(
-            UE4M3.from_fields(
+            UE4M3().from_fields(
                 exponent=UE4M3.max_finite_code,
                 mantissa=UE4M3.max_finite_mantissa,
             )
@@ -45,13 +45,13 @@ def fp32_to_ue4m3(x: Node) -> Node:
     )
     return if_then_else(
         X.is_nan,
-        Const(UE4M3.NaN()),
+        Const(UE4M3().NaN()),
         result,
     )
 
 
 if __name__ == "__main__":
-    cast = fp32_to_ue4m3(Var(name="x", sign=Float32T()))
+    cast = fp32_to_ue4m3(Var(name="x", dtype=Float32()))
 
     cast.check_determinism()
     cast.check_spec()

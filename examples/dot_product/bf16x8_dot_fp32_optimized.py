@@ -16,7 +16,7 @@ def _est_global_shift(E_max: Node, E_p: Node) -> Node:
     out_frac_bits = Const(UQ.from_int(0))
     out = uq_alloc(out_int_bits, out_frac_bits)
 
-    return basic_concat(uq_sub(E_max, E_p), Const(UQ(0, s, 0)), out)
+    return basic_concat(uq_sub(E_max, E_p), Const(UQ(s, 0).value(0)), out)
 
 
 def spec_est_local_shift(E_trail, ctx):
@@ -139,11 +139,7 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     # A zero product has no meaningful exponent and must not control
     # alignment of the nonzero products.
     zero_product_exponent = Const(
-        UQ(
-            0,
-            E_p[0].node_type.int_bits,
-            E_p[0].node_type.frac_bits,
-        )
+        UQ(E_p[0].dtype.int_bits, E_p[0].dtype.frac_bits).value(0)
     )
     E_p_for_alignment = [
         if_then_else(
@@ -211,13 +207,13 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
 
     return if_then_else(
         encode_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         if_then_else(
             encode_ninf,
-            Const(Float32.nInf()),
+            Const(Float32().nInf()),
             if_then_else(
                 encode_pinf,
-                Const(Float32.Inf()),
+                Const(Float32().Inf()),
                 finite_result,
             ),
         ),
@@ -229,17 +225,17 @@ if __name__ == '__main__':
     from pprint import pprint
     # Compile design
     a = [
-        Var(name="a_0", sign=BFloat16T()),
-        Var(name="a_1", sign=BFloat16T()),
-        Var(name="a_2", sign=BFloat16T()),
-        Var(name="a_3", sign=BFloat16T()),
+        Var(name="a_0", dtype=BFloat16()),
+        Var(name="a_1", dtype=BFloat16()),
+        Var(name="a_2", dtype=BFloat16()),
+        Var(name="a_3", dtype=BFloat16()),
     ]
     
     b = [
-        Var(name="b_0", sign=BFloat16T()),
-        Var(name="b_1", sign=BFloat16T()),
-        Var(name="b_2", sign=BFloat16T()),
-        Var(name="b_3", sign=BFloat16T()),
+        Var(name="b_0", dtype=BFloat16()),
+        Var(name="b_1", dtype=BFloat16()),
+        Var(name="b_2", dtype=BFloat16()),
+        Var(name="b_3", dtype=BFloat16()),
     ]
     
     design = bf16x8_dot_fp32_optimized(*a, *b)

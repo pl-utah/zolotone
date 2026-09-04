@@ -19,17 +19,17 @@ def bf16_relu(x: Node) -> Node:
 
     return if_then_else(
         X.is_nan,
-        Const(BFloat16.NaN()),
+        Const(BFloat16().NaN()),
         if_then_else(
             X.sign,
-            Const(BFloat16.Zero()),
+            Const(BFloat16().Zero()),
             x,
         ),
     )
 
 
 if __name__ == "__main__":
-    relu = bf16_relu(Var(name="x", sign=BFloat16T()))
+    relu = bf16_relu(Var(name="x", dtype=BFloat16()))
 
     relu.check_determinism()
     relu.check_spec()

@@ -34,27 +34,27 @@ def fp32_to_e2m1(x: Node) -> Node:
     encode_negative_zero = bit_and(X.is_zero, X.sign)
     result = if_then_else(
         encode_negative_zero,
-        Const(E2M1.nZero()),
+        Const(E2M1().nZero()),
         result,
     )
 
     encode_positive_infinity = bit_and(X.is_inf, bit_neg(X.sign))
     result = if_then_else(
         encode_positive_infinity,
-        Const(E2M1.from_fields(sign=0, exponent=3, mantissa=1)),
+        Const(E2M1().from_fields(sign=0, exponent=3, mantissa=1)),
         result,
     )
 
     encode_negative_infinity = bit_and(X.is_inf, X.sign)
     result = if_then_else(
         encode_negative_infinity,
-        Const(E2M1.from_fields(sign=1, exponent=3, mantissa=1)),
+        Const(E2M1().from_fields(sign=1, exponent=3, mantissa=1)),
         result,
     )
 
     result = if_then_else(
         X.is_nan,
-        Const(E2M1.from_fields(sign=0, exponent=3, mantissa=1)),
+        Const(E2M1().from_fields(sign=0, exponent=3, mantissa=1)),
         result,
     )
     return result
@@ -62,7 +62,7 @@ def fp32_to_e2m1(x: Node) -> Node:
 
 if __name__ == "__main__":
     cast = fp32_to_e2m1(
-        Var(name="x", sign=Float32T()),
+        Var(name="x", dtype=Float32()),
     )
 
     cast.check_determinism()

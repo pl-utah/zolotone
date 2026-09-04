@@ -30,7 +30,7 @@ def e5m2fnuz_to_fp32(x: Node) -> Node:
 
     result = if_then_else(
         X.is_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         result,
     )
     return result
@@ -38,7 +38,7 @@ def e5m2fnuz_to_fp32(x: Node) -> Node:
 
 if __name__ == "__main__":
     cast = e5m2fnuz_to_fp32(
-        Var(name="x", sign=E5M2FNUZT()),
+        Var(name="x", dtype=E5M2FNUZ()),
     )
 
     cast.check_determinism()

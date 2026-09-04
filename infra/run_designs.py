@@ -40,7 +40,7 @@ from examples.arithmetic.ue4m3x2_e2m1x2_mult_fp32 import (
 from examples.converters import (
     CONVERTER_FORMATS,
     CONVERTER_REGISTRY,
-    FORMAT_STATIC_TYPES,
+    FORMAT_DTYPES,
 )
 from examples.dot_product.bf16x8_dot_fp32_conventional import (
     bf16x8_dot_fp32_conventional,
@@ -50,15 +50,15 @@ from examples.dot_product.wgmma_fp16_e4m3_e5m2 import wgmma_fp16_e4m3_e5m2
 from examples.dot_product.wgmma_fp32_e4m3_e4m3 import wgmma_fp32_e4m3_e4m3
 from examples.dot_product.wgmma_fp32_e5m2_e4m3 import wgmma_fp32_e5m2_e4m3
 from zolotone import (
-    BFloat16T,
-    E2M1T,
-    E4M3FNT,
-    E5M2T,
-    Float16T,
-    Float32T,
+    BFloat16,
+    E2M1,
+    E4M3FN,
+    E5M2,
+    Float16,
+    Float32,
     Node,
-    QT,
-    UE4M3T,
+    Q,
+    UE4M3,
     Var,
 )
 from zolotone.ast.parallel_verification import MAX_WORKERS_ENV
@@ -73,31 +73,31 @@ class DesignCase:
 
 
 def _build_csa_tree4() -> Node:
-    args = [Var(name=f"a_{index}", sign=QT(10, 10)) for index in range(4)]
+    args = [Var(name=f"a_{index}", dtype=Q(10, 10)) for index in range(4)]
     return CSA_tree4(*args)
 
 
 def _build_bf16_add() -> Node:
     return bf16_add(
-        Var(name="a", sign=BFloat16T()),
-        Var(name="b", sign=BFloat16T()),
+        Var(name="a", dtype=BFloat16()),
+        Var(name="b", dtype=BFloat16()),
     )
 
 
 def _build_bf16_mult() -> Node:
     return bf16_mult(
-        Var(name="a", sign=BFloat16T()),
-        Var(name="b", sign=BFloat16T()),
+        Var(name="a", dtype=BFloat16()),
+        Var(name="b", dtype=BFloat16()),
     )
 
 
 def _build_bf16_relu() -> Node:
-    return bf16_relu(Var(name="x", sign=BFloat16T()))
+    return bf16_relu(Var(name="x", dtype=BFloat16()))
 
 
 def _build_converter(name: str) -> Node:
     source_name, _ = CONVERTER_FORMATS[name]
-    source = Var(name="x", sign=FORMAT_STATIC_TYPES[source_name]())
+    source = Var(name="x", dtype=FORMAT_DTYPES[source_name]())
     return CONVERTER_REGISTRY[name](source)
 
 
@@ -111,40 +111,40 @@ def _converter_design_case(name: str) -> DesignCase:
 
 def _build_fp32_add() -> Node:
     return fp32_add(
-        Var(name="a", sign=Float32T()),
-        Var(name="b", sign=Float32T()),
+        Var(name="a", dtype=Float32()),
+        Var(name="b", dtype=Float32()),
     )
 
 
 def _build_fp32_mult() -> Node:
     return fp32_mult(
-        Var(name="a", sign=Float32T()),
-        Var(name="b", sign=Float32T()),
+        Var(name="a", dtype=Float32()),
+        Var(name="b", dtype=Float32()),
     )
 
 
 def _build_ue4m3x2_e2m1x2_mult_fp32() -> Node:
     return ue4m3x2_e2m1x2_mult_fp32(
-        Var(name="a0", sign=UE4M3T()),
-        Var(name="a1", sign=UE4M3T()),
-        Var(name="b0", sign=E2M1T()),
-        Var(name="b1", sign=E2M1T()),
+        Var(name="a0", dtype=UE4M3()),
+        Var(name="a1", dtype=UE4M3()),
+        Var(name="b0", dtype=E2M1()),
+        Var(name="b1", dtype=E2M1()),
     )
 
 
 def _build_ue4m3x2_e2m1x2_add_fp32() -> Node:
     return ue4m3x2_e2m1x2_add_fp32(
-        Var(name="scale0", sign=UE4M3T()),
-        Var(name="scale1", sign=UE4M3T()),
-        Var(name="x0", sign=E2M1T()),
-        Var(name="x1", sign=E2M1T()),
+        Var(name="scale0", dtype=UE4M3()),
+        Var(name="scale1", dtype=UE4M3()),
+        Var(name="x0", dtype=E2M1()),
+        Var(name="x1", dtype=E2M1()),
     )
 
 
 def _dot_product_args() -> list[Var]:
     return [
-        *[Var(name=f"a_{index}", sign=BFloat16T()) for index in range(4)],
-        *[Var(name=f"b_{index}", sign=BFloat16T()) for index in range(4)],
+        *[Var(name=f"a_{index}", dtype=BFloat16()) for index in range(4)],
+        *[Var(name=f"b_{index}", dtype=BFloat16()) for index in range(4)],
     ]
 
 
@@ -158,25 +158,25 @@ def _build_optimized_dot_product() -> Node:
 
 def _build_wgmma_fp32_e4m3_e4m3() -> Node:
     return wgmma_fp32_e4m3_e4m3(
-        *[Var(name=f"a{index}", sign=E4M3FNT()) for index in range(4)],
-        *[Var(name=f"b{index}", sign=E4M3FNT()) for index in range(4)],
-        Var(name="c", sign=Float32T()),
+        *[Var(name=f"a{index}", dtype=E4M3FN()) for index in range(4)],
+        *[Var(name=f"b{index}", dtype=E4M3FN()) for index in range(4)],
+        Var(name="c", dtype=Float32()),
     )
 
 
 def _build_wgmma_fp32_e5m2_e4m3() -> Node:
     return wgmma_fp32_e5m2_e4m3(
-        *[Var(name=f"a{index}", sign=E5M2T()) for index in range(4)],
-        *[Var(name=f"b{index}", sign=E4M3FNT()) for index in range(4)],
-        Var(name="c", sign=Float32T()),
+        *[Var(name=f"a{index}", dtype=E5M2()) for index in range(4)],
+        *[Var(name=f"b{index}", dtype=E4M3FN()) for index in range(4)],
+        Var(name="c", dtype=Float32()),
     )
 
 
 def _build_wgmma_fp16_e4m3_e5m2() -> Node:
     return wgmma_fp16_e4m3_e5m2(
-        *[Var(name=f"a{index}", sign=E4M3FNT()) for index in range(4)],
-        *[Var(name=f"b{index}", sign=E5M2T()) for index in range(4)],
-        Var(name="c", sign=Float16T()),
+        *[Var(name=f"a{index}", dtype=E4M3FN()) for index in range(4)],
+        *[Var(name=f"b{index}", dtype=E5M2()) for index in range(4)],
+        Var(name="c", dtype=Float16()),
     )
 
 
@@ -267,7 +267,7 @@ def check_design(
     started_at = time.perf_counter()
     design = design_case.build()
 
-    print(f"Built {design_case.name}: {design.node_type}", flush=True)
+    print(f"Built {design_case.name}: {design.dtype}", flush=True)
     checks = {
         "determinism": design.check_determinism,
         "specification": design.check_spec,

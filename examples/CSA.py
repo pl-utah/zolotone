@@ -47,10 +47,10 @@ if __name__ == '__main__':
     from pprint import pprint
     # Compile design
     args = [
-        Var(name="a_0", sign=QT(3, 4)),
-        Var(name="a_1", sign=QT(8, 3)),
-        Var(name="a_2", sign=QT(5, 0)),
-        Var(name="a_3", sign=QT(1, 5)),
+        Var(name="a_0", dtype=Q(3, 4)),
+        Var(name="a_1", dtype=Q(8, 3)),
+        Var(name="a_2", dtype=Q(5, 0)),
+        Var(name="a_3", dtype=Q(1, 5)),
     ]
     
     design = CSA_tree4(*args)
