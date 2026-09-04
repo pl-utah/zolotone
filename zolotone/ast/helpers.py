@@ -68,4 +68,4 @@ def if_then_else_spec(sel, in1, in0, ctx):
 def if_then_else(sel: Node, in1: Node, in0: Node) -> Node:
     from ..components.basics import basic_mux_2_1
     assert in1.dtype == in0.dtype, "Non-deterministic type"
-    return basic_mux_2_1(sel=sel, in0=in0, in1=in1, out=in0.copy())
+    return basic_mux_2_1(sel=sel, in0=in0, in1=in1, out=in0.dtype)

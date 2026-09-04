@@ -157,16 +157,16 @@ def e5m2fnuz_decode(x: Node) -> DecodedE5M2FNUZ:
         sign = _e5m2fnuz_sign(x)
         exponent = _e5m2fnuz_exponent(x)
         mantissa = _e5m2fnuz_mantissa(x)
-        bit = Const(UQ(1, 0).from_bits(0))
-        exponent_is_nonzero = basic_or_reduce(exponent, bit.copy())
-        exponent_is_zero = basic_invert(exponent_is_nonzero, bit.copy())
-        mantissa_is_nonzero = basic_or_reduce(mantissa, bit.copy())
-        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit.copy())
-        sign_is_zero = basic_invert(sign, bit.copy())
-        zero_fields = basic_and(exponent_is_zero, mantissa_is_zero, bit.copy())
-        is_zero = basic_and(sign_is_zero, zero_fields, bit.copy())
-        is_nan = basic_and(sign, zero_fields, bit.copy())
-        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit.copy())
+        bit = UQ(1, 0)
+        exponent_is_nonzero = basic_or_reduce(exponent, bit)
+        exponent_is_zero = basic_invert(exponent_is_nonzero, bit)
+        mantissa_is_nonzero = basic_or_reduce(mantissa, bit)
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit)
+        sign_is_zero = basic_invert(sign, bit)
+        zero_fields = basic_and(exponent_is_zero, mantissa_is_zero, bit)
+        is_zero = basic_and(sign_is_zero, zero_fields, bit)
+        is_nan = basic_and(sign, zero_fields, bit)
+        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit)
         return make_Tuple(
             sign,
             exponent,
@@ -204,14 +204,14 @@ def e5m2fnuz_encodings(m_rounded: Node, e_rounded: Node):
     overflow = uq_gt(e_rounded, max_exponent)
     final_e = basic_identity(
         uq_min(e_rounded, max_exponent),
-        Const(UQ(E5M2FNUZ.exponent_bits, 0).from_bits(0)),
+        UQ(E5M2FNUZ.exponent_bits, 0),
     )
     final_m = uq_fraction_to_integer(m_rounded)
     final_m = basic_mux_2_1(
         overflow,
         final_m,
         Const(UQ.from_int(E5M2FNUZ.max_finite_mantissa)),
-        final_m.copy(),
+        final_m.dtype,
     )
     return make_Tuple(final_m, final_e)
 

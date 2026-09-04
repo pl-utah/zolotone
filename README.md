@@ -60,6 +60,47 @@ alignment, significand formatting, rounding logic, or other implementation
 choices. Those belong in `fp32_add`, the implementation model, and are
 verified against this golden specification.
 
+## Data formats and concrete values
+
+Implementation data types are immutable descriptors. Concrete values are
+constructed explicitly according to where their input comes from:
+
+```python
+from zolotone import Bool, Q, Tuple, UQ
+
+uq = UQ(2, 3)
+encoded = uq.from_bits(0b00011)  # raw bits 00.011, numeric value 0.375
+numeric = uq.from_float(3.0)     # numeric 3.0, encoded as raw bits 11.000
+
+inferred = UQ.from_int(3)        # UQ<2,0> containing numeric integer 3
+pair_type = Tuple(UQ(2, 0), Bool())
+pair = pair_type.from_values(UQ(2, 0).from_bits(3), Bool().from_bits(1))
+```
+
+`from_bits()` takes a packed integer encoding; leading zeroes are supplied by
+the descriptor width rather than stored in the Python integer. `from_float()`
+quantizes into an existing `Q` or `UQ` descriptor using round-to-nearest,
+ties-to-even, and saturation. `from_int()` infers a minimal zero-fraction
+descriptor. `from_values()` constructs a typed tuple from concrete component
+values. Use `value.raw`, `value.to_bitstring()`, and `value.to_python()` to
+inspect the packed integer, padded encoding, and interpreted Python value.
+
+The former scalar `value()` and tuple `value()` factories remain as deprecated
+aliases for `from_bits()` and `from_values()`, respectively.
+
+For code written against the former split static/runtime type API, the common
+migrations are:
+
+| Former API | Current API |
+| --- | --- |
+| `UQT(I, F)` / `QT(I, F)` | `UQ(I, F)` / `Q(I, F)` |
+| `UQ(raw, I, F)` | `UQ(I, F).from_bits(raw)` |
+| `Float32(raw)` | `Float32().from_bits(raw)` |
+| `node.node_type` | `node.dtype` |
+| `node.node_type.runtime_val` | `node.constant` |
+| `value.val` / `value.to_val()` | `value.raw` / `value.to_python()` |
+| `variable.load_val(value)` | `variable.load_value(value)` |
+
 ## Verification workflow
 
 Zolotone connects golden specifications to typed implementation models:

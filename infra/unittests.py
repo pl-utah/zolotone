@@ -1223,6 +1223,15 @@ class TestDockerRunDesigns(unittest.TestCase):
                 self.assertEqual(docker_run_designs.main([]), 1)
 
 class TestEgglogRewriteRules(unittest.TestCase):
+    def test_bool_true_keeps_public_egglog_constructor_name(self):
+        egraph = EGraph()
+        egraph.register(MathBool.True_())
+
+        serialized = json.loads(egraph._serialize().to_json())
+        self.assertTrue(
+            any(name.endswith("-BoolTrue") for name in serialized["nodes"])
+        )
+
     def test_rewrite_rules_are_sound(self):
         results = check_rules(rewrite_rules(), z3_timeout_ms=10000)
         invalid_rules = {
@@ -1419,7 +1428,7 @@ class TestConstantFolding(unittest.TestCase):
                 folded = basic_add(
                     Const(descriptor_type().from_bits(1)),
                     Const(descriptor_type().from_bits(2)),
-                    out=Const(descriptor_type().from_bits(0)),
+                    out=descriptor_type(),
                 )
 
                 self.assert_folded_value(folded, descriptor_type, 3)
@@ -1428,7 +1437,7 @@ class TestConstantFolding(unittest.TestCase):
         folded = basic_add(
             Const(UQ(3, 0).from_bits(7)),
             Const(UQ(3, 0).from_bits(3)),
-            out=Const(UQ(3, 0).from_bits(0)),
+            out=UQ(3, 0),
         )
 
         self.assert_folded_value(folded, UQ, 2)
@@ -1437,7 +1446,7 @@ class TestConstantFolding(unittest.TestCase):
         folded = basic_less(
             Const(UQ(2, 0).from_bits(1)),
             Const(UQ(2, 0).from_bits(2)),
-            out=Const(Bool().from_bits(0)),
+            out=Bool(),
         )
 
         self.assert_folded_value(folded, Bool, 1)
@@ -1464,7 +1473,7 @@ class TestConstantFolding(unittest.TestCase):
         node = basic_add(
             x,
             Const(UQ(3, 0).from_bits(1)),
-            out=Const(UQ(3, 0).from_bits(0)),
+            out=UQ(3, 0),
         )
 
         self.assertIsNone(node.constant)
@@ -1697,6 +1706,124 @@ class TestConstantFolding(unittest.TestCase):
                 outer_ctx.validate_requirements()
 
 
+class TestBasicOperators(unittest.TestCase):
+    def test_output_dtype_is_metadata_not_a_graph_input(self):
+        x = Var("x", dtype=UQ(3, 0))
+        y = Var("y", dtype=UQ(3, 0))
+        node = basic_add(x, y, out=UQ(4, 0))
+
+        self.assertEqual(node.dtype, UQ(4, 0))
+        self.assertEqual(len(node.args), 2)
+        self.assertIs(node.args[0], x)
+        self.assertIs(node.args[1], y)
+
+    def test_basic_operator_graph_arity_matches_data_operands(self):
+        selector = Var("selector", dtype=Bool())
+        x = Var("x", dtype=UQ(3, 0))
+        y = Var("y", dtype=UQ(3, 0))
+
+        unary = basic_invert(x, out=UQ(3, 0))
+        binary = basic_add(x, y, out=UQ(4, 0))
+        ternary = basic_mux_2_1(selector, x, y, out=UQ(3, 0))
+
+        self.assertEqual(len(unary.args), 1)
+        self.assertEqual(len(binary.args), 2)
+        self.assertEqual(len(ternary.args), 3)
+
+    def test_basic_operator_rejects_value_as_output_descriptor(self):
+        x = Var("x", dtype=UQ(3, 0))
+        y = Var("y", dtype=UQ(3, 0))
+
+        with self.assertRaisesRegex(TypeError, "output must be a DataType"):
+            basic_add(x, y, out=Const(UQ(4, 0).from_bits(0)))
+
+
+class TestDataTypeValues(unittest.TestCase):
+    def test_uq_from_bits_uses_packed_encoding(self):
+        value = UQ(2, 3).from_bits(3)
+
+        self.assertEqual(value.raw, 3)
+        self.assertEqual(value.to_bitstring(), "00011")
+        self.assertEqual(value.to_python(), 0.375)
+
+    def test_uq_from_float_quantizes_python_number(self):
+        value = UQ(2, 3).from_float(3.0)
+
+        self.assertEqual(value.raw, 24)
+        self.assertEqual(value.to_bitstring(), "11000")
+        self.assertEqual(value.to_python(), 3.0)
+
+    def test_fixed_from_float_rounds_ties_to_even_and_saturates(self):
+        dtype = UQ(2, 3)
+
+        self.assertEqual(dtype.from_float(0.0625).raw, 0)
+        self.assertEqual(dtype.from_float(0.1875).raw, 2)
+        self.assertEqual(dtype.from_float(-1.0).raw, 0)
+        self.assertEqual(dtype.from_float(4.0).raw, 31)
+
+        signed_dtype = Q(2, 3)
+        self.assertEqual(signed_dtype.from_float(-3.0).raw, 0b10000)
+        self.assertEqual(signed_dtype.from_float(2.0).raw, 0b01111)
+
+    def test_from_bits_validates_packed_encoding(self):
+        dtype = UQ(2, 3)
+
+        with self.assertRaisesRegex(TypeError, "raw value must be int"):
+            dtype.from_bits(3.0)
+        for raw in (-1, 32):
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(ValueError, "does not fit"):
+                    dtype.from_bits(raw)
+
+    def test_fixed_from_float_rejects_nonfinite_numbers(self):
+        for dtype in (Q(2, 3), UQ(2, 3)):
+            for number in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(dtype=dtype, number=number):
+                    with self.assertRaisesRegex(ValueError, "finite number"):
+                        dtype.from_float(number)
+
+        with self.assertRaisesRegex(TypeError, "int or float"):
+            UQ(2, 3).from_float("3.0")
+
+    def test_q_from_bits_decodes_twos_complement(self):
+        value = Q(2, 3).from_bits(0b11111)
+
+        self.assertEqual(value.to_bitstring(), "11111")
+        self.assertEqual(value.to_python(), -0.125)
+
+    def test_from_int_infers_zero_fraction_descriptor(self):
+        self.assertEqual(UQ.from_int(3), UQ(2, 0).from_bits(3))
+        self.assertEqual(Q.from_int(-3), Q(3, 0).from_bits(5))
+
+    def test_tuple_from_values_validates_component_descriptors(self):
+        dtype = Tuple(UQ(2, 0), Bool())
+        value = dtype.from_values(UQ(2, 0).from_bits(3), Bool().from_bits(1))
+
+        self.assertEqual(value.raw, (3, 1))
+        self.assertEqual(value.to_python(), (3.0, True))
+        with self.assertRaisesRegex(TypeError, "Tuple item 0"):
+            dtype.from_values(UQ(3, 0).from_bits(3), Bool().from_bits(1))
+
+    def test_legacy_value_factories_are_deprecated(self):
+        with self.assertWarnsRegex(DeprecationWarning, "from_bits"):
+            self.assertEqual(UQ(2, 0).value(3), UQ(2, 0).from_bits(3))
+
+        dtype = Tuple(Bool())
+        with self.assertWarnsRegex(DeprecationWarning, "from_values"):
+            self.assertEqual(
+                dtype.value(Bool().from_bits(1)),
+                dtype.from_values(Bool().from_bits(1)),
+            )
+
+    def test_fixed_to_spec_preserves_values_wider_than_float_precision(self):
+        raw = (1 << 53) + 1
+        ctx = SpecContext("wide-fixed-value")
+        spec = UQ(54, 3).from_bits(raw).to_spec(ctx)
+        expected = z3.RealVal(f"{raw}/8")
+
+        self.assertTrue(z3.is_true(z3.simplify(spec.to_z3({}) == expected)))
+
+
 class TestFingerprint(unittest.TestCase):
     def test_runtime_type_fingerprint_depends_on_structure_and_value(self):
         self.assertEqual(UQ(3, 0).from_bits(3)._fingerprint(), UQ(3, 0).from_bits(3)._fingerprint())
@@ -1729,8 +1856,8 @@ class TestFingerprint(unittest.TestCase):
         x2 = Var("x", dtype=UQ(3, 0))
         y2 = Var("y", dtype=UQ(3, 0))
 
-        lhs = basic_add(x1, y1, Const(UQ(3, 0).from_bits(0)))
-        rhs = basic_add(x2, y2, Const(UQ(3, 0).from_bits(0)))
+        lhs = basic_add(x1, y1, UQ(3, 0))
+        rhs = basic_add(x2, y2, UQ(3, 0))
 
         self.assertEqual(lhs._fingerprint(), rhs._fingerprint())
 
@@ -1738,12 +1865,25 @@ class TestFingerprint(unittest.TestCase):
         x = Var("x", dtype=UQ(3, 0))
         y = Var("y", dtype=UQ(3, 0))
 
-        add_node = basic_add(x, y, Const(UQ(3, 0).from_bits(0)))
-        sub_node = basic_sub(x, y, Const(UQ(3, 0).from_bits(0)))
-        different_const = basic_add(x, y, Const(UQ(3, 0).from_bits(1)))
+        add_node = basic_add(x, y, UQ(3, 0))
+        sub_node = basic_sub(x, y, UQ(3, 0))
+        different_const = basic_add(
+            x,
+            Const(UQ(3, 0).from_bits(1)),
+            UQ(3, 0),
+        )
 
         self.assertNotEqual(add_node._fingerprint(), sub_node._fingerprint())
         self.assertNotEqual(add_node._fingerprint(), different_const._fingerprint())
+
+    def test_graph_fingerprint_includes_output_descriptor_metadata(self):
+        x = Var("x", dtype=UQ(3, 0))
+        y = Var("y", dtype=UQ(3, 0))
+
+        narrow = basic_add(x, y, out=UQ(3, 0))
+        wide = basic_add(x, y, out=UQ(4, 0))
+
+        self.assertNotEqual(narrow._fingerprint(), wide._fingerprint())
 
     def test_fingerprint_depends_on_jittable_lowering_when_codegen_differs(self):
         node = make_Tuple(Const(UQ(3, 0).from_bits(1)), Const(UQ(3, 0).from_bits(2)))
@@ -1753,7 +1893,7 @@ class TestFingerprint(unittest.TestCase):
     def test_fingerprint_is_stable_across_runtime_variable_bindings(self):
         x = Var("x", dtype=UQ(3, 0))
         y = Var("y", dtype=UQ(3, 0))
-        node = basic_add(x, y, Const(UQ(3, 0).from_bits(0)))
+        node = basic_add(x, y, UQ(3, 0))
 
         before = node._fingerprint()
 

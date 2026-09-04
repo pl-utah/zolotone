@@ -12,11 +12,11 @@ def spec_est_global_shift(E_max, E_p, ctx):
 
 @Primitive(name="_est_global_shift", spec=spec_est_global_shift)
 def _est_global_shift(E_max: Node, E_p: Node) -> Node:
-    out_int_bits = uq_add(uq_int_bits(E_max), Const(UQ.from_int(s)))
-    out_frac_bits = Const(UQ.from_int(0))
-    out = uq_alloc(out_int_bits, out_frac_bits)
-
-    return basic_concat(uq_sub(E_max, E_p), Const(UQ(s, 0).from_bits(0)), out)
+    return basic_concat(
+        uq_sub(E_max, E_p),
+        Const(UQ(s, 0).from_bits(0)),
+        UQ(E_max.dtype.int_bits + s, 0),
+    )
 
 
 def spec_est_local_shift(E_trail, ctx):
@@ -26,7 +26,7 @@ def spec_est_local_shift(E_trail, ctx):
 
 @Primitive(name="_est_local_shift", spec=spec_est_local_shift)
 def _est_local_shift(E_trail: Node) -> Node:
-    return basic_invert(x=E_trail, out=E_trail.copy())
+    return basic_invert(x=E_trail, out=E_trail.dtype)
 
 
 def spec_prepend_ones(x, ctx):
@@ -37,10 +37,11 @@ def spec_prepend_ones(x, ctx):
 
 @Primitive(name="_prepend_ones", spec=spec_prepend_ones)
 def _prepend_ones(x: Node) -> Node:
-    out_int_bits = uq_add(uq_int_bits(x), Const(UQ.from_int(s)))
-    out_frac_bits = uq_frac_bits(x)
-    out = uq_alloc(out_int_bits, out_frac_bits)
-    return basic_concat(x, Const(UQ.from_int((1 << s) - 1)), out)
+    return basic_concat(
+        x,
+        Const(UQ.from_int((1 << s) - 1)),
+        UQ(x.dtype.int_bits + s, x.dtype.frac_bits),
+    )
 
 
 def dot_product_spec(a0, a1, a2, a3,

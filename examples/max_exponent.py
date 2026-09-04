@@ -7,19 +7,19 @@ def max_exp4_spec(e0, e1, e2, e3, ctx):
 @Primitive(name="OPTIMIZED_MAX_EXP4", spec=max_exp4_spec)
 def OPTIMIZED_MAX_EXP4(e0: Node, e1: Node, e2: Node, e3: Node) -> Node:
     def bit_not(x: Node) -> Node:
-        return basic_invert(x=x, out=Const(UQ(1, 0).from_bits(0)))
+        return basic_invert(x=x, out=UQ(1, 0))
 
     def bit_and(x: Node, y: Node) -> Node:
-        return basic_and(x=x, y=y, out=Const(UQ(1, 0).from_bits(0)))
+        return basic_and(x=x, y=y, out=UQ(1, 0))
 
     def bit_or(x: Node, y: Node) -> Node:
-        return basic_or(x=x, y=y, out=Const(UQ(1, 0).from_bits(0)))
+        return basic_or(x=x, y=y, out=UQ(1, 0))
 
     def concat(high: Node, low: Node) -> Node:
         return basic_concat(
             x=high,
             y=low,
-            out=Const(UQ(high.dtype.int_bits + low.dtype.int_bits, 0).from_bits(0)),
+            out=UQ(high.dtype.int_bits + low.dtype.int_bits, 0),
         )
 
     inputs = [e0, e1, e2, e3]
@@ -50,7 +50,7 @@ def OPTIMIZED_MAX_EXP4(e0: Node, e1: Node, e2: Node, e3: Node) -> Node:
             candidate = bit_and(curr_bit, bit_not(is_smaller))
             candidates = concat(candidates, candidate)
 
-        max_prev = basic_or_reduce(candidates, out=Const(UQ(1, 0).from_bits(0)))  # or tree
+        max_prev = basic_or_reduce(candidates, out=UQ(1, 0))  # or tree
         if bits is None:
             bits = max_prev
         else:

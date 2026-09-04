@@ -112,6 +112,7 @@ class Q(DataType):
 
     @classmethod
     def from_int(cls, x: int) -> "FixedValue":
+        """Infer the smallest signed, zero-fraction format containing ``x``."""
         if not isinstance(x, int):
             raise TypeError(f"Q.from_int expects int, got {type(x).__name__}")
         if x < 0:
@@ -171,6 +172,7 @@ class UQ(DataType):
 
     @classmethod
     def from_int(cls, x: int) -> "FixedValue":
+        """Infer the smallest unsigned, zero-fraction format containing ``x``."""
         if not isinstance(x, int):
             raise TypeError(f"UQ.from_int expects int, got {type(x).__name__}")
         if x < 0:

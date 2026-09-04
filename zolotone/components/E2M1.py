@@ -148,13 +148,13 @@ def e2m1_decode(x: Node) -> DecodedE2M1:
         sign = _e2m1_sign(x)
         exponent = _e2m1_exponent(x)
         mantissa = _e2m1_mantissa(x)
-        bit = Const(UQ(1, 0).from_bits(0))
-        exponent_is_nonzero = basic_or_reduce(exponent, bit.copy())
-        exponent_is_zero = basic_invert(exponent_is_nonzero, bit.copy())
-        mantissa_is_nonzero = basic_or_reduce(mantissa, bit.copy())
-        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit.copy())
-        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit.copy())
-        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit.copy())
+        bit = UQ(1, 0)
+        exponent_is_nonzero = basic_or_reduce(exponent, bit)
+        exponent_is_zero = basic_invert(exponent_is_nonzero, bit)
+        mantissa_is_nonzero = basic_or_reduce(mantissa, bit)
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit)
+        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit)
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit)
         return make_Tuple(
             sign, exponent, mantissa, exponent_is_nonzero, is_sub, is_zero
         )
@@ -185,14 +185,14 @@ def e2m1_encodings(m_rounded: Node, e_rounded: Node):
     overflow = uq_gt(e_rounded, max_exponent)
     final_e = basic_identity(
         uq_min(e_rounded, max_exponent),
-        Const(UQ(E2M1.exponent_bits, 0).from_bits(0)),
+        UQ(E2M1.exponent_bits, 0),
     )
     final_m = uq_fraction_to_integer(m_rounded)
     final_m = basic_mux_2_1(
         overflow,
         final_m,
         Const(UQ.from_int(E2M1.max_finite_mantissa)),
-        final_m.copy(),
+        final_m.dtype,
     )
     return make_Tuple(final_m, final_e)
 

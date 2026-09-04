@@ -6,15 +6,15 @@ def _aligner(a: Node, b: Node):
 
 def _exact_xor(a: Node, b: Node):
     a_, b_ = _aligner(a, b)
-    return basic_xor(a_, b_, a_.copy())
+    return basic_xor(a_, b_, a_.dtype)
 
 def _exact_and(a: Node, b: Node):
     a_, b_ = _aligner(a, b)
-    return basic_and(a_, b_, a_.copy())
+    return basic_and(a_, b_, a_.dtype)
 
 def _exact_or(a: Node, b: Node):
     a_, b_ = _aligner(a, b)
-    return basic_or(a_, b_, a_.copy())
+    return basic_or(a_, b_, a_.dtype)
 
 
 def csa_spec(x, y, z, ctx):

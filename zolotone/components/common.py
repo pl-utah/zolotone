@@ -17,7 +17,7 @@ def add_implicit_bit(x: Node) -> Primitive:
         return basic_concat(
             x=Const(UQ(1, 0).from_bits(1)),
             y=x,
-            out=Const(UQ(1, frac_bits).from_bits(0)),
+            out=UQ(1, frac_bits),
         )
 
     return impl(x)
@@ -67,7 +67,7 @@ def bit_and(x: Node, y: Node) -> Node:
     assert y.dtype.total_bits() == 1, (
         f"bit_and expects single bit as an input, given: {y.dtype.total_bits()}"
     )
-    return basic_and(x, y, Const(UQ(1, 0).from_bits(0)))
+    return basic_and(x, y, UQ(1, 0))
 
 
 def xor_spec(x, y, ctx):
@@ -82,7 +82,7 @@ def bit_xor(x: Node, y: Node) -> Node:
     assert y.dtype.total_bits() == 1, (
         f"bit_xor expects single bit as an input, given: {y.dtype.total_bits()}"
     )
-    return basic_xor(x, y, Const(UQ(1, 0).from_bits(0)))
+    return basic_xor(x, y, UQ(1, 0))
 
 
 def or_spec(x, y, ctx):
@@ -101,7 +101,7 @@ def bit_or(x: Node, y: Node) -> Node:
     assert y.dtype.total_bits() == 1, (
         f"bit_or expects single bit as an input, given: {y.dtype.total_bits()}"
     )
-    return basic_or(x, y, Const(UQ(1, 0).from_bits(0)))
+    return basic_or(x, y, UQ(1, 0))
 
 
 def neg_spec(x, ctx):
@@ -117,4 +117,4 @@ def bit_neg(x: Node) -> Node:
     assert x.dtype.total_bits() == 1, (
         f"bit_neg expects single bit as an input, given: {x.dtype.total_bits()}"
     )
-    return basic_invert(x, Const(UQ(1, 0).from_bits(0)))
+    return basic_invert(x, UQ(1, 0))

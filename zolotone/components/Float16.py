@@ -191,54 +191,54 @@ def fp16_decode(x: Node) -> DecodedFP16:
 
         mantissa_is_nonzero = basic_or_reduce(
             mantissa,
-            out=Const(UQ(1, 0).from_bits(0)),
+            out=UQ(1, 0),
         )
         mantissa_is_zero = basic_invert(
             mantissa_is_nonzero,
-            out=Const(UQ(1, 0).from_bits(0)),
+            out=UQ(1, 0),
         )
 
         exponent_is_all_ones = basic_and_reduce(
             exponent,
-            out=Const(UQ(1, 0).from_bits(0)),
+            out=UQ(1, 0),
         )
         exponent_is_not_all_ones = basic_invert(
             exponent_is_all_ones,
-            out=Const(UQ(1, 0).from_bits(0)),
+            out=UQ(1, 0),
         )
         exponent_is_nonzero = basic_or_reduce(
             exponent,
-            out=Const(UQ(1, 0).from_bits(0)),
+            out=UQ(1, 0),
         )
         exponent_is_zero = basic_invert(
             exponent_is_nonzero,
-            out=Const(UQ(1, 0).from_bits(0)),
+            out=UQ(1, 0),
         )
 
         is_normal = basic_and(
             exponent_is_nonzero,
             exponent_is_not_all_ones,
-            Const(UQ(1, 0).from_bits(0)),
+            UQ(1, 0),
         )
         is_subnormal = basic_and(
             exponent_is_zero,
             mantissa_is_nonzero,
-            Const(UQ(1, 0).from_bits(0)),
+            UQ(1, 0),
         )
         is_zero = basic_and(
             exponent_is_zero,
             mantissa_is_zero,
-            Const(UQ(1, 0).from_bits(0)),
+            UQ(1, 0),
         )
         is_inf = basic_and(
             exponent_is_all_ones,
             mantissa_is_zero,
-            Const(UQ(1, 0).from_bits(0)),
+            UQ(1, 0),
         )
         is_nan = basic_and(
             exponent_is_all_ones,
             mantissa_is_nonzero,
-            Const(UQ(1, 0).from_bits(0)),
+            UQ(1, 0),
         )
 
         return make_Tuple(
@@ -277,14 +277,14 @@ def fp16_encodings(m_rounded: Node, e_rounded: Node):
     )
     final_e = basic_identity(
         final_e_wide,
-        Const(UQ.from_int(Float16.inf_code)),
+        UQ(Float16.exponent_bits, 0),
     )
-    is_inf = basic_and_reduce(final_e, Const(UQ(1, 0).from_bits(0)))
+    is_inf = basic_and_reduce(final_e, UQ(1, 0))
     final_m = basic_mux_2_1(
         is_inf,
         m_rounded,
         Const(UQ(1, 0).from_bits(0)),
-        m_rounded.copy(),
+        m_rounded.dtype,
     )
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 

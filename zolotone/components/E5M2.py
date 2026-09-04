@@ -163,22 +163,22 @@ def e5m2_decode(x: Node) -> DecodedE5M2:
         sign = _e5m2_sign(x)
         exponent = _e5m2_exponent(x)
         mantissa = _e5m2_mantissa(x)
-        bit = Const(UQ(1, 0).from_bits(0))
-        exponent_is_all_ones = basic_and_reduce(exponent, bit.copy())
+        bit = UQ(1, 0)
+        exponent_is_all_ones = basic_and_reduce(exponent, bit)
         exponent_is_not_all_ones = basic_invert(
-            exponent_is_all_ones, bit.copy()
+            exponent_is_all_ones, bit
         )
-        exponent_is_nonzero = basic_or_reduce(exponent, bit.copy())
-        exponent_is_zero = basic_invert(exponent_is_nonzero, bit.copy())
-        mantissa_is_nonzero = basic_or_reduce(mantissa, bit.copy())
-        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit.copy())
+        exponent_is_nonzero = basic_or_reduce(exponent, bit)
+        exponent_is_zero = basic_invert(exponent_is_nonzero, bit)
+        mantissa_is_nonzero = basic_or_reduce(mantissa, bit)
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit)
         is_norm = basic_and(
-            exponent_is_nonzero, exponent_is_not_all_ones, bit.copy()
+            exponent_is_nonzero, exponent_is_not_all_ones, bit
         )
-        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit.copy())
-        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit.copy())
-        is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, bit.copy())
-        is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, bit.copy())
+        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit)
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit)
+        is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, bit)
+        is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, bit)
         return make_Tuple(
             sign, exponent, mantissa, is_norm, is_sub, is_zero, is_inf, is_nan
         )
@@ -208,14 +208,14 @@ def e5m2_encodings_spec(m, e, ctx):
 def e5m2_encodings(m_rounded: Node, e_rounded: Node):
     final_e = basic_identity(
         uq_min(e_rounded, Const(UQ.from_int(E5M2.inf_code))),
-        Const(UQ.from_int(E5M2.inf_code)),
+        UQ(E5M2.exponent_bits, 0),
     )
-    is_inf = basic_and_reduce(final_e, Const(UQ(1, 0).from_bits(0)))
+    is_inf = basic_and_reduce(final_e, UQ(1, 0))
     final_m = basic_mux_2_1(
         is_inf,
         m_rounded,
         Const(UQ(1, 0).from_bits(0)),
-        m_rounded.copy(),
+        m_rounded.dtype,
     )
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 

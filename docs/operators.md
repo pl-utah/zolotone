@@ -15,38 +15,42 @@
 - `E2M1`: finite-only 4-bit `S.EE.M` (bias 1), with signed zeros,
   subnormal magnitude 0.5, and normal values through ±6; it has no NaN or
   infinity encodings.
-- `T`: arbitrary bitvector type, `Any`: unconstrained node chosen by caller.
-- `x`: tuple: explicit output node supplied by caller (shape must match the result).
+- `T`: result `DataType` descriptor supplied as Python metadata; it is not a graph
+  input and has no runtime value. `Any`: unconstrained node chosen by the caller.
 - `n<int>, s<int> etc.`: literal integers passed as Python args, not nodes.
 
 ### Public API
 
-## Basic bitwise/arithmetic ops (`zolotone/numtypes/basics.py`)
+## Basic bitwise/arithmetic ops (`zolotone/components/basics.py`)
+
+The `out` argument below is a `DataType`, such as `UQ(8, 0)` or `Bool()`.
+Only the `Any` operands become inputs to the resulting graph node.
+
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
-| `basic_mux_2_1` | Op | `Any -> Any -> Any -> T -> T` | 2:1 mux. |
-| `basic_add` | Op | `Any -> Any -> T -> T` | Aligned addition. |
-| `basic_sub` | Op | `Any -> Any -> T -> T` | Aligned subtraction. |
-| `basic_mul` | Op | `Any -> Any -> T -> T` | Aligned multiplication. |
-| `basic_max` | Op | `Any -> Any -> T -> T` | Bitwise max. |
-| `basic_min` | Op | `Any -> Any -> T -> T` | Bitwise min. |
-| `basic_rshift` | Op | `Any -> Any -> T -> T` | Logical right shift. |
-| `basic_lshift` | Op | `Any -> Any -> T -> T` | Logical left shift. |
-| `basic_or` | Op | `Any -> Any -> T -> T` | Bitwise OR. |
-| `basic_xor` | Op | `Any -> Any -> T -> T` | Bitwise XOR. |
-| `basic_and` | Op | `Any -> Any -> T -> T` | Bitwise AND. |
-| `basic_concat` | Op | `Any -> Any -> T -> T` | Concatenate bits. |
-| `basic_less` | Op | `Any -> Any -> T -> T` | Bitwise less-than. |
-| `basic_less_or_equal` | Op | `Any -> Any -> T -> T` | Bitwise less-or-equal. |
-| `basic_greater` | Op | `Any -> Any -> T -> T` | Bitwise greater-than. |
-| `basic_greater_or_equal` | Op | `Any -> Any -> T -> T` | Bitwise greater-or-equal. |
-| `basic_equal` | Op | `Any -> Any -> T -> T` | Bitwise equality. |
-| `basic_not_equal` | Op | `Any -> Any -> T -> T` | Bitwise inequality. |
-| `basic_select` | Op | `Any -> int -> int -> T -> T` | Inclusive slice. |
-| `basic_invert` | Op | `Any -> T -> T` | Bitwise NOT. |
-| `basic_identity` | Op | `Any -> T -> T` | Identity/cast. |
-| `basic_or_reduce` | Op | `Any -> T -> T` | OR-reduce across bits. |
-| `basic_and_reduce` | Op | `Any -> T -> T` | AND-reduce across bits. |
+| `basic_mux_2_1` | Op | `(Any, Any, Any; out: T) -> T` | 2:1 mux. |
+| `basic_add` | Op | `(Any, Any; out: T) -> T` | Aligned addition. |
+| `basic_sub` | Op | `(Any, Any; out: T) -> T` | Aligned subtraction. |
+| `basic_mul` | Op | `(Any, Any; out: T) -> T` | Aligned multiplication. |
+| `basic_max` | Op | `(Any, Any; out: T) -> T` | Bitwise max. |
+| `basic_min` | Op | `(Any, Any; out: T) -> T` | Bitwise min. |
+| `basic_rshift` | Op | `(Any, Any; out: T) -> T` | Logical right shift. |
+| `basic_lshift` | Op | `(Any, Any; out: T) -> T` | Logical left shift. |
+| `basic_or` | Op | `(Any, Any; out: T) -> T` | Bitwise OR. |
+| `basic_xor` | Op | `(Any, Any; out: T) -> T` | Bitwise XOR. |
+| `basic_and` | Op | `(Any, Any; out: T) -> T` | Bitwise AND. |
+| `basic_concat` | Op | `(Any, Any; out: T) -> T` | Concatenate bits. |
+| `basic_less` | Op | `(Any, Any; out: T) -> T` | Bitwise less-than. |
+| `basic_less_or_equal` | Op | `(Any, Any; out: T) -> T` | Bitwise less-or-equal. |
+| `basic_greater` | Op | `(Any, Any; out: T) -> T` | Bitwise greater-than. |
+| `basic_greater_or_equal` | Op | `(Any, Any; out: T) -> T` | Bitwise greater-or-equal. |
+| `basic_equal` | Op | `(Any, Any; out: T) -> T` | Bitwise equality. |
+| `basic_not_equal` | Op | `(Any, Any; out: T) -> T` | Bitwise inequality. |
+| `basic_select` | Op | `(Any, start: int, end: int; out: T) -> T` | Inclusive slice. |
+| `basic_invert` | Op | `(Any; out: T) -> T` | Bitwise NOT. |
+| `basic_identity` | Op | `(Any; out: T) -> T` | Identity/cast. |
+| `basic_or_reduce` | Op | `(Any; out: T) -> T` | OR-reduce across bits. |
+| `basic_and_reduce` | Op | `(Any; out: T) -> T` | AND-reduce across bits. |
 
 ## Unsigned fixed-point primitives (`zolotone/numtypes/UQ.py`)
 | Name | Kind | Type | Purpose/Notes |
