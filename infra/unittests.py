@@ -1804,17 +1804,6 @@ class TestDataTypeValues(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "Tuple item 0"):
             dtype.from_values(UQ(3, 0).from_bits(3), Bool().from_bits(1))
 
-    def test_legacy_value_factories_are_deprecated(self):
-        with self.assertWarnsRegex(DeprecationWarning, "from_bits"):
-            self.assertEqual(UQ(2, 0).value(3), UQ(2, 0).from_bits(3))
-
-        dtype = Tuple(Bool())
-        with self.assertWarnsRegex(DeprecationWarning, "from_values"):
-            self.assertEqual(
-                dtype.value(Bool().from_bits(1)),
-                dtype.from_values(Bool().from_bits(1)),
-            )
-
     def test_fixed_to_spec_preserves_values_wider_than_float_precision(self):
         raw = (1 << 53) + 1
         ctx = SpecContext("wide-fixed-value")

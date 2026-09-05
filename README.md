@@ -85,9 +85,6 @@ descriptor. `from_values()` constructs a typed tuple from concrete component
 values. Use `value.raw`, `value.to_bitstring()`, and `value.to_python()` to
 inspect the packed integer, padded encoding, and interpreted Python value.
 
-The former scalar `value()` and tuple `value()` factories remain as deprecated
-aliases for `from_bits()` and `from_values()`, respectively.
-
 For code written against the former split static/runtime type API, the common
 migrations are:
 

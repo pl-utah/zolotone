@@ -11,7 +11,6 @@ import math
 import random
 import time
 from typing import ClassVar, TYPE_CHECKING
-import warnings
 
 if TYPE_CHECKING:
     from .values import RuntimeValue, BoolValue, FixedValue, FloatValue, TupleValue
@@ -26,15 +25,6 @@ class DataType:
     def from_bits(self, raw):
         """Construct a concrete value from its packed bit encoding."""
         raise NotImplementedError
-
-    def value(self, raw):
-        """Deprecated compatibility alias for :meth:`from_bits`."""
-        warnings.warn(
-            "DataType.value() is deprecated; use from_bits()",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.from_bits(raw)
 
     def to_spec(self, name, ctx):
         raise NotImplementedError
@@ -642,15 +632,6 @@ class Tuple(DataType):
         """Construct a tuple value from concrete component values."""
         from .values import TupleValue
         return TupleValue(self, tuple(values))
-
-    def value(self, *values: "RuntimeValue") -> "TupleValue":
-        """Deprecated compatibility alias for :meth:`from_values`."""
-        warnings.warn(
-            "Tuple.value() is deprecated; use from_values()",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.from_values(*values)
 
     def to_spec(self, name, ctx):
         return tuple(
