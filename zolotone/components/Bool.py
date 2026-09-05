@@ -6,4 +6,4 @@ from ..spec import *
 
 @Primitive(name="negate", spec=lambda x, ctx: ~x)
 def negate(x: Node) -> Node:
-    return basic_invert(x, out=Const(Bool(0)))
+    return basic_invert(x, out=Bool())

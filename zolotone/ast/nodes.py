@@ -1,8 +1,7 @@
 import random
 import typing as tp
 
-from ..types.runtime import RuntimeType
-from ..types.static import StaticType
+from ..types import DataType, RuntimeValue
 from ..utils import make_fixed_arguments
 from ..solver.report import (
     CheckResult,
@@ -171,7 +170,10 @@ class composite(Node):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
         self.ctx = SpecContext(name)
-        self.inner_args = [Var(name=f"arg_{i}", sign=x.node_type.copy()) for i, x in enumerate(args)]
+        self.inner_args = [
+            Var(name=f"arg_{i}", dtype=x.dtype, constant=x.constant)
+            for i, x in enumerate(args)
+        ]
         
         recorder = SpecRecorder(self.ctx)
         with record_specs(recorder):
@@ -181,17 +183,17 @@ class composite(Node):
         
         def impl_(*args):
             for var, arg in zip(self.inner_args, args):
-                var.load_val(arg)
+                var.load_value(arg)
             return self.inner_tree.evaluate()
         
         # Signature is obtained from the inner tree
         def sign(*args):
-            return self.inner_tree.node_type
+            return self.inner_tree.dtype
         
         sign = make_fixed_arguments(
             sign,
-            arg_types=[type(x.node_type) for x in args],
-            return_type=type(self.inner_tree.node_type),
+            arg_types=[type(x.dtype) for x in args],
+            return_type=type(self.inner_tree.dtype),
         )
         
         super().__init__(
@@ -279,7 +281,7 @@ class composite(Node):
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):
         connector = "└── " if is_last else "├── "
-        print(prefix + connector + f"{self.node_type}: {self.name} [Composite]")
+        print(prefix + connector + f"{self.dtype}: {self.name} [Composite]")
         
         new_prefix = prefix + ("    " if is_last else "│   ")
         
@@ -292,7 +294,7 @@ class composite(Node):
                 arg.print_tree(new_prefix, is_arg_last, depth)
     
     def __str__(self):
-        return f"[Composite] {self.name}: {' -> '.join([str(x) for x in self.args_types])} -> {self.node_type}"
+        return f"[Composite] {self.name}: {' -> '.join([str(x) for x in self.args_types])} -> {self.dtype}"
     
     def _fingerprint(self, jittable: bool = False):
         def build():
@@ -305,8 +307,8 @@ class composite(Node):
             return (
                 type(self).__name__,
                 self.name,
-                self.node_type._fingerprint(),
-                tuple(arg.node_type._fingerprint() for arg in self.inner_args),
+                self._type_and_constant_fingerprint(),
+                tuple(arg._type_and_constant_fingerprint() for arg in self.inner_args),
                 direct_cpp_lowering,
                 self.inner_tree._fingerprint(jittable) if direct_cpp_lowering is None else None,
             )
@@ -345,25 +347,27 @@ class primitive(Node):
     ):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
-        # Args will preserve runtime values of arguments
-        self.inner_args = [Var(name=f"arg_{i}", sign=x.node_type.copy()) for i, x in enumerate(args)]
+        self.inner_args = [
+            Var(name=f"arg_{i}", dtype=x.dtype, constant=x.constant)
+            for i, x in enumerate(args)
+        ]
         
         self.inner_tree = impl(*self.inner_args)
         
         def impl_(*args):
             for var, arg in zip(self.inner_args, args):
                 if isinstance(var, Var):
-                    var.load_val(arg)
+                    var.load_value(arg)
             return self.inner_tree.evaluate()
         
         # Signature is obtained from the inner tree
         def sign(*args):
-            return self.inner_tree.node_type
+            return self.inner_tree.dtype
         
         sign = make_fixed_arguments(
             sign,
-            arg_types=[type(x.node_type) for x in args],
-            return_type=type(self.inner_tree.node_type),
+            arg_types=[type(x.dtype) for x in args],
+            return_type=type(self.inner_tree.dtype),
         )
         
         super().__init__(
@@ -389,7 +393,7 @@ class primitive(Node):
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):
         connector = "└── " if is_last else "├── "
-        print(prefix + connector + f"{self.node_type}: {self.name} [Primitive]")
+        print(prefix + connector + f"{self.dtype}: {self.name} [Primitive]")
         
         new_prefix = prefix + ("    " if is_last else "│   ")
         
@@ -402,7 +406,7 @@ class primitive(Node):
                 arg.print_tree(new_prefix, is_arg_last, depth)
     
     def __str__(self):
-        return f"[Primitive] {self.name}: {' -> '.join([str(x) for x in self.args_types])} -> {self.node_type}"
+        return f"[Primitive] {self.name}: {' -> '.join([str(x) for x in self.args_types])} -> {self.dtype}"
     
     def _fingerprint(self, jittable: bool = False):
         def build():
@@ -415,8 +419,8 @@ class primitive(Node):
             return (
                 type(self).__name__,
                 self.name,
-                self.node_type._fingerprint(),
-                tuple(arg.node_type._fingerprint() for arg in self.inner_args),
+                self._type_and_constant_fingerprint(),
+                tuple(arg._type_and_constant_fingerprint() for arg in self.inner_args),
                 direct_cpp_lowering,
                 self.inner_tree._fingerprint(jittable) if direct_cpp_lowering is None else None,
             )
@@ -427,8 +431,8 @@ class primitive(Node):
 class Op(Node):
     def __init__(
         self,
-        impl: tp.Callable[..., RuntimeType],
-        sign: tp.Callable[..., StaticType],
+        impl: tp.Callable[..., RuntimeValue],
+        sign: tp.Callable[..., DataType],
         args: list[Node],
         name: str,
         c_lowering: tp.Optional[CLowering],
@@ -451,7 +455,7 @@ class Op(Node):
             arg.print_tree(new_prefix, is_arg_last, depth)
     
     def __str__(self):
-        return f"{self.node_type}: {self.name} [Op]"
+        return f"{self.dtype}: {self.name} [Op]"
     
     def _fingerprint(self, jittable: bool = False):
         def build():
@@ -464,7 +468,7 @@ class Op(Node):
             return (
                 "Op",
                 self.name,
-                self.node_type._fingerprint(),
+                self._type_and_constant_fingerprint(),
                 lowering_fingerprint,
                 tuple(arg._fingerprint(jittable) for arg in self.args),
             )
@@ -473,59 +477,77 @@ class Op(Node):
 
 
 class Const(Node):
-    def __init__(
-        self,
-        val: RuntimeType,
-    ):
-        self.val = val
+    def __init__(self, value: RuntimeValue):
+        if not isinstance(value, RuntimeValue):
+            raise TypeError(
+                f"Const value must be a RuntimeValue, got {type(value).__name__}"
+            )
+        self.value = value
         
         def impl():
-            return self.val
+            return self.value
         
         def spec(ctx):
-            return self.val.to_spec(ctx)
+            return self.value.to_spec(ctx)
         
-        def sign() -> StaticType:
-            return self.val.static_type()
+        def sign():
+            return self.value.dtype
+
+        sign = make_fixed_arguments(sign, arg_types=[], return_type=type(value.dtype))
         
         super().__init__(
             spec=spec,
             impl=impl,
             sign=sign,
             args=[],
-            name=str(self.val.to_val()),
+            name=str(self.value.to_python()),
         )
-        
-        self.node_type.runtime_val = self.val.copy()  # Constant folding
+        self.constant = self.value
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):
         connector = "└── " if is_last else "├── "
         print(prefix + connector + self.__str__())
     
     def __str__(self):
-        return f"{self.node_type}: {self.name if self.name else str(self.val)} [Const]"
+        return f"{self.dtype}: {self.name if self.name else str(self.value)} [Const]"
     
     def _fingerprint(self, jittable: bool = False):
         return self._cached_fingerprint(
             jittable,
-            lambda: ("Const", self.val._fingerprint()),
+            lambda: ("Const", self.dtype._fingerprint(), self.constant._fingerprint()),
         )
 
 
 class Var(Node):
-    def __init__(self, name: str, sign: StaticType):
-        self.val = None
+    def __init__(
+        self,
+        name: str,
+        dtype: DataType,
+        *,
+        constant: RuntimeValue | None = None,
+    ):
+        if not isinstance(dtype, DataType):
+            raise TypeError(f"Var dtype must be a DataType, got {type(dtype).__name__}")
+        if constant is not None and constant.dtype != dtype:
+            raise TypeError(
+                f"Var constant descriptor {constant.dtype} does not match {dtype}"
+            )
+        self._value = None
         
         def impl():
-            if self.val is None:
+            if self._value is None:
                 raise ValueError(f"Variable {self.name} not bound to a value")
-            return self.val
+            return self._value
         
         def spec(ctx):
-            return sign.to_spec(self.name, ctx)
+            return dtype.to_spec(self.name, ctx)
         
-        def signature() -> StaticType:
-            return sign
+        def signature():
+            return dtype
+
+        signature = make_fixed_arguments(
+            signature, arg_types=[], return_type=type(dtype)
+        )
         
         super().__init__(
             spec=spec,
@@ -534,29 +556,40 @@ class Var(Node):
             args=[],
             name=name,
         )
+        self.constant = constant
     
     def load_rand(self, rng: tp.Optional[random.Random] = None):
         if rng is None:
             rng = random.Random()
-        self.load_val(self.sign().random_runtime_value(rng))
+        self.load_value(self.dtype.random_value(rng))
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):
         connector = "└── " if is_last else "├── "
-        print(prefix + connector + f"{self.node_type}: {self.name} [Var]")
+        print(prefix + connector + f"{self.dtype}: {self.name} [Var]")
     
-    def load_val(self, val: RuntimeType):
-        if not isinstance(val, RuntimeType):
-            raise TypeError(f"Var's val must be a RuntimeType, {val} is provided")
-        if val.static_type() != self.sign():
-            raise TypeError(f"Var's val does not match signature {self.sign()}, {val.static_type()} is provided")
-        self.val = val
+    def load_value(self, value: RuntimeValue):
+        if not isinstance(value, RuntimeValue):
+            raise TypeError(
+                f"Var value must be a RuntimeValue, got {type(value).__name__}"
+            )
+        if value.dtype != self.dtype:
+            raise TypeError(
+                f"Var value descriptor does not match {self.dtype}; "
+                f"got {value.dtype}"
+            )
+        self._value = value
     
     def __str__(self):
-        return f"{self.node_type}: {self.name} [Var]"
+        return f"{self.dtype}: {self.name} [Var]"
     
     def _fingerprint(self, jittable: bool = False):
         return self._cached_fingerprint(
             jittable,
-            lambda: ("Var", self.name, self.node_type._fingerprint()),
+            lambda: (
+                "Var",
+                self.name,
+                self.dtype._fingerprint(),
+                None if self.constant is None else self.constant._fingerprint(),
+            ),
         )
     

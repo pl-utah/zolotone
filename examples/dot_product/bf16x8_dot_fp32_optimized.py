@@ -12,11 +12,11 @@ def spec_est_global_shift(E_max, E_p, ctx):
 
 @Primitive(name="_est_global_shift", spec=spec_est_global_shift)
 def _est_global_shift(E_max: Node, E_p: Node) -> Node:
-    out_int_bits = uq_add(uq_int_bits(E_max), Const(UQ.from_int(s)))
-    out_frac_bits = Const(UQ.from_int(0))
-    out = uq_alloc(out_int_bits, out_frac_bits)
-
-    return basic_concat(uq_sub(E_max, E_p), Const(UQ(0, s, 0)), out)
+    return basic_concat(
+        uq_sub(E_max, E_p),
+        Const(UQ(s, 0).from_bits(0)),
+        UQ(E_max.dtype.int_bits + s, 0),
+    )
 
 
 def spec_est_local_shift(E_trail, ctx):
@@ -26,7 +26,7 @@ def spec_est_local_shift(E_trail, ctx):
 
 @Primitive(name="_est_local_shift", spec=spec_est_local_shift)
 def _est_local_shift(E_trail: Node) -> Node:
-    return basic_invert(x=E_trail, out=E_trail.copy())
+    return basic_invert(x=E_trail, out=E_trail.dtype)
 
 
 def spec_prepend_ones(x, ctx):
@@ -37,10 +37,11 @@ def spec_prepend_ones(x, ctx):
 
 @Primitive(name="_prepend_ones", spec=spec_prepend_ones)
 def _prepend_ones(x: Node) -> Node:
-    out_int_bits = uq_add(uq_int_bits(x), Const(UQ.from_int(s)))
-    out_frac_bits = uq_frac_bits(x)
-    out = uq_alloc(out_int_bits, out_frac_bits)
-    return basic_concat(x, Const(UQ.from_int((1 << s) - 1)), out)
+    return basic_concat(
+        x,
+        Const(UQ.from_int((1 << s) - 1)),
+        UQ(x.dtype.int_bits + s, x.dtype.frac_bits),
+    )
 
 
 def dot_product_spec(a0, a1, a2, a3,
@@ -139,11 +140,7 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     # A zero product has no meaningful exponent and must not control
     # alignment of the nonzero products.
     zero_product_exponent = Const(
-        UQ(
-            0,
-            E_p[0].node_type.int_bits,
-            E_p[0].node_type.frac_bits,
-        )
+        UQ(E_p[0].dtype.int_bits, E_p[0].dtype.frac_bits).from_bits(0)
     )
     E_p_for_alignment = [
         if_then_else(
@@ -211,13 +208,13 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
 
     return if_then_else(
         encode_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         if_then_else(
             encode_ninf,
-            Const(Float32.nInf()),
+            Const(Float32().nInf()),
             if_then_else(
                 encode_pinf,
-                Const(Float32.Inf()),
+                Const(Float32().Inf()),
                 finite_result,
             ),
         ),
@@ -229,17 +226,17 @@ if __name__ == '__main__':
     from pprint import pprint
     # Compile design
     a = [
-        Var(name="a_0", sign=BFloat16T()),
-        Var(name="a_1", sign=BFloat16T()),
-        Var(name="a_2", sign=BFloat16T()),
-        Var(name="a_3", sign=BFloat16T()),
+        Var(name="a_0", dtype=BFloat16()),
+        Var(name="a_1", dtype=BFloat16()),
+        Var(name="a_2", dtype=BFloat16()),
+        Var(name="a_3", dtype=BFloat16()),
     ]
     
     b = [
-        Var(name="b_0", sign=BFloat16T()),
-        Var(name="b_1", sign=BFloat16T()),
-        Var(name="b_2", sign=BFloat16T()),
-        Var(name="b_3", sign=BFloat16T()),
+        Var(name="b_0", dtype=BFloat16()),
+        Var(name="b_1", dtype=BFloat16()),
+        Var(name="b_2", dtype=BFloat16()),
+        Var(name="b_3", dtype=BFloat16()),
     ]
     
     design = bf16x8_dot_fp32_optimized(*a, *b)

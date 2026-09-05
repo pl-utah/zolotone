@@ -34,27 +34,27 @@ def fp32_to_fp16(x: Node) -> Node:
     encode_negative_zero = bit_and(X.is_zero, X.sign)
     result = if_then_else(
         encode_negative_zero,
-        Const(Float16.nZero()),
+        Const(Float16().nZero()),
         result,
     )
 
     encode_positive_infinity = bit_and(X.is_inf, bit_neg(X.sign))
     result = if_then_else(
         encode_positive_infinity,
-        Const(Float16.Inf()),
+        Const(Float16().Inf()),
         result,
     )
 
     encode_negative_infinity = bit_and(X.is_inf, X.sign)
     result = if_then_else(
         encode_negative_infinity,
-        Const(Float16.nInf()),
+        Const(Float16().nInf()),
         result,
     )
 
     result = if_then_else(
         X.is_nan,
-        Const(Float16.NaN()),
+        Const(Float16().NaN()),
         result,
     )
     return result
@@ -62,7 +62,7 @@ def fp32_to_fp16(x: Node) -> Node:
 
 if __name__ == "__main__":
     cast = fp32_to_fp16(
-        Var(name="x", sign=Float32T()),
+        Var(name="x", dtype=Float32()),
     )
 
     cast.check_determinism()

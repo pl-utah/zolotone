@@ -1,8 +1,27 @@
-from .runtime import BFloat16, Bool, E2M1, E4M3FN, E5M2, E5M2FNUZ, Float16, Float32, Q, RuntimeType, Tuple, UE4M3, UQ
-from .static import BFloat16T, BoolT, E2M1T, E4M3FNT, E5M2T, E5M2FNUZT, Float16T, Float32T, QT, StaticType, TupleT, UE4M3T, UQT
+from .descriptors import (
+    BFloat16,
+    Bool,
+    DataType,
+    E2M1,
+    E4M3FN,
+    E5M2,
+    E5M2FNUZ,
+    Float16,
+    Float32,
+    Q,
+    Tuple,
+    UE4M3,
+    UQ,
+)
+from .values import BoolValue, FixedValue, FloatValue, RuntimeValue, TupleValue
 
 __all__ = [
-    "RuntimeType",
+    "DataType",
+    "RuntimeValue",
+    "BoolValue",
+    "FixedValue",
+    "FloatValue",
+    "TupleValue",
     "Tuple",
     "Bool",
     "Q",
@@ -15,17 +34,4 @@ __all__ = [
     "E5M2",
     "E5M2FNUZ",
     "E2M1",
-    "StaticType",
-    "BoolT",
-    "QT",
-    "UQT",
-    "Float16T",
-    "Float32T",
-    "BFloat16T",
-    "E4M3FNT",
-    "UE4M3T",
-    "E5M2T",
-    "E5M2FNUZT",
-    "E2M1T",
-    "TupleT",
 ]

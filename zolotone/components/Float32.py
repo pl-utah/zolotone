@@ -16,10 +16,10 @@ from .rounding_routines import (
 
 def _fp32_mantissa(x: Node) -> Op:
     def impl(x: Float32) -> UQ:
-        return UQ(x.mantissa, Float32.mantissa_bits, 0)
+        return UQ(Float32.mantissa_bits, 0).from_bits(x.mantissa)
 
-    def sign(x: Float32T) -> UQT:
-        return UQT(Float32.mantissa_bits, 0)
+    def sign(x: Float32) -> UQ:
+        return UQ(Float32.mantissa_bits, 0)
 
     return Op(
         impl=impl,
@@ -32,10 +32,10 @@ def _fp32_mantissa(x: Node) -> Op:
 
 def _fp32_exponent(x: Node) -> Op:
     def impl(x: Float32) -> UQ:
-        return UQ(x.exponent, Float32.exponent_bits, 0)
+        return UQ(Float32.exponent_bits, 0).from_bits(x.exponent)
 
-    def sign(x: Float32T) -> UQT:
-        return UQT(Float32.exponent_bits, 0)
+    def sign(x: Float32) -> UQ:
+        return UQ(Float32.exponent_bits, 0)
 
     return Op(
         impl=impl,
@@ -48,10 +48,10 @@ def _fp32_exponent(x: Node) -> Op:
 
 def _fp32_sign(x: Node) -> Op:
     def impl(x: Float32) -> UQ:
-        return UQ(x.sign, 1, 0)
+        return UQ(1, 0).from_bits(x.sign)
 
-    def sign(x: Float32T) -> UQT:
-        return UQT(1, 0)
+    def sign(x: Float32) -> UQ:
+        return UQ(1, 0)
 
     return Op(
         impl=impl,
@@ -64,26 +64,26 @@ def _fp32_sign(x: Node) -> Op:
 
 def _fp32_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
     def sign(
-        sign_bit: StaticType,
-        exponent: StaticType,
-        mantissa: StaticType,
-    ) -> Float32T:
-        return Float32T()
+        sign_bit: DataType,
+        exponent: DataType,
+        mantissa: DataType,
+    ) -> Float32:
+        return Float32()
 
     def impl(
-        sign_bit: RuntimeType,
-        exponent: RuntimeType,
-        mantissa: RuntimeType,
+        sign_bit: RuntimeValue,
+        exponent: RuntimeValue,
+        mantissa: RuntimeValue,
     ) -> Float32:
-        return Float32.from_fields(sign_bit.val, exponent.val, mantissa.val)
+        return Float32().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
 
     return Op(
         sign=sign,
         impl=impl,
         c_lowering=lambda args, jittable: (
-            f"(({Float32T().to_cpp_type(jittable=jittable)}({args[0]}) << 31) | "
-            f"({Float32T().to_cpp_type(jittable=jittable)}({args[1]}) << 23) | "
-            f"{Float32T().to_cpp_type(jittable=jittable)}({args[2]}))"
+            f"(({Float32().to_cpp_type(jittable=jittable)}({args[0]}) << 31) | "
+            f"({Float32().to_cpp_type(jittable=jittable)}({args[1]}) << 23) | "
+            f"{Float32().to_cpp_type(jittable=jittable)}({args[2]}))"
         ),
         args=[sign_bit, exponent, mantissa],
         name="_fp32_alloc",
@@ -170,37 +170,37 @@ def fp32_decode(x: Node) -> DecodedFP32:
         exponent = _fp32_exponent(x)
         mantissa = _fp32_mantissa(x)
 
-        bit = Const(UQ(0, 1, 0))
+        bit = UQ(1, 0)
         mantissa_is_nonzero = basic_or_reduce(mantissa, bit)
-        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit.copy())
-        exponent_is_all_ones = basic_and_reduce(exponent, bit.copy())
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit)
+        exponent_is_all_ones = basic_and_reduce(exponent, bit)
         exponent_is_not_all_ones = basic_invert(
             exponent_is_all_ones,
-            bit.copy(),
+            bit,
         )
-        exponent_is_nonzero = basic_or_reduce(exponent, bit.copy())
-        exponent_is_zero = basic_invert(exponent_is_nonzero, bit.copy())
+        exponent_is_nonzero = basic_or_reduce(exponent, bit)
+        exponent_is_zero = basic_invert(exponent_is_nonzero, bit)
 
         is_normal = basic_and(
             exponent_is_nonzero,
             exponent_is_not_all_ones,
-            bit.copy(),
+            bit,
         )
         is_subnormal = basic_and(
             exponent_is_zero,
             mantissa_is_nonzero,
-            bit.copy(),
+            bit,
         )
-        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit.copy())
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit)
         is_inf = basic_and(
             exponent_is_all_ones,
             mantissa_is_zero,
-            bit.copy(),
+            bit,
         )
         is_nan = basic_and(
             exponent_is_all_ones,
             mantissa_is_nonzero,
-            bit.copy(),
+            bit,
         )
         return make_Tuple(
             sign,
@@ -238,14 +238,14 @@ def fp32_encodings(m_rounded: Node, e_rounded: Node):
     )
     final_e = basic_identity(
         final_e_wide,
-        Const(UQ.from_int(Float32.inf_code)),
+        UQ(Float32.exponent_bits, 0),
     )
-    is_inf = basic_and_reduce(final_e, Const(UQ(0, 1, 0)))
+    is_inf = basic_and_reduce(final_e, UQ(1, 0))
     final_m = basic_mux_2_1(
         is_inf,
         m_rounded,
-        Const(UQ(0, 1, 0)),
-        m_rounded.copy(),
+        Const(UQ(1, 0).from_bits(0)),
+        m_rounded.dtype,
     )
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 
@@ -262,7 +262,7 @@ def fp32_encode_spec(s, e, m, ctx):
 
 @Composite(name="fp32_encode", spec=fp32_encode_spec)
 def fp32_encode(s: Node, e: Node, m: Node) -> Node:
-    if e.node_type.frac_bits != 0:
+    if e.dtype.frac_bits != 0:
         raise ValueError("fp32_encode exponent must have zero fractional bits")
 
     encode_exact_zero = uq_is_zero(m)
@@ -280,6 +280,6 @@ def fp32_encode(s: Node, e: Node, m: Node) -> Node:
     final_m, final_e = fp32_encodings(rounded_m, rounded_e)
     return if_then_else(
         encode_exact_zero,
-        Const(Float32.Zero()),
+        Const(Float32().Zero()),
         fp32_pack(s, final_e, final_m),
     )

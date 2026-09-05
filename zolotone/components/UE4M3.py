@@ -12,10 +12,10 @@ from .basics import *
 
 def _ue4m3_mantissa(x: Node) -> Op:
     def impl(x: UE4M3) -> UQ:
-        return UQ(x.mantissa, UE4M3.mantissa_bits, 0)
+        return UQ(UE4M3.mantissa_bits, 0).from_bits(x.mantissa)
 
-    def sign(x: UE4M3T) -> UQT:
-        return UQT(UE4M3.mantissa_bits, 0)
+    def sign(x: UE4M3) -> UQ:
+        return UQ(UE4M3.mantissa_bits, 0)
 
     return Op(
         impl=impl,
@@ -28,10 +28,10 @@ def _ue4m3_mantissa(x: Node) -> Op:
 
 def _ue4m3_exponent(x: Node) -> Op:
     def impl(x: UE4M3) -> UQ:
-        return UQ(x.exponent, UE4M3.exponent_bits, 0)
+        return UQ(UE4M3.exponent_bits, 0).from_bits(x.exponent)
 
-    def sign(x: UE4M3T) -> UQT:
-        return UQT(UE4M3.exponent_bits, 0)
+    def sign(x: UE4M3) -> UQ:
+        return UQ(UE4M3.exponent_bits, 0)
 
     return Op(
         impl=impl,
@@ -43,18 +43,18 @@ def _ue4m3_exponent(x: Node) -> Op:
 
 
 def _ue4m3_alloc(exponent: Node, mantissa: Node) -> Op:
-    def sign(exponent: StaticType, mantissa: StaticType) -> UE4M3T:
-        return UE4M3T()
+    def sign(exponent: DataType, mantissa: DataType) -> UE4M3:
+        return UE4M3()
 
-    def impl(exponent: RuntimeType, mantissa: RuntimeType) -> UE4M3:
-        return UE4M3.from_fields(exponent.val, mantissa.val)
+    def impl(exponent: RuntimeValue, mantissa: RuntimeValue) -> UE4M3:
+        return UE4M3().from_fields(exponent.raw, mantissa.raw)
 
     return Op(
         sign=sign,
         impl=impl,
         c_lowering=lambda args, jittable: (
-            f"(({UE4M3T().to_cpp_type(jittable=jittable)}({args[0]}) << 3) | "
-            f"{UE4M3T().to_cpp_type(jittable=jittable)}({args[1]}))"
+            f"(({UE4M3().to_cpp_type(jittable=jittable)}({args[0]}) << 3) | "
+            f"{UE4M3().to_cpp_type(jittable=jittable)}({args[1]}))"
         ),
         args=[exponent, mantissa],
         name="_ue4m3_alloc",
@@ -129,18 +129,18 @@ def ue4m3_decode(x: Node) -> DecodedUE4M3:
         exponent = _ue4m3_exponent(x)
         mantissa = _ue4m3_mantissa(x)
 
-        bit = UQ(0, 1, 0)
-        mantissa_is_nonzero = basic_or_reduce(mantissa, out=Const(bit))
-        mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=Const(bit))
-        mantissa_is_all_ones = basic_and_reduce(mantissa, out=Const(bit))
-        exponent_is_nonzero = basic_or_reduce(exponent, out=Const(bit))
-        exponent_is_zero = basic_invert(exponent_is_nonzero, out=Const(bit))
-        exponent_is_all_ones = basic_and_reduce(exponent, out=Const(bit))
-        is_nan = basic_and(exponent_is_all_ones, mantissa_is_all_ones, Const(bit))
-        not_nan = basic_invert(is_nan, Const(bit))
-        is_normal = basic_and(exponent_is_nonzero, not_nan, Const(bit))
-        is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, Const(bit))
-        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, Const(bit))
+        bit = UQ(1, 0)
+        mantissa_is_nonzero = basic_or_reduce(mantissa, out=bit)
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, out=bit)
+        mantissa_is_all_ones = basic_and_reduce(mantissa, out=bit)
+        exponent_is_nonzero = basic_or_reduce(exponent, out=bit)
+        exponent_is_zero = basic_invert(exponent_is_nonzero, out=bit)
+        exponent_is_all_ones = basic_and_reduce(exponent, out=bit)
+        is_nan = basic_and(exponent_is_all_ones, mantissa_is_all_ones, bit)
+        not_nan = basic_invert(is_nan, bit)
+        is_normal = basic_and(exponent_is_nonzero, not_nan, bit)
+        is_subnormal = basic_and(exponent_is_zero, mantissa_is_nonzero, bit)
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit)
         return make_Tuple(
             exponent,
             mantissa,
@@ -180,27 +180,27 @@ def ue4m3_encodings(m_rounded: Node, e_rounded: Node):
     exponent_overflow = uq_gt(e_rounded, max_exponent)
     final_e = basic_identity(
         uq_min(e_rounded, max_exponent),
-        Const(UQ(0, UE4M3.exponent_bits, 0)),
+        UQ(UE4M3.exponent_bits, 0),
     )
     final_m = uq_fraction_to_integer(m_rounded)
 
     exponent_is_15 = uq_eq(final_e, max_exponent)
-    mantissa_is_7 = basic_and_reduce(final_m, Const(UQ(0, 1, 0)))
+    mantissa_is_7 = basic_and_reduce(final_m, UQ(1, 0))
     reserved_nan = basic_and(
         exponent_is_15,
         mantissa_is_7,
-        Const(UQ(0, 1, 0)),
+        UQ(1, 0),
     )
     saturate = basic_or(
         exponent_overflow,
         reserved_nan,
-        Const(UQ(0, 1, 0)),
+        UQ(1, 0),
     )
     final_m = basic_mux_2_1(
         saturate,
         final_m,
         Const(UQ.from_int(UE4M3.max_finite_mantissa)),
-        final_m.copy(),
+        final_m.dtype,
     )
     return make_Tuple(final_m, final_e)
 
@@ -214,7 +214,7 @@ def ue4m3_encode_spec(e, m, ctx):
 def ue4m3_encode(e: Node, m: Node) -> Node:
     """Encode an unsigned magnitude using RNE and finite saturation."""
 
-    if e.node_type.frac_bits != 0:
+    if e.dtype.frac_bits != 0:
         raise ValueError("ue4m3_encode exponent must have zero fractional bits")
 
     encode_exact_zero = uq_is_zero(m)
@@ -234,6 +234,6 @@ def ue4m3_encode(e: Node, m: Node) -> Node:
     use_zero = bit_or(encode_exact_zero, rounded_zero)
     return if_then_else(
         use_zero,
-        Const(UE4M3.Zero()),
+        Const(UE4M3().Zero()),
         ue4m3_pack(final_e, final_m),
     )

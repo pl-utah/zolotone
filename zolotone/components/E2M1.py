@@ -11,10 +11,10 @@ from .basics import *
 
 def _e2m1_mantissa(x: Node) -> Op:
     def impl(value: E2M1) -> UQ:
-        return UQ(value.mantissa, E2M1.mantissa_bits, 0)
+        return UQ(E2M1.mantissa_bits, 0).from_bits(value.mantissa)
 
-    def sign(value_type: E2M1T) -> UQT:
-        return UQT(E2M1.mantissa_bits, 0)
+    def sign(value_type: E2M1) -> UQ:
+        return UQ(E2M1.mantissa_bits, 0)
 
     return Op(
         impl=impl,
@@ -27,10 +27,10 @@ def _e2m1_mantissa(x: Node) -> Op:
 
 def _e2m1_exponent(x: Node) -> Op:
     def impl(value: E2M1) -> UQ:
-        return UQ(value.exponent, E2M1.exponent_bits, 0)
+        return UQ(E2M1.exponent_bits, 0).from_bits(value.exponent)
 
-    def sign(value_type: E2M1T) -> UQT:
-        return UQT(E2M1.exponent_bits, 0)
+    def sign(value_type: E2M1) -> UQ:
+        return UQ(E2M1.exponent_bits, 0)
 
     return Op(
         impl=impl,
@@ -43,10 +43,10 @@ def _e2m1_exponent(x: Node) -> Op:
 
 def _e2m1_sign(x: Node) -> Op:
     def impl(value: E2M1) -> UQ:
-        return UQ(value.sign, 1, 0)
+        return UQ(1, 0).from_bits(value.sign)
 
-    def sign(value_type: E2M1T) -> UQT:
-        return UQT(1, 0)
+    def sign(value_type: E2M1) -> UQ:
+        return UQ(1, 0)
 
     return Op(
         impl=impl,
@@ -59,26 +59,26 @@ def _e2m1_sign(x: Node) -> Op:
 
 def _e2m1_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
     def sign(
-        sign_bit: StaticType,
-        exponent: StaticType,
-        mantissa: StaticType,
-    ) -> E2M1T:
-        return E2M1T()
+        sign_bit: DataType,
+        exponent: DataType,
+        mantissa: DataType,
+    ) -> E2M1:
+        return E2M1()
 
     def impl(
-        sign_bit: RuntimeType,
-        exponent: RuntimeType,
-        mantissa: RuntimeType,
+        sign_bit: RuntimeValue,
+        exponent: RuntimeValue,
+        mantissa: RuntimeValue,
     ) -> E2M1:
-        return E2M1.from_fields(sign_bit.val, exponent.val, mantissa.val)
+        return E2M1().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
 
     return Op(
         sign=sign,
         impl=impl,
         c_lowering=lambda args, jittable: (
-            f"(({E2M1T().to_cpp_type(jittable=jittable)}({args[0]}) << 3) | "
-            f"({E2M1T().to_cpp_type(jittable=jittable)}({args[1]}) << 1) | "
-            f"{E2M1T().to_cpp_type(jittable=jittable)}({args[2]}))"
+            f"(({E2M1().to_cpp_type(jittable=jittable)}({args[0]}) << 3) | "
+            f"({E2M1().to_cpp_type(jittable=jittable)}({args[1]}) << 1) | "
+            f"{E2M1().to_cpp_type(jittable=jittable)}({args[2]}))"
         ),
         args=[sign_bit, exponent, mantissa],
         name="_e2m1_alloc",
@@ -148,13 +148,13 @@ def e2m1_decode(x: Node) -> DecodedE2M1:
         sign = _e2m1_sign(x)
         exponent = _e2m1_exponent(x)
         mantissa = _e2m1_mantissa(x)
-        bit = Const(UQ(0, 1, 0))
-        exponent_is_nonzero = basic_or_reduce(exponent, bit.copy())
-        exponent_is_zero = basic_invert(exponent_is_nonzero, bit.copy())
-        mantissa_is_nonzero = basic_or_reduce(mantissa, bit.copy())
-        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit.copy())
-        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit.copy())
-        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit.copy())
+        bit = UQ(1, 0)
+        exponent_is_nonzero = basic_or_reduce(exponent, bit)
+        exponent_is_zero = basic_invert(exponent_is_nonzero, bit)
+        mantissa_is_nonzero = basic_or_reduce(mantissa, bit)
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit)
+        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit)
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit)
         return make_Tuple(
             sign, exponent, mantissa, exponent_is_nonzero, is_sub, is_zero
         )
@@ -185,14 +185,14 @@ def e2m1_encodings(m_rounded: Node, e_rounded: Node):
     overflow = uq_gt(e_rounded, max_exponent)
     final_e = basic_identity(
         uq_min(e_rounded, max_exponent),
-        Const(UQ(0, E2M1.exponent_bits, 0)),
+        UQ(E2M1.exponent_bits, 0),
     )
     final_m = uq_fraction_to_integer(m_rounded)
     final_m = basic_mux_2_1(
         overflow,
         final_m,
         Const(UQ.from_int(E2M1.max_finite_mantissa)),
-        final_m.copy(),
+        final_m.dtype,
     )
     return make_Tuple(final_m, final_e)
 
@@ -210,7 +210,7 @@ def e2m1_encode_spec(s, e, m, ctx):
 def e2m1_encode(s: Node, e: Node, m: Node) -> Node:
     """Encode using RNE, canonical exact zero, and finite saturation."""
 
-    if e.node_type.frac_bits != 0:
+    if e.dtype.frac_bits != 0:
         raise ValueError("e2m1_encode exponent must have zero fractional bits")
     encode_exact_zero = uq_is_zero(m)
     normalized_m, normalized_e = normalize_to_1_xxx(m, e)
@@ -223,6 +223,6 @@ def e2m1_encode(s: Node, e: Node, m: Node) -> Node:
     final_m, final_e = e2m1_encodings(rounded_m, rounded_e)
     return if_then_else(
         encode_exact_zero,
-        Const(E2M1.Zero()),
+        Const(E2M1().Zero()),
         e2m1_pack(s, final_e, final_m),
     )

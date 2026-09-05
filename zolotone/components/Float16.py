@@ -19,10 +19,10 @@ from .UQ import uq_fraction_to_integer, uq_is_zero, uq_min
 
 def _fp16_mantissa(x: Node) -> Op:
     def impl(x: Float16) -> UQ:
-        return UQ(x.mantissa, Float16.mantissa_bits, 0)
+        return UQ(Float16.mantissa_bits, 0).from_bits(x.mantissa)
 
-    def sign(x: Float16T) -> UQT:
-        return UQT(Float16.mantissa_bits, 0)
+    def sign(x: Float16) -> UQ:
+        return UQ(Float16.mantissa_bits, 0)
 
     return Op(
         impl=impl,
@@ -35,10 +35,10 @@ def _fp16_mantissa(x: Node) -> Op:
 
 def _fp16_exponent(x: Node) -> Op:
     def impl(x: Float16) -> UQ:
-        return UQ(x.exponent, Float16.exponent_bits, 0)
+        return UQ(Float16.exponent_bits, 0).from_bits(x.exponent)
 
-    def sign(x: Float16T) -> UQT:
-        return UQT(Float16.exponent_bits, 0)
+    def sign(x: Float16) -> UQ:
+        return UQ(Float16.exponent_bits, 0)
 
     return Op(
         impl=impl,
@@ -51,10 +51,10 @@ def _fp16_exponent(x: Node) -> Op:
 
 def _fp16_sign(x: Node) -> Op:
     def impl(x: Float16) -> UQ:
-        return UQ(x.sign, 1, 0)
+        return UQ(1, 0).from_bits(x.sign)
 
-    def sign(x: Float16T) -> UQT:
-        return UQT(1, 0)
+    def sign(x: Float16) -> UQ:
+        return UQ(1, 0)
 
     return Op(
         impl=impl,
@@ -71,30 +71,30 @@ def _fp16_alloc(
     mantissa: Node,
 ) -> Op:
     def sign(
-        sign_bit: StaticType,
-        exponent: StaticType,
-        mantissa: StaticType,
-    ) -> Float16T:
-        return Float16T()
+        sign_bit: DataType,
+        exponent: DataType,
+        mantissa: DataType,
+    ) -> Float16:
+        return Float16()
 
     def impl(
-        sign_bit: RuntimeType,
-        exponent: RuntimeType,
-        mantissa: RuntimeType,
+        sign_bit: RuntimeValue,
+        exponent: RuntimeValue,
+        mantissa: RuntimeValue,
     ) -> Float16:
-        return Float16.from_fields(
-            sign=sign_bit.val,
-            exponent=exponent.val,
-            mantissa=mantissa.val,
+        return Float16().from_fields(
+            sign=sign_bit.raw,
+            exponent=exponent.raw,
+            mantissa=mantissa.raw,
         )
 
     return Op(
         sign=sign,
         impl=impl,
         c_lowering=lambda lowered_args, jittable: (
-            f"(({Float16T().to_cpp_type(jittable=jittable)}({lowered_args[0]}) << 15) | "
-            f"({Float16T().to_cpp_type(jittable=jittable)}({lowered_args[1]}) << 10) | "
-            f"{Float16T().to_cpp_type(jittable=jittable)}({lowered_args[2]}))"
+            f"(({Float16().to_cpp_type(jittable=jittable)}({lowered_args[0]}) << 15) | "
+            f"({Float16().to_cpp_type(jittable=jittable)}({lowered_args[1]}) << 10) | "
+            f"{Float16().to_cpp_type(jittable=jittable)}({lowered_args[2]}))"
         ),
         args=[sign_bit, exponent, mantissa],
         name="_fp16_alloc",
@@ -191,54 +191,54 @@ def fp16_decode(x: Node) -> DecodedFP16:
 
         mantissa_is_nonzero = basic_or_reduce(
             mantissa,
-            out=Const(UQ(0, 1, 0)),
+            out=UQ(1, 0),
         )
         mantissa_is_zero = basic_invert(
             mantissa_is_nonzero,
-            out=Const(UQ(0, 1, 0)),
+            out=UQ(1, 0),
         )
 
         exponent_is_all_ones = basic_and_reduce(
             exponent,
-            out=Const(UQ(0, 1, 0)),
+            out=UQ(1, 0),
         )
         exponent_is_not_all_ones = basic_invert(
             exponent_is_all_ones,
-            out=Const(UQ(0, 1, 0)),
+            out=UQ(1, 0),
         )
         exponent_is_nonzero = basic_or_reduce(
             exponent,
-            out=Const(UQ(0, 1, 0)),
+            out=UQ(1, 0),
         )
         exponent_is_zero = basic_invert(
             exponent_is_nonzero,
-            out=Const(UQ(0, 1, 0)),
+            out=UQ(1, 0),
         )
 
         is_normal = basic_and(
             exponent_is_nonzero,
             exponent_is_not_all_ones,
-            Const(UQ(0, 1, 0)),
+            UQ(1, 0),
         )
         is_subnormal = basic_and(
             exponent_is_zero,
             mantissa_is_nonzero,
-            Const(UQ(0, 1, 0)),
+            UQ(1, 0),
         )
         is_zero = basic_and(
             exponent_is_zero,
             mantissa_is_zero,
-            Const(UQ(0, 1, 0)),
+            UQ(1, 0),
         )
         is_inf = basic_and(
             exponent_is_all_ones,
             mantissa_is_zero,
-            Const(UQ(0, 1, 0)),
+            UQ(1, 0),
         )
         is_nan = basic_and(
             exponent_is_all_ones,
             mantissa_is_nonzero,
-            Const(UQ(0, 1, 0)),
+            UQ(1, 0),
         )
 
         return make_Tuple(
@@ -277,14 +277,14 @@ def fp16_encodings(m_rounded: Node, e_rounded: Node):
     )
     final_e = basic_identity(
         final_e_wide,
-        Const(UQ.from_int(Float16.inf_code)),
+        UQ(Float16.exponent_bits, 0),
     )
-    is_inf = basic_and_reduce(final_e, Const(UQ(0, 1, 0)))
+    is_inf = basic_and_reduce(final_e, UQ(1, 0))
     final_m = basic_mux_2_1(
         is_inf,
         m_rounded,
-        Const(UQ(0, 1, 0)),
-        m_rounded.copy(),
+        Const(UQ(1, 0).from_bits(0)),
+        m_rounded.dtype,
     )
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 
@@ -301,7 +301,7 @@ def fp16_encode_spec(s, e, m, ctx):
 
 @Composite(name="fp16_encode", spec=fp16_encode_spec)
 def fp16_encode(s: Node, e: Node, m: Node) -> Node:
-    if e.node_type.frac_bits != 0:
+    if e.dtype.frac_bits != 0:
         raise ValueError("fp16_encode exponent must have zero fractional bits")
 
     encode_exact_zero = uq_is_zero(m)
@@ -319,6 +319,6 @@ def fp16_encode(s: Node, e: Node, m: Node) -> Node:
     final_m, final_e = fp16_encodings(rounded_m, rounded_e)
     return if_then_else(
         encode_exact_zero,
-        Const(Float16.Zero()),
+        Const(Float16().Zero()),
         fp16_pack(s, final_e, final_m),
     )

@@ -27,19 +27,19 @@ def ue4m3_to_fp32(x: Node) -> Node:
     )
 
     result = fp32_encode(
-        Const(UQ(0, 1, 0)),
+        Const(UQ(1, 0).from_bits(0)),
         target_exponent,
         significand,
     )
     return if_then_else(
         X.is_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         result,
     )
 
 
 if __name__ == "__main__":
-    cast = ue4m3_to_fp32(Var(name="x", sign=UE4M3T()))
+    cast = ue4m3_to_fp32(Var(name="x", dtype=UE4M3()))
 
     cast.check_determinism()
     cast.check_spec()

@@ -1,5 +1,4 @@
-from ..types.runtime import RuntimeType, Tuple
-from ..types.static import StaticType, TupleT
+from ..types import DataType, RuntimeValue, Tuple, TupleValue
 from ..spec import BoolExpr, Cases, case, FPExpr, If, RealExpr
 from .node import Node
 from .nodes import Op, Primitive
@@ -11,14 +10,16 @@ def Copy(x: Node) -> Node:
 
 
 def _basic_get_item(x: Node, idx: int) -> Op:
-    if idx >= len(x.node_type.args) or idx < 0:
+    if not isinstance(x.dtype, Tuple):
+        raise TypeError(f"Expected a Tuple node, got {x.dtype}")
+    if idx >= len(x.dtype.items) or idx < 0:
         raise IndexError(f"Index is out of range for tuple {str(x)}, given {str(idx)}")
     
-    def sign(x: TupleT) -> StaticType:
-        return x.args[idx]
+    def sign(x: Tuple) -> DataType:
+        return x.items[idx]
     
-    def op(x: Tuple) -> RuntimeType:
-        return x.args[idx]
+    def op(x: TupleValue) -> RuntimeValue:
+        return x.items[idx]
     
     return Op(
         impl=op,
@@ -66,5 +67,5 @@ def if_then_else_spec(sel, in1, in0, ctx):
 @Primitive(name="if_then_else", spec=if_then_else_spec, c_inline=True)
 def if_then_else(sel: Node, in1: Node, in0: Node) -> Node:
     from ..components.basics import basic_mux_2_1
-    assert in1.node_type == in0.node_type, "Non-deterministic type"
-    return basic_mux_2_1(sel=sel, in0=in0, in1=in1, out=in0.copy())
+    assert in1.dtype == in0.dtype, "Non-deterministic type"
+    return basic_mux_2_1(sel=sel, in0=in0, in1=in1, out=in0.dtype)

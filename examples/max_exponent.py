@@ -7,31 +7,31 @@ def max_exp4_spec(e0, e1, e2, e3, ctx):
 @Primitive(name="OPTIMIZED_MAX_EXP4", spec=max_exp4_spec)
 def OPTIMIZED_MAX_EXP4(e0: Node, e1: Node, e2: Node, e3: Node) -> Node:
     def bit_not(x: Node) -> Node:
-        return basic_invert(x=x, out=Const(UQ(0, 1, 0)))
+        return basic_invert(x=x, out=UQ(1, 0))
 
     def bit_and(x: Node, y: Node) -> Node:
-        return basic_and(x=x, y=y, out=Const(UQ(0, 1, 0)))
+        return basic_and(x=x, y=y, out=UQ(1, 0))
 
     def bit_or(x: Node, y: Node) -> Node:
-        return basic_or(x=x, y=y, out=Const(UQ(0, 1, 0)))
+        return basic_or(x=x, y=y, out=UQ(1, 0))
 
     def concat(high: Node, low: Node) -> Node:
         return basic_concat(
             x=high,
             y=low,
-            out=Const(UQ(0, high.node_type.int_bits + low.node_type.int_bits, 0)),
+            out=UQ(high.dtype.int_bits + low.dtype.int_bits, 0),
         )
 
     inputs = [e0, e1, e2, e3]
 
     # This uses statically known widths to build the comparison tree shape.
-    int_bits = max(x.node_type.int_bits for x in inputs)
-    frac_bits = max(x.node_type.frac_bits for x in inputs)
+    int_bits = max(x.dtype.int_bits for x in inputs)
+    frac_bits = max(x.dtype.frac_bits for x in inputs)
     assert frac_bits == 0, "not implemented yet"
     
     bit_width = int_bits + frac_bits
 
-    zero_bit = Const(UQ(0, 1, 0))
+    zero_bit = Const(UQ(1, 0).from_bits(0))
 
     prev_bits = [zero_bit] * len(inputs)
     smaller = [zero_bit] * len(inputs)
@@ -50,7 +50,7 @@ def OPTIMIZED_MAX_EXP4(e0: Node, e1: Node, e2: Node, e3: Node) -> Node:
             candidate = bit_and(curr_bit, bit_not(is_smaller))
             candidates = concat(candidates, candidate)
 
-        max_prev = basic_or_reduce(candidates, out=Const(UQ(0, 1, 0)))  # or tree
+        max_prev = basic_or_reduce(candidates, out=UQ(1, 0))  # or tree
         if bits is None:
             bits = max_prev
         else:
@@ -60,7 +60,7 @@ def OPTIMIZED_MAX_EXP4(e0: Node, e1: Node, e2: Node, e3: Node) -> Node:
     return bits
 
 if __name__ == '__main__':
-    inputs = [Var(f"arg_{i}", sign=UQT(10, 0)) for i in range(4)]
+    inputs = [Var(f"arg_{i}", dtype=UQ(10, 0)) for i in range(4)]
     design = OPTIMIZED_MAX_EXP4(*inputs)
     # design.print_tree(depth=1)
     with open("examples/c_models/max_exp.hpp", "w") as file:

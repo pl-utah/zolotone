@@ -1,10 +1,10 @@
-from .runtime import RuntimeType
-from .static import StaticType
+from .descriptors import DataType
+from .values import RuntimeValue
 
 def _fingerprint_value(value):
-    if isinstance(value, RuntimeType):
+    if isinstance(value, RuntimeValue):
         return value._fingerprint()
-    if isinstance(value, StaticType):
+    if isinstance(value, DataType):
         return value._fingerprint()
     if isinstance(value, tuple):
         return tuple(_fingerprint_value(item) for item in value)

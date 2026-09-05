@@ -12,10 +12,10 @@ from .UQ import *
 
 def _e5m2_mantissa(x: Node) -> Op:
     def impl(value: E5M2) -> UQ:
-        return UQ(value.mantissa, E5M2.mantissa_bits, 0)
+        return UQ(E5M2.mantissa_bits, 0).from_bits(value.mantissa)
     
-    def sign(value_type: E5M2T) -> UQT:
-        return UQT(E5M2.mantissa_bits, 0)
+    def sign(value_type: E5M2) -> UQ:
+        return UQ(E5M2.mantissa_bits, 0)
     
     return Op(
         impl=impl,
@@ -28,10 +28,10 @@ def _e5m2_mantissa(x: Node) -> Op:
 
 def _e5m2_exponent(x: Node) -> Op:
     def impl(value: E5M2) -> UQ:
-        return UQ(value.exponent, E5M2.exponent_bits, 0)
+        return UQ(E5M2.exponent_bits, 0).from_bits(value.exponent)
     
-    def sign(value_type: E5M2T) -> UQT:
-        return UQT(E5M2.exponent_bits, 0)
+    def sign(value_type: E5M2) -> UQ:
+        return UQ(E5M2.exponent_bits, 0)
     
     return Op(
         impl=impl,
@@ -44,10 +44,10 @@ def _e5m2_exponent(x: Node) -> Op:
 
 def _e5m2_sign(x: Node) -> Op:
     def impl(value: E5M2) -> UQ:
-        return UQ(value.sign, 1, 0)
+        return UQ(1, 0).from_bits(value.sign)
     
-    def sign(value_type: E5M2T) -> UQT:
-        return UQT(1, 0)
+    def sign(value_type: E5M2) -> UQ:
+        return UQ(1, 0)
     
     return Op(
         impl=impl,
@@ -60,26 +60,26 @@ def _e5m2_sign(x: Node) -> Op:
 
 def _e5m2_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
     def sign(
-        sign_bit: StaticType,
-        exponent: StaticType,
-        mantissa: StaticType,
-    ) -> E5M2T:
-        return E5M2T()
+        sign_bit: DataType,
+        exponent: DataType,
+        mantissa: DataType,
+    ) -> E5M2:
+        return E5M2()
     
     def impl(
-        sign_bit: RuntimeType,
-        exponent: RuntimeType,
-        mantissa: RuntimeType,
+        sign_bit: RuntimeValue,
+        exponent: RuntimeValue,
+        mantissa: RuntimeValue,
     ) -> E5M2:
-        return E5M2.from_fields(sign_bit.val, exponent.val, mantissa.val)
+        return E5M2().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
     
     return Op(
         sign=sign,
         impl=impl,
         c_lowering=lambda args, jittable: (
-            f"(({E5M2T().to_cpp_type(jittable=jittable)}({args[0]}) << 7) | "
-            f"({E5M2T().to_cpp_type(jittable=jittable)}({args[1]}) << 2) | "
-            f"{E5M2T().to_cpp_type(jittable=jittable)}({args[2]}))"
+            f"(({E5M2().to_cpp_type(jittable=jittable)}({args[0]}) << 7) | "
+            f"({E5M2().to_cpp_type(jittable=jittable)}({args[1]}) << 2) | "
+            f"{E5M2().to_cpp_type(jittable=jittable)}({args[2]}))"
         ),
         args=[sign_bit, exponent, mantissa],
         name="_e5m2_alloc",
@@ -163,22 +163,22 @@ def e5m2_decode(x: Node) -> DecodedE5M2:
         sign = _e5m2_sign(x)
         exponent = _e5m2_exponent(x)
         mantissa = _e5m2_mantissa(x)
-        bit = Const(UQ(0, 1, 0))
-        exponent_is_all_ones = basic_and_reduce(exponent, bit.copy())
+        bit = UQ(1, 0)
+        exponent_is_all_ones = basic_and_reduce(exponent, bit)
         exponent_is_not_all_ones = basic_invert(
-            exponent_is_all_ones, bit.copy()
+            exponent_is_all_ones, bit
         )
-        exponent_is_nonzero = basic_or_reduce(exponent, bit.copy())
-        exponent_is_zero = basic_invert(exponent_is_nonzero, bit.copy())
-        mantissa_is_nonzero = basic_or_reduce(mantissa, bit.copy())
-        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit.copy())
+        exponent_is_nonzero = basic_or_reduce(exponent, bit)
+        exponent_is_zero = basic_invert(exponent_is_nonzero, bit)
+        mantissa_is_nonzero = basic_or_reduce(mantissa, bit)
+        mantissa_is_zero = basic_invert(mantissa_is_nonzero, bit)
         is_norm = basic_and(
-            exponent_is_nonzero, exponent_is_not_all_ones, bit.copy()
+            exponent_is_nonzero, exponent_is_not_all_ones, bit
         )
-        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit.copy())
-        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit.copy())
-        is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, bit.copy())
-        is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, bit.copy())
+        is_sub = basic_and(exponent_is_zero, mantissa_is_nonzero, bit)
+        is_zero = basic_and(exponent_is_zero, mantissa_is_zero, bit)
+        is_inf = basic_and(exponent_is_all_ones, mantissa_is_zero, bit)
+        is_nan = basic_and(exponent_is_all_ones, mantissa_is_nonzero, bit)
         return make_Tuple(
             sign, exponent, mantissa, is_norm, is_sub, is_zero, is_inf, is_nan
         )
@@ -208,14 +208,14 @@ def e5m2_encodings_spec(m, e, ctx):
 def e5m2_encodings(m_rounded: Node, e_rounded: Node):
     final_e = basic_identity(
         uq_min(e_rounded, Const(UQ.from_int(E5M2.inf_code))),
-        Const(UQ.from_int(E5M2.inf_code)),
+        UQ(E5M2.exponent_bits, 0),
     )
-    is_inf = basic_and_reduce(final_e, Const(UQ(0, 1, 0)))
+    is_inf = basic_and_reduce(final_e, UQ(1, 0))
     final_m = basic_mux_2_1(
         is_inf,
         m_rounded,
-        Const(UQ(0, 1, 0)),
-        m_rounded.copy(),
+        Const(UQ(1, 0).from_bits(0)),
+        m_rounded.dtype,
     )
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 
@@ -233,7 +233,7 @@ def e5m2_encode_spec(s, e, m, ctx):
 def e5m2_encode(s: Node, e: Node, m: Node) -> Node:
     """Encode E5M2 with RNE, canonical exact zero, and signed infinity."""
     
-    if e.node_type.frac_bits != 0:
+    if e.dtype.frac_bits != 0:
         raise ValueError("e5m2_encode exponent must have zero fractional bits")
     encode_exact_zero = uq_is_zero(m)
     normalized_m, normalized_e = normalize_to_1_xxx(m, e)
@@ -248,6 +248,6 @@ def e5m2_encode(s: Node, e: Node, m: Node) -> Node:
     final_m, final_e = e5m2_encodings(rounded_m, rounded_e)
     return if_then_else(
         encode_exact_zero,
-        Const(E5M2.Zero()),
+        Const(E5M2().Zero()),
         e5m2_pack(s, final_e, final_m),
     )

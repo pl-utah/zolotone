@@ -34,27 +34,27 @@ def fp32_to_e4m3fn(x: Node) -> Node:
     encode_negative_zero = bit_and(X.is_zero, X.sign)
     result = if_then_else(
         encode_negative_zero,
-        Const(E4M3FN.nZero()),
+        Const(E4M3FN().nZero()),
         result,
     )
 
     encode_positive_infinity = bit_and(X.is_inf, bit_neg(X.sign))
     result = if_then_else(
         encode_positive_infinity,
-        Const(E4M3FN.from_fields(sign=0, exponent=15, mantissa=6)),
+        Const(E4M3FN().from_fields(sign=0, exponent=15, mantissa=6)),
         result,
     )
 
     encode_negative_infinity = bit_and(X.is_inf, X.sign)
     result = if_then_else(
         encode_negative_infinity,
-        Const(E4M3FN.from_fields(sign=1, exponent=15, mantissa=6)),
+        Const(E4M3FN().from_fields(sign=1, exponent=15, mantissa=6)),
         result,
     )
 
     result = if_then_else(
         X.is_nan,
-        Const(E4M3FN.NaN()),
+        Const(E4M3FN().NaN()),
         result,
     )
     return result
@@ -62,7 +62,7 @@ def fp32_to_e4m3fn(x: Node) -> Node:
 
 if __name__ == "__main__":
     cast = fp32_to_e4m3fn(
-        Var(name="x", sign=Float32T()),
+        Var(name="x", dtype=Float32()),
     )
 
     cast.check_determinism()

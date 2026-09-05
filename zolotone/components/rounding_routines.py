@@ -14,7 +14,7 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
 
     if bits_to_cut < 0:
         raise ValueError("Cannot cut a negative number of bits")
-    if bits_to_cut >= m.node_type.total_bits():
+    if bits_to_cut >= m.dtype.total_bits():
         raise ValueError("Cannot cut all bits of a fixed-point value")
 
     def spec(x, ctx):
@@ -24,11 +24,11 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
 
     @Primitive(name="uq_RNE_IEEE", spec=spec)
     def impl(m: Node):
-        total_bits = m.node_type.total_bits()
+        total_bits = m.dtype.total_bits()
         target_bits = total_bits - bits_to_cut
-        target_int_bits = min(m.node_type.int_bits, target_bits)
+        target_int_bits = min(m.dtype.int_bits, target_bits)
         target_frac_bits = max(target_bits - target_int_bits, 0)
-        bit = Const(UQ(0, 1, 0))
+        bit = Const(UQ(1, 0).from_bits(0))
 
         guard = bit.copy()
         round_bit = bit.copy()
@@ -39,24 +39,24 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
                 round_bit = uq_select(m, bits_to_cut - 2, bits_to_cut - 2)
                 if bits_to_cut > 2:
                     sticky = basic_or_reduce(
-                        uq_select(m, bits_to_cut - 3, 0), sticky
+                        uq_select(m, bits_to_cut - 3, 0), sticky.dtype
                     )
 
         lsb = uq_select(m, bits_to_cut, bits_to_cut)
         # Add increment?
-        tail = basic_or(basic_or(round_bit, sticky, bit.copy()), lsb, bit.copy())
-        increment = basic_and(guard, tail, bit.copy())
+        tail = basic_or(basic_or(round_bit, sticky, bit.dtype), lsb, bit.dtype)
+        increment = basic_and(guard, tail, bit.dtype)
         
         truncated = uq_resize(m, target_int_bits, target_frac_bits)
         # Overflow after incrementing?
         overflow = basic_and(
-            basic_and_reduce(truncated, bit.copy()), increment, bit.copy()
+            basic_and_reduce(truncated, bit.dtype), increment, bit.dtype
         )
         
         incremented = basic_add(
             truncated,
             increment,
-            Const(UQ(0, target_int_bits, target_frac_bits)),
+            UQ(target_int_bits, target_frac_bits),
         )
         return make_Tuple(incremented, overflow)
 
@@ -83,20 +83,20 @@ def round_mantissa(
 
     @Primitive(name="round_mantissa", spec=round_mantissa_spec)
     def impl(m: Node, e: Node):
-        bits_to_cut = max(m.node_type.total_bits() - target_bits, 0)
+        bits_to_cut = max(m.dtype.total_bits() - target_bits, 0)
         rounded, overflow = uq_RNE_IEEE(m, bits_to_cut)
         incremented_e = uq_add(e, overflow)
         was_subnormal = uq_is_zero(e)
         became_normal = basic_and(
             was_subnormal,
-            basic_or_reduce(incremented_e, Const(UQ(0, 1, 0))),
-            Const(UQ(0, 1, 0)),
+            basic_or_reduce(incremented_e, UQ(1, 0)),
+            UQ(1, 0),
         )
         rounded = basic_mux_2_1(
             became_normal,
             rounded,
-            Const(UQ(0, rounded.node_type.int_bits, rounded.node_type.frac_bits)),
-            rounded.copy(),
+            Const(UQ(rounded.dtype.int_bits, rounded.dtype.frac_bits).from_bits(0)),
+            rounded.dtype,
         )
         return make_Tuple(rounded, incremented_e)
 
@@ -108,7 +108,7 @@ def lzc_spec(x, ctx):
 
 
 def lzc(x: Node) -> Node:
-    width = x.node_type.total_bits()
+    width = x.dtype.total_bits()
     count_bits = max(1, math.ceil(math.log2(width + 1)))
 
     def lowering(args, jittable):
@@ -127,12 +127,12 @@ def lzc(x: Node) -> Node:
 
     @Primitive(name="lzc", spec=lzc_spec, c_inline=True, c_lowering=lowering)
     def impl(x):
-        count = Const(UQ(0, count_bits, 0))
-        still_zero = Const(UQ(1, 1, 0))
+        count = Const(UQ(count_bits, 0).from_bits(0))
+        still_zero = Const(UQ(1, 0).from_bits(1))
         for pos in range(width - 1, -1, -1):
-            is_zero = basic_invert(uq_select(x, pos, pos), Const(UQ(0, 1, 0)))
-            still_zero = basic_and(still_zero, is_zero, still_zero.copy())
-            count = basic_add(count, still_zero, count.copy())
+            is_zero = basic_invert(uq_select(x, pos, pos), UQ(1, 0))
+            still_zero = basic_and(still_zero, is_zero, still_zero.dtype)
+            count = basic_add(count, still_zero, count.dtype)
         return count
 
     return impl(x)
@@ -148,7 +148,7 @@ def normalize_to_1_xxx_spec(m, e, ctx):
 def normalize_to_1_xxx(m: Node, e: Node):
     @Primitive(name="normalize_to_1_xxx", spec=normalize_to_1_xxx_spec)
     def impl(m: Node, e: Node):
-        target_frac_bits = max(m.node_type.int_bits - 1, 0) + m.node_type.frac_bits
+        target_frac_bits = max(m.dtype.int_bits - 1, 0) + m.dtype.frac_bits
         leading_zeros = uq_to_q(lzc(m))
         shift = q_add(
             q_sub(leading_zeros, uq_to_q(uq_int_bits(m))),
@@ -157,19 +157,19 @@ def normalize_to_1_xxx(m: Node, e: Node):
         shift_sign = q_sign_bit(shift)
         shift_magnitude_q = q_abs(shift)
         shift_magnitude = q_to_uq(shift_magnitude_q)
-        resized = uq_resize(m, max(1, m.node_type.int_bits), target_frac_bits)
+        resized = uq_resize(m, max(1, m.dtype.int_bits), target_frac_bits)
         normalized_m = basic_mux_2_1(
             shift_sign,
             uq_lshift(resized, shift_magnitude),
             uq_rshift_jam(resized, shift_magnitude),
-            Const(UQ(0, 1, target_frac_bits)),
+            UQ(1, target_frac_bits),
         )
         right_e = q_add(e, shift_magnitude_q)
         normalized_e = basic_mux_2_1(
             shift_sign,
             q_sub(e, shift_magnitude_q),
             right_e,
-            right_e.copy(),
+            right_e.dtype,
         )
         return make_Tuple(normalized_m, normalized_e)
 
@@ -178,7 +178,7 @@ def normalize_to_1_xxx(m: Node, e: Node):
 
 @Primitive(name="drop_implicit_bit", spec=lambda x, ctx: x - ctx.one())
 def drop_implicit_bit(x: Node):
-    return uq_select(x, x.node_type.frac_bits - 1, 0)
+    return uq_select(x, x.dtype.frac_bits - 1, 0)
 
 
 def shift_if_subnormal_spec(m, e, ctx):
@@ -201,32 +201,26 @@ def shift_if_subnormal(
     @Primitive(name="shift_if_subnormal", spec=shift_if_subnormal_spec)
     def impl(m: Node, e: Node):
         is_subnormal = basic_or(
-            q_is_zero(e), q_sign_bit(e), Const(UQ(0, 1, 0))
+            q_is_zero(e), q_sign_bit(e), UQ(1, 0)
         )
         exponent_magnitude = q_to_uq(q_abs(e))
         shifted_e = basic_mux_2_1(
             is_subnormal,
             exponent_magnitude,
-            Const(UQ(0, 1, 0)),
-            exponent_magnitude.copy(),
+            Const(UQ(1, 0).from_bits(0)),
+            exponent_magnitude.dtype,
         )
-        subnormal_shift = uq_add(Const(UQ(1, 1, 0)), exponent_magnitude)
+        subnormal_shift = uq_add(Const(UQ(1, 0).from_bits(1)), exponent_magnitude)
         shift_amount = basic_mux_2_1(
             is_subnormal,
-            Const(UQ(0, 1, 0)),
+            Const(UQ(1, 0).from_bits(0)),
             subnormal_shift,
-            subnormal_shift.copy(),
+            subnormal_shift.dtype,
         )
         widened = basic_lshift(
             m,
             Const(UQ.from_int(subnormal_extra_bits)),
-            Const(
-                UQ(
-                    0,
-                    m.node_type.int_bits,
-                    m.node_type.frac_bits + subnormal_extra_bits,
-                )
-            ),
+            UQ(m.dtype.int_bits, m.dtype.frac_bits + subnormal_extra_bits),
         )
         return make_Tuple(uq_rshift_jam(widened, shift_amount), shifted_e)
 

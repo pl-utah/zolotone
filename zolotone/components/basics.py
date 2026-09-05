@@ -12,11 +12,11 @@ def _format_c_lowering(template: str, *args_ids: list[int]):
         return template.format(*[args[idx] for idx in args_ids])
     return lower
 
-def _cpp_cast(type_: StaticType, expr: str, jittable: bool) -> str:
+def _cpp_cast(type_: DataType, expr: str, jittable: bool) -> str:
     return f"{type_.to_cpp_type(jittable=jittable)}({expr})"
 
 
-def _cpp_zero(type_: StaticType, jittable: bool) -> str:
+def _cpp_zero(type_: DataType, jittable: bool) -> str:
     return _cpp_cast(type_, "0", jittable=jittable)
 
 
@@ -24,62 +24,87 @@ def _mask_literal(bits: int) -> str:
     return str((1 << bits) - 1)
 
 
-def _impl_constructor(op):
-    # To be called with op's arguments and output
-    def impl(*args: RuntimeType) -> RuntimeType:
-        *op_args, out = args
-        val = op(*op_args)
+def _impl_constructor(op, out: DataType):
+    def impl(*args: RuntimeValue) -> RuntimeValue:
+        val = op(*args)
         # TODO: check for truncation
         val = mask(val, out.total_bits())
-        # TODO: add a check whether val is in ranges
-        return out.copy(val=val)
+        return out.from_bits(val)
     return impl
 
-def _sign_constructor() -> StaticType:
-    # To be called with arguments and output
-    def sign(*args: StaticType) -> StaticType:
-        return args[-1]
+def _sign_constructor(out: DataType):
+    def sign(*args: DataType) -> DataType:
+        return out
     return sign
+
+
+def _check_output_type(out: DataType) -> None:
+    if not isinstance(out, DataType):
+        raise TypeError(
+            f"Basic operator output must be a DataType, got {type(out).__name__}"
+        )
 
 def _ternary_operator(
     op: tp.Callable,
     x: Node,
     y: Node,
     z: Node,
-    out: Node,
+    out: DataType,
     c_lowering,
     name: str,
 ) -> Op:
+    _check_output_type(out)
     return Op(
-        impl=make_fixed_arguments(_impl_constructor(op), [RuntimeType] * 4),
-        sign=make_fixed_arguments(_sign_constructor(), [StaticType] * 4),
+        impl=make_fixed_arguments(_impl_constructor(op, out), [RuntimeValue] * 3),
+        sign=make_fixed_arguments(
+            _sign_constructor(out), [DataType] * 3, return_type=type(out)
+        ),
         c_lowering=c_lowering,
-        args=[x, y, z, out],
+        args=[x, y, z],
         name=name)
 
-def _binary_operator(op: tp.Callable, x: Node, y: Node, out: Node, c_lowering, name: str) -> Op:
+def _binary_operator(
+    op: tp.Callable,
+    x: Node,
+    y: Node,
+    out: DataType,
+    c_lowering,
+    name: str,
+) -> Op:
+    _check_output_type(out)
     return Op(
-        impl=make_fixed_arguments(_impl_constructor(op), [RuntimeType] * 3),
-        sign=make_fixed_arguments(_sign_constructor(), [StaticType] * 3),
+        impl=make_fixed_arguments(_impl_constructor(op, out), [RuntimeValue] * 2),
+        sign=make_fixed_arguments(
+            _sign_constructor(out), [DataType] * 2, return_type=type(out)
+        ),
         c_lowering=c_lowering,
-        args=[x, y, out],
+        args=[x, y],
         name=name)
 
-def _unary_operator(op: tp.Callable, x: Node, out: Node, c_lowering, name: str) -> Op:
+def _unary_operator(
+    op: tp.Callable,
+    x: Node,
+    out: DataType,
+    c_lowering,
+    name: str,
+) -> Op:
+    _check_output_type(out)
     return Op(
-        impl=make_fixed_arguments(_impl_constructor(op), [RuntimeType] * 2),
-        sign=make_fixed_arguments(_sign_constructor(), [StaticType] * 2),
+        impl=make_fixed_arguments(_impl_constructor(op, out), [RuntimeValue]),
+        sign=make_fixed_arguments(
+            _sign_constructor(out), [DataType], return_type=type(out)
+        ),
         c_lowering=c_lowering,
-        args=[x, out],
+        args=[x],
         name=name)
 
 ########## Ternary Operators ###########
 
-def basic_mux_2_1(sel: Node, in0: Node, in1: Node, out: Node) -> Op:
-    def op(sel: RuntimeType, in0: RuntimeType, in1: RuntimeType) -> int:
-        if sel.val not in (0, 1):
-            raise ValueError(f"Selector must be 0 or 1, got {sel.val}")
-        return in1.val if sel.val == 1 else in0.val
+def basic_mux_2_1(sel: Node, in0: Node, in1: Node, out: DataType) -> Op:
+    def op(sel: RuntimeValue, in0: RuntimeValue, in1: RuntimeValue) -> int:
+        if sel.raw not in (0, 1):
+            raise ValueError(f"Selector must be 0 or 1, got {sel.raw}")
+        return in1.raw if sel.raw == 1 else in0.raw
     return _ternary_operator(
         op=op,
         x=sel,
@@ -88,112 +113,112 @@ def basic_mux_2_1(sel: Node, in0: Node, in1: Node, out: Node) -> Op:
         out=out,
         c_lowering=lambda lowered_args, jittable: (
             f"({lowered_args[0]} != 0 ? "
-            f"{_cpp_cast(out.node_type, lowered_args[2], jittable=jittable)} : "
-            f"{_cpp_cast(out.node_type, lowered_args[1], jittable=jittable)})"
+            f"{_cpp_cast(out, lowered_args[2], jittable=jittable)} : "
+            f"{_cpp_cast(out, lowered_args[1], jittable=jittable)})"
         ),
         name="basic_mux_2_1",
     )
 
 ########### Binary Operators ###########
 
-def basic_add(x: Node, y: Node, out: Node) -> Op:
+def basic_add(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: x.val + y.val,
+        op=lambda x, y: x.raw + y.raw,
         x=x,
         y=y,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
-            f"({_cpp_cast(out.node_type, lowered_args[0], jittable=jittable)} + "
-            f"{_cpp_cast(out.node_type, lowered_args[1], jittable=jittable)})"
+            f"({_cpp_cast(out, lowered_args[0], jittable=jittable)} + "
+            f"{_cpp_cast(out, lowered_args[1], jittable=jittable)})"
         ),
         name="basic_add",
     )
 
-def basic_sub(x: Node, y: Node, out: Node) -> Op:
+def basic_sub(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: x.val - y.val,
+        op=lambda x, y: x.raw - y.raw,
         x=x,
         y=y,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
-            f"({_cpp_cast(out.node_type, lowered_args[0], jittable=jittable)} - "
-            f"{_cpp_cast(out.node_type, lowered_args[1], jittable=jittable)})"
+            f"({_cpp_cast(out, lowered_args[0], jittable=jittable)} - "
+            f"{_cpp_cast(out, lowered_args[1], jittable=jittable)})"
         ),
         name="basic_sub",
     )
 
-def basic_mul(x: Node, y: Node, out: Node) -> Op:
+def basic_mul(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: x.val * y.val,
+        op=lambda x, y: x.raw * y.raw,
         x=x,
         y=y,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
-            f"({_cpp_cast(out.node_type, lowered_args[0], jittable=jittable)} * "
-            f"{_cpp_cast(out.node_type, lowered_args[1], jittable=jittable)})"
+            f"({_cpp_cast(out, lowered_args[0], jittable=jittable)} * "
+            f"{_cpp_cast(out, lowered_args[1], jittable=jittable)})"
         ),
         name="basic_mul",
     )
 
-def basic_max(x: Node, y: Node, out: Node) -> Op:
+def basic_max(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: max(x.val, y.val),
+        op=lambda x, y: max(x.raw, y.raw),
         x=x,
         y=y,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
             f"({lowered_args[0]} > {lowered_args[1]} ? "
-            f"{_cpp_cast(out.node_type, lowered_args[0], jittable=jittable)} : "
-            f"{_cpp_cast(out.node_type, lowered_args[1], jittable=jittable)})"
+            f"{_cpp_cast(out, lowered_args[0], jittable=jittable)} : "
+            f"{_cpp_cast(out, lowered_args[1], jittable=jittable)})"
         ),
         name="basic_max",
     )
 
-def basic_min(x: Node, y: Node, out: Node) -> Op:
+def basic_min(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: min(x.val, y.val),
+        op=lambda x, y: min(x.raw, y.raw),
         x=x,
         y=y,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
             f"({lowered_args[0]} < {lowered_args[1]} ? "
-            f"{_cpp_cast(out.node_type, lowered_args[0], jittable=jittable)} : "
-            f"{_cpp_cast(out.node_type, lowered_args[1], jittable=jittable)})"
+            f"{_cpp_cast(out, lowered_args[0], jittable=jittable)} : "
+            f"{_cpp_cast(out, lowered_args[1], jittable=jittable)})"
         ),
         name="basic_min",
     )
 
-def basic_rshift(x: Node, amount: Node, out: Node) -> Op:
-    width = x.node_type.total_bits()
+def basic_rshift(x: Node, amount: Node, out: DataType) -> Op:
+    width = x.dtype.total_bits()
     return _binary_operator(
-        op=lambda x, amount: x.val >> amount.val,
+        op=lambda x, amount: x.raw >> amount.raw,
         x=x,
         y=amount,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
-            f"({lowered_args[1]} >= {width} ? {_cpp_zero(x.node_type, jittable=jittable)} : "
+            f"({lowered_args[1]} >= {width} ? {_cpp_zero(x.dtype, jittable=jittable)} : "
             f"({lowered_args[0]} >> {lowered_args[1]}))"
         ),  # Shifting more than bitwidth is undefined behavior.
         name="basic_rshift",
     )
 
-def basic_lshift(x: Node, amount: Node, out: Node) -> Op:
-    out_width = out.node_type.total_bits()
+def basic_lshift(x: Node, amount: Node, out: DataType) -> Op:
+    out_width = out.total_bits()
     return _binary_operator(
-        op=lambda x, amount: x.val << amount.val,
+        op=lambda x, amount: x.raw << amount.raw,
         x=x,
         y=amount,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
-            f"({lowered_args[1]} >= {out_width} ? {_cpp_zero(out.node_type, jittable=jittable)} : "
-            f"({_cpp_cast(out.node_type, lowered_args[0], jittable=jittable)} << {lowered_args[1]}))"
+            f"({lowered_args[1]} >= {out_width} ? {_cpp_zero(out, jittable=jittable)} : "
+            f"({_cpp_cast(out, lowered_args[0], jittable=jittable)} << {lowered_args[1]}))"
         ),  # Avoid undefined behavior when shifting.
         name="basic_lshift",
     )
 
-def basic_or(x: Node, y: Node, out: Node) -> Op:
+def basic_or(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: x.val | y.val,
+        op=lambda x, y: x.raw | y.raw,
         x=x,
         y=y,
         out=out,
@@ -201,9 +226,9 @@ def basic_or(x: Node, y: Node, out: Node) -> Op:
         name="basic_or",
     )
  
-def basic_xor(x: Node, y: Node, out: Node) -> Op:
+def basic_xor(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: x.val ^ y.val,
+        op=lambda x, y: x.raw ^ y.raw,
         x=x,
         y=y,
         out=out,
@@ -211,9 +236,9 @@ def basic_xor(x: Node, y: Node, out: Node) -> Op:
         name="basic_xor",
     )
 
-def basic_and(x: Node, y: Node, out: Node) -> Op:
+def basic_and(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: x.val & y.val,
+        op=lambda x, y: x.raw & y.raw,
         x=x,
         y=y,
         out=out,
@@ -221,22 +246,22 @@ def basic_and(x: Node, y: Node, out: Node) -> Op:
         name="basic_and",
     )
 
-def basic_concat(x: Node, y: Node, out: Node) -> Op:
-    shift = y.node_type.total_bits()
+def basic_concat(x: Node, y: Node, out: DataType) -> Op:
+    shift = y.dtype.total_bits()
     return _binary_operator(
-        op=lambda x, y: (x.val << y.total_bits()) | y.val,
+        op=lambda x, y: (x.raw << y.dtype.total_bits()) | y.raw,
         x=x,
         y=y,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
-            f"(({out.node_type.to_cpp_type(jittable=jittable)}({lowered_args[0]}) << {shift}) | {lowered_args[1]})"
+            f"(({out.to_cpp_type(jittable=jittable)}({lowered_args[0]}) << {shift}) | {lowered_args[1]})"
         ),
         name="basic_concat",
     )
 
-def basic_less(x: Node, y: Node, out: Node) -> Op:
+def basic_less(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: 1 if x.val < y.val else 0,
+        op=lambda x, y: 1 if x.raw < y.raw else 0,
         x=x,
         y=y,
         out=out,
@@ -244,9 +269,9 @@ def basic_less(x: Node, y: Node, out: Node) -> Op:
         name="basic_less",
     )
 
-def basic_less_or_equal(x: Node, y: Node, out: Node) -> Op:
+def basic_less_or_equal(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: 1 if x.val <= y.val else 0,
+        op=lambda x, y: 1 if x.raw <= y.raw else 0,
         x=x,
         y=y,
         out=out,
@@ -254,9 +279,9 @@ def basic_less_or_equal(x: Node, y: Node, out: Node) -> Op:
         name="basic_less_or_equal",
     )
 
-def basic_greater(x: Node, y: Node, out: Node) -> Op:
+def basic_greater(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: 1 if x.val > y.val else 0,
+        op=lambda x, y: 1 if x.raw > y.raw else 0,
         x=x,
         y=y,
         out=out,
@@ -264,9 +289,9 @@ def basic_greater(x: Node, y: Node, out: Node) -> Op:
         name="basic_greater",
     )
 
-def basic_greater_or_equal(x: Node, y: Node, out: Node) -> Op:
+def basic_greater_or_equal(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: 1 if x.val >= y.val else 0,
+        op=lambda x, y: 1 if x.raw >= y.raw else 0,
         x=x,
         y=y,
         out=out,
@@ -274,9 +299,9 @@ def basic_greater_or_equal(x: Node, y: Node, out: Node) -> Op:
         name="basic_greater_or_equal",
     )
 
-def basic_equal(x: Node, y: Node, out: Node) -> Op:
+def basic_equal(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: 1 if x.val == y.val else 0,
+        op=lambda x, y: 1 if x.raw == y.raw else 0,
         x=x,
         y=y,
         out=out,
@@ -284,9 +309,9 @@ def basic_equal(x: Node, y: Node, out: Node) -> Op:
         name="basic_equal",
     )
 
-def basic_not_equal(x: Node, y: Node, out: Node) -> Op:
+def basic_not_equal(x: Node, y: Node, out: DataType) -> Op:
     return _binary_operator(
-        op=lambda x, y: 1 if x.val != y.val else 0,
+        op=lambda x, y: 1 if x.raw != y.raw else 0,
         x=x,
         y=y,
         out=out,
@@ -297,12 +322,12 @@ def basic_not_equal(x: Node, y: Node, out: Node) -> Op:
 ########### Unary Operators ###########
 
 # TODO: Truncation is possible if out is too small
-def basic_select(x: Node, start: int, end: int, out: Node) -> Op:
+def basic_select(x: Node, start: int, end: int, out: DataType) -> Op:
     if start < end or end < 0:
         raise ValueError(f"Bad indexing: start={start}, end={end}")
     select_mask = _mask_literal(start - end + 1)
     return _unary_operator(
-        op=lambda x: mask(x.val >> end, start - end + 1),
+        op=lambda x: mask(x.raw >> end, start - end + 1),
         x=x,
         out=out,
         c_lowering=_format_c_lowering(
@@ -313,10 +338,10 @@ def basic_select(x: Node, start: int, end: int, out: Node) -> Op:
     )
 
 # TODO: Truncation is possible if out is too small
-def basic_invert(x: Node, out: Node) -> Op:
-    invert_mask = _mask_literal(x.node_type.total_bits())
+def basic_invert(x: Node, out: DataType) -> Op:
+    invert_mask = _mask_literal(x.dtype.total_bits())
     return _unary_operator(
-        op=lambda x: ((1 << x.total_bits()) - 1) - x.val,
+        op=lambda x: ((1 << x.dtype.total_bits()) - 1) - x.raw,
         x=x,
         out=out,
         c_lowering=lambda lowered_args, jittable: f"((~{lowered_args[0]}) & {invert_mask})",
@@ -324,28 +349,28 @@ def basic_invert(x: Node, out: Node) -> Op:
     )
 
 # TODO: Truncation is possible if out is too small
-def basic_identity(x: Node, out: Node) -> Op:
+def basic_identity(x: Node, out: DataType) -> Op:
     return _unary_operator(
-        op=lambda x: x.val,
+        op=lambda x: x.raw,
         x=x,
         out=out,
         c_lowering=_format_c_lowering("{}", 0),
         name="basic_identity",
     )
 
-def basic_or_reduce(x: Node, out: Node) -> Op:
+def basic_or_reduce(x: Node, out: DataType) -> Op:
     return _unary_operator(
-        op=lambda x: 1 if x.val > 0 else 0,
+        op=lambda x: 1 if x.raw > 0 else 0,
         x=x,
         out=out,
         c_lowering=_format_c_lowering("({} != 0)", 0),
         name="basic_or_reduce",
     )
 
-def basic_and_reduce(x: Node, out: Node) -> Op:
-    all_ones = _mask_literal(x.node_type.total_bits())
+def basic_and_reduce(x: Node, out: DataType) -> Op:
+    all_ones = _mask_literal(x.dtype.total_bits())
     return _unary_operator(
-        op=lambda x: 1 if x.val == ((1 << x.total_bits()) - 1) else 0,
+        op=lambda x: 1 if x.raw == ((1 << x.dtype.total_bits()) - 1) else 0,
         x=x,
         out=out,
         c_lowering=_format_c_lowering(f"({{}} == {all_ones})", 0),

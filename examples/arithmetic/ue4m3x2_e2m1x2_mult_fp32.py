@@ -79,22 +79,22 @@ def ue4m3x2_e2m1x2_mult_fp32(
     )
     signed_zero = if_then_else(
         sign_bit,
-        Const(Float32.nZero()),
-        Const(Float32.Zero()),
+        Const(Float32().nZero()),
+        Const(Float32().Zero()),
     )
     return if_then_else(
         any_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         if_then_else(any_zero, signed_zero, finite_result),
     )
 
 
 if __name__ == "__main__":
     multiplier = ue4m3x2_e2m1x2_mult_fp32(
-        Var(name="a0", sign=UE4M3T()),
-        Var(name="a1", sign=UE4M3T()),
-        Var(name="b0", sign=E2M1T()),
-        Var(name="b1", sign=E2M1T()),
+        Var(name="a0", dtype=UE4M3()),
+        Var(name="a1", dtype=UE4M3()),
+        Var(name="b0", dtype=E2M1()),
+        Var(name="b1", dtype=E2M1()),
     )
 
     multiplier.check_determinism()
