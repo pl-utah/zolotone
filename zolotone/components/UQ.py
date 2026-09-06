@@ -17,10 +17,10 @@ def uq_alloc(int_bits: Node,
         raise TypeError("uq_alloc's arguments must be constant")
     result_dtype = UQ(int_bits.constant.raw, frac_bits.constant.raw)
 
-    def sign(int_bits: DataType, frac_bits: DataType) -> UQ:
+    def sign(int_bits: UQ, frac_bits: UQ) -> UQ:
         return result_dtype
     
-    def impl(int_bits: RuntimeValue, frac_bits: RuntimeValue) -> FixedValue:
+    def impl(int_bits: UQValue, frac_bits: UQValue) -> UQValue:
         return result_dtype.from_bits(0)
     
     return Op(

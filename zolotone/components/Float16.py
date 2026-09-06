@@ -18,7 +18,7 @@ from .UQ import uq_fraction_to_integer, uq_is_zero, uq_min
 
 
 def _fp16_mantissa(x: Node) -> Op:
-    def impl(x: Float16) -> UQ:
+    def impl(x: Float16Value) -> UQValue:
         return UQ(Float16.mantissa_bits, 0).from_bits(x.mantissa)
 
     def sign(x: Float16) -> UQ:
@@ -34,7 +34,7 @@ def _fp16_mantissa(x: Node) -> Op:
 
 
 def _fp16_exponent(x: Node) -> Op:
-    def impl(x: Float16) -> UQ:
+    def impl(x: Float16Value) -> UQValue:
         return UQ(Float16.exponent_bits, 0).from_bits(x.exponent)
 
     def sign(x: Float16) -> UQ:
@@ -50,7 +50,7 @@ def _fp16_exponent(x: Node) -> Op:
 
 
 def _fp16_sign(x: Node) -> Op:
-    def impl(x: Float16) -> UQ:
+    def impl(x: Float16Value) -> UQValue:
         return UQ(1, 0).from_bits(x.sign)
 
     def sign(x: Float16) -> UQ:
@@ -71,17 +71,17 @@ def _fp16_alloc(
     mantissa: Node,
 ) -> Op:
     def sign(
-        sign_bit: DataType,
-        exponent: DataType,
-        mantissa: DataType,
+        sign_bit: UQ,
+        exponent: UQ,
+        mantissa: UQ,
     ) -> Float16:
         return Float16()
 
     def impl(
-        sign_bit: RuntimeValue,
-        exponent: RuntimeValue,
-        mantissa: RuntimeValue,
-    ) -> Float16:
+        sign_bit: UQValue,
+        exponent: UQValue,
+        mantissa: UQValue,
+    ) -> Float16Value:
         return Float16().from_fields(
             sign=sign_bit.raw,
             exponent=exponent.raw,

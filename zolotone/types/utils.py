@@ -1,5 +1,4 @@
-from .descriptors import DataType
-from .values import RuntimeValue
+from .base import DataType, RuntimeValue
 
 def _fingerprint_value(value):
     if isinstance(value, RuntimeValue):

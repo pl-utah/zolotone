@@ -11,7 +11,7 @@ from .UQ import *
 
 
 def _e5m2_mantissa(x: Node) -> Op:
-    def impl(value: E5M2) -> UQ:
+    def impl(value: E5M2Value) -> UQValue:
         return UQ(E5M2.mantissa_bits, 0).from_bits(value.mantissa)
     
     def sign(value_type: E5M2) -> UQ:
@@ -27,7 +27,7 @@ def _e5m2_mantissa(x: Node) -> Op:
 
 
 def _e5m2_exponent(x: Node) -> Op:
-    def impl(value: E5M2) -> UQ:
+    def impl(value: E5M2Value) -> UQValue:
         return UQ(E5M2.exponent_bits, 0).from_bits(value.exponent)
     
     def sign(value_type: E5M2) -> UQ:
@@ -43,7 +43,7 @@ def _e5m2_exponent(x: Node) -> Op:
 
 
 def _e5m2_sign(x: Node) -> Op:
-    def impl(value: E5M2) -> UQ:
+    def impl(value: E5M2Value) -> UQValue:
         return UQ(1, 0).from_bits(value.sign)
     
     def sign(value_type: E5M2) -> UQ:
@@ -60,17 +60,17 @@ def _e5m2_sign(x: Node) -> Op:
 
 def _e5m2_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
     def sign(
-        sign_bit: DataType,
-        exponent: DataType,
-        mantissa: DataType,
+        sign_bit: UQ,
+        exponent: UQ,
+        mantissa: UQ,
     ) -> E5M2:
         return E5M2()
     
     def impl(
-        sign_bit: RuntimeValue,
-        exponent: RuntimeValue,
-        mantissa: RuntimeValue,
-    ) -> E5M2:
+        sign_bit: UQValue,
+        exponent: UQValue,
+        mantissa: UQValue,
+    ) -> E5M2Value:
         return E5M2().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
     
     return Op(

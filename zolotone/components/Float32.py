@@ -15,7 +15,7 @@ from .rounding_routines import (
 
 
 def _fp32_mantissa(x: Node) -> Op:
-    def impl(x: Float32) -> UQ:
+    def impl(x: Float32Value) -> UQValue:
         return UQ(Float32.mantissa_bits, 0).from_bits(x.mantissa)
 
     def sign(x: Float32) -> UQ:
@@ -31,7 +31,7 @@ def _fp32_mantissa(x: Node) -> Op:
 
 
 def _fp32_exponent(x: Node) -> Op:
-    def impl(x: Float32) -> UQ:
+    def impl(x: Float32Value) -> UQValue:
         return UQ(Float32.exponent_bits, 0).from_bits(x.exponent)
 
     def sign(x: Float32) -> UQ:
@@ -47,7 +47,7 @@ def _fp32_exponent(x: Node) -> Op:
 
 
 def _fp32_sign(x: Node) -> Op:
-    def impl(x: Float32) -> UQ:
+    def impl(x: Float32Value) -> UQValue:
         return UQ(1, 0).from_bits(x.sign)
 
     def sign(x: Float32) -> UQ:
@@ -64,17 +64,17 @@ def _fp32_sign(x: Node) -> Op:
 
 def _fp32_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
     def sign(
-        sign_bit: DataType,
-        exponent: DataType,
-        mantissa: DataType,
+        sign_bit: UQ,
+        exponent: UQ,
+        mantissa: UQ,
     ) -> Float32:
         return Float32()
 
     def impl(
-        sign_bit: RuntimeValue,
-        exponent: RuntimeValue,
-        mantissa: RuntimeValue,
-    ) -> Float32:
+        sign_bit: UQValue,
+        exponent: UQValue,
+        mantissa: UQValue,
+    ) -> Float32Value:
         return Float32().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
 
     return Op(

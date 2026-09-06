@@ -9,7 +9,7 @@ from ..spec import *
 
 # Does not have spec
 def _q_is_min_val(x: Node) -> Op:
-    def impl(x: FixedValue) -> FixedValue:
+    def impl(x: QValue) -> UQValue:
         if x.raw == (1 << (x.dtype.total_bits() - 1)):
             res = 1
         else:
@@ -35,10 +35,10 @@ def q_alloc(int_bits: Node, frac_bits: Node) -> Op:
         raise TypeError("q_alloc's arguments must be constant")
     result_dtype = Q(int_bits.constant.raw, frac_bits.constant.raw)
 
-    def sign(x: DataType, y: DataType) -> Q:
+    def sign(x: UQ, y: UQ) -> Q:
         return result_dtype
 
-    def impl(x: RuntimeValue, y: RuntimeValue) -> FixedValue:
+    def impl(x: UQValue, y: UQValue) -> QValue:
         return result_dtype.from_bits(0)
 
     return Op(
