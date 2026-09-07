@@ -35,9 +35,9 @@ LATEX_CATEGORY_LABELS = {
 }
 
 LATEX_CATEGORY_ORDER = (
+    "converter",
     "arithmetic",
     "dot_product",
-    "converter",
     "uncategorized",
 )
 
@@ -243,8 +243,8 @@ def build_latex_table(
         r"\begin{tabular}{lrr}",
         r"\toprule",
         "Design",
-        r"& \makecell{Equivalence\\check (s)}",
-        r"& \makecell{Determinism\\check (s)} \\",
+        r"& \makecell{Determinism\\check (s)}",
+        r"& \makecell{Equivalence\\check (s)} \\",
         r"\midrule",
     ]
 
@@ -265,7 +265,7 @@ def build_latex_table(
             lines.extend(
                 (
                     _escape_latex(name),
-                    f"    & {equivalence} & {determinism} \\\\",
+                    f"    & {determinism} & {equivalence} \\\\",
                 )
             )
 
