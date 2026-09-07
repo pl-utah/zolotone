@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 DEFAULT_REPORT_DIR = Path("reports")
@@ -21,6 +26,20 @@ CATEGORY_LABELS = {
     "dot_product": "Dot product",
     "converter": "Converter",
 }
+
+LATEX_CATEGORY_LABELS = {
+    "arithmetic": "Arithmetic",
+    "dot_product": "Dot products",
+    "converter": "Converters",
+    "uncategorized": "Uncategorized",
+}
+
+LATEX_CATEGORY_ORDER = (
+    "arithmetic",
+    "dot_product",
+    "converter",
+    "uncategorized",
+)
 
 STATUS_LABELS = {
     "passed": "PASSED",
@@ -179,6 +198,95 @@ def _render_designs(designs: dict[str, dict[str, Any]]) -> str:
     return "".join(sections)
 
 
+def _escape_latex(value: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(character, character) for character in value)
+
+
+def _format_latex_elapsed(check: dict[str, Any] | None) -> str:
+    if check is None or check.get("elapsed_s") is None:
+        return r"\todo{...s}"
+    return f"{float(check['elapsed_s']):.3f}\\,s"
+
+
+def build_latex_table(
+    report: dict[str, Any],
+    expected_designs: list[tuple[str, str]] | None = None,
+) -> str:
+    designs = {
+        name: {"category": category, "checks": {}}
+        for name, category in (expected_designs or [])
+    }
+    designs.update(report["designs"])
+
+    grouped_designs = {category: [] for category in LATEX_CATEGORY_ORDER}
+    for name, result in designs.items():
+        category = result.get("category")
+        key = category if category in CATEGORY_LABELS else "uncategorized"
+        grouped_designs[key].append((name, result))
+
+    lines = [
+        r"\begin{table}[t]",
+        r"\centering",
+        r"\small",
+        r"\begin{tabular}{lrr}",
+        r"\toprule",
+        "Design",
+        r"& \makecell{Equivalence\\check (s)}",
+        r"& \makecell{Determinism\\check (s)} \\",
+        r"\midrule",
+    ]
+
+    category_written = False
+    for category in LATEX_CATEGORY_ORDER:
+        designs = grouped_designs[category]
+        if not designs:
+            continue
+        if category_written:
+            lines.append(r"\midrule")
+        category_written = True
+        label = LATEX_CATEGORY_LABELS[category]
+        lines.append(rf"\multicolumn{{3}}{{l}}{{\textit{{{label}}}}} \\")
+        for name, result in sorted(designs):
+            checks = result.get("checks", {})
+            equivalence = _format_latex_elapsed(checks.get("specification"))
+            determinism = _format_latex_elapsed(checks.get("determinism"))
+            lines.extend(
+                (
+                    _escape_latex(name),
+                    f"    & {equivalence} & {determinism} \\\\",
+                )
+            )
+
+    lines.extend(
+        (
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\caption{\tool's runtime spent on verification time for the circuit designs.}",
+            r"\label{tab:verification-time}",
+            r"\end{table}",
+        )
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _registered_designs() -> list[tuple[str, str]]:
+    from infra.run_designs import DESIGNS
+
+    return [(design.name, design.category) for design in DESIGNS]
+
+
 def build_html(report: dict[str, Any], source_path: Path) -> str:
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     rows = _render_designs(report["designs"]) or EMPTY_TABLE_ROW
@@ -300,7 +408,11 @@ def main(argv: list[str] | None = None) -> int:
     html = build_html(report, report_path)
     html_path.write_text(html, encoding="utf-8")
 
-    print(f"Generated {html_path}")
+    print(f"Generated {html_path}", file=sys.stderr)
+    print(
+        build_latex_table(report, expected_designs=_registered_designs()),
+        end="",
+    )
     return 0
 
 
