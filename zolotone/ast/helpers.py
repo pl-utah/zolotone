@@ -1,4 +1,4 @@
-from ..types import DataType, RuntimeValue, Tuple, TupleValue
+from ..types import DataType, Tuple
 from ..spec import BoolExpr, Cases, case, FPExpr, If, RealExpr
 from .node import Node
 from .nodes import Op, Primitive
@@ -18,8 +18,8 @@ def _basic_get_item(x: Node, idx: int) -> Op:
     def sign(x: Tuple) -> DataType:
         return x.items[idx]
     
-    def op(x: TupleValue) -> RuntimeValue:
-        return x.items[idx]
+    def op(x: tuple) -> object:
+        return x[idx]
     
     return Op(
         impl=op,

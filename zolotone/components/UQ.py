@@ -20,8 +20,8 @@ def uq_alloc(int_bits: Node,
     def sign(int_bits: UQ, frac_bits: UQ) -> UQ:
         return result_dtype
     
-    def impl(int_bits: UQValue, frac_bits: UQValue) -> UQValue:
-        return result_dtype.from_bits(0)
+    def impl(int_bits: int, frac_bits: int) -> int:
+        return 0
     
     return Op(
         sign=sign,
@@ -279,7 +279,7 @@ def uq_rshift(x: Node, amount: Node) -> Node:
 @Primitive(name="uq_rshift_jam", spec=lambda x, amount, ctx: x * (ctx.two() ** (-amount)))
 def uq_rshift_jam(x: Node, amount: Node) -> Node:
     one = Const(
-        UQ(x.dtype.int_bits, x.dtype.frac_bits).from_bits(1)
+        UQ(x.dtype.int_bits, x.dtype.frac_bits).from_bits(1),
     )
     shifted_bit_mask = basic_sub(
         basic_lshift(

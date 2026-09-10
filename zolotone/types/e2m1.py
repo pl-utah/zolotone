@@ -1,6 +1,4 @@
-"""E2M1 descriptor and runtime value."""
-
-from __future__ import annotations
+"""E2M1 data-format descriptor."""
 
 from dataclasses import dataclass
 import random
@@ -14,45 +12,117 @@ from ._helpers import (
     validate_float_fields,
     validate_float_raw,
 )
-from .base import DataType, RuntimeValue
+from .base import DataType, Value, value_method
 
 
 @dataclass(frozen=True, repr=False)
-class E2M1(DataType):
+class E2M1(DataType[int]):
     sign_bits: ClassVar[int] = 1
     exponent_bits: ClassVar[int] = 2
     mantissa_bits: ClassVar[int] = 1
     exponent_bias: ClassVar[int] = 1
+    max_finite_code: ClassVar[int] = 3
+    max_finite_mantissa: ClassVar[int] = 1
     zero_code: ClassVar[int] = 0
     sub_code: ClassVar[int] = 0
     inf_code: ClassVar[int | None] = None
     nan_code: ClassVar[int | None] = None
-    nan_mantissa: ClassVar[int | None] = None
-    max_finite_code: ClassVar[int] = 3
-    max_finite_mantissa: ClassVar[int] = 1
 
     def total_bits(self) -> int:
-        return 4
+        return self.sign_bits + self.exponent_bits + self.mantissa_bits
 
-    def from_bits(self, raw: int) -> "E2M1Value":
-        return E2M1Value(self, raw)
+    def validate_raw(self, raw: int) -> None:
+        validate_float_raw(type(self).__name__, raw, self.total_bits())
 
-    def from_fields(self, sign: int, exponent: int, mantissa: int) -> "E2M1Value":
+    def from_bits(self, raw: int) -> Value[int]:
+        return Value(self, raw)
+
+    def from_fields(self, sign: int, exponent: int, mantissa: int) -> Value[int]:
         validate_float_fields(
-            type(self).__name__, sign, exponent, mantissa,
+            type(self).__name__,
+            sign,
+            exponent,
+            mantissa,
             sign_bits=self.sign_bits,
             exponent_bits=self.exponent_bits,
             mantissa_bits=self.mantissa_bits,
         )
         return self.from_bits(
-            pack_float_fields(sign, exponent, mantissa, self.exponent_bits, self.mantissa_bits)
+            pack_float_fields(
+                sign, exponent, mantissa, self.exponent_bits, self.mantissa_bits
+            )
         )
+
+    def _extract_fields(self, raw: int) -> tuple[int, int, int]:
+        self.validate_raw(raw)
+        return extract_float_fields(
+            raw, self.sign_bits, self.exponent_bits, self.mantissa_bits
+        )
+
+    @value_method
+    def fields(self, raw: int) -> tuple[int, int, int]:
+        return self._extract_fields(raw)
+
+    @value_method
+    def sign(self, raw: int) -> int:
+        return self._extract_fields(raw)[0]
+
+    @value_method
+    def exponent(self, raw: int) -> int:
+        return self._extract_fields(raw)[1]
+
+    @value_method
+    def mantissa(self, raw: int) -> int:
+        return self._extract_fields(raw)[2]
+
+    @value_method
+    def significand(self, raw: int) -> int:
+        return self.mantissa(raw)
+
+    @value_method
+    def is_zero(self, raw: int) -> bool:
+        return self.exponent(raw) == self.zero_code and self.mantissa(raw) == 0
+
+    @value_method
+    def is_sub(self, raw: int) -> bool:
+        return not self.is_zero(raw) and self.exponent(raw) == self.sub_code
+
+    @value_method
+    def is_norm(self, raw: int) -> bool:
+        return not (self.is_zero(raw) or self.is_sub(raw))
+
+    def to_python(self, raw: int) -> float:
+        self.validate_raw(raw)
+        multiplier = -1.0 if self.sign(raw) else 1.0
+        exponent = self.exponent(raw)
+        mantissa = self.mantissa(raw)
+        if exponent == self.sub_code:
+            fraction = mantissa / (2 ** self.mantissa_bits)
+            return float(multiplier * fraction * (2 ** (1 - self.exponent_bias)))
+        fraction = 1.0 + mantissa / (2 ** self.mantissa_bits)
+        return float(multiplier * fraction * (2 ** (exponent - self.exponent_bias)))
 
     def to_spec(self, name, ctx):
         from ..spec.custom_specs.e2m1 import e2m1
         return e2m1.fresh(name, ctx)
 
-    def random_value(self, rng: random.Random) -> "E2M1Value":
+    def to_spec_value(self, raw: int, ctx):
+        from ..spec.custom_specs.e2m1 import e2m1
+
+        self.validate_raw(raw)
+        if self.is_zero(raw):
+            return e2m1.nzero(ctx) if self.sign(raw) else e2m1.zero(ctx)
+        return e2m1(
+            value=ctx.real_val(self.to_python(raw)),
+            exponent=ctx.real_val(self.exponent(raw)),
+            mantissa=ctx.real_val(self.mantissa(raw)),
+            sign=ctx.real_val(self.sign(raw)),
+            is_norm=ctx.bool_val(self.is_norm(raw)),
+            is_sub=ctx.bool_val(self.is_sub(raw)),
+            is_zero=ctx.bool_val(False),
+        )
+
+    def random_value(self, rng: random.Random) -> Value[int]:
         return self.from_bits(rng.getrandbits(self.total_bits()))
 
     def random_generator(self, seed=None, shared_exponent_bits: int = 0):
@@ -81,14 +151,21 @@ class E2M1(DataType):
 
         return generate, generate_shared_exponent
 
-    def Zero(self) -> "E2M1Value":
-        return self.from_fields(0, self.zero_code, 0)
-
-    def nZero(self) -> "E2M1Value":
-        return self.from_fields(1, self.zero_code, 0)
+    def to_bitstring(self, raw: int) -> str:
+        self.validate_raw(raw)
+        return format(raw, f"0{self.total_bits()}b")
 
     def to_cpp_type(self, jittable: bool = True) -> str:
         return scalar_cpp_type(self.total_bits(), jittable)
+
+    def format_value(self, raw: int) -> str:
+        return f"{type(self).__name__}({self.to_python(raw)})"
+
+    def Zero(self) -> Value[int]:
+        return self.from_fields(0, self.zero_code, 0)
+
+    def nZero(self) -> Value[int]:
+        return self.from_fields(1, self.zero_code, 0)
 
     def __repr__(self) -> str:
         return "E2M1<4>"
@@ -96,84 +173,4 @@ class E2M1(DataType):
     __str__ = __repr__
 
 
-@dataclass(frozen=True)
-class E2M1Value(RuntimeValue):
-    dtype: E2M1
-    raw: int
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.dtype, E2M1):
-            raise TypeError("E2M1Value requires an E2M1 descriptor")
-        validate_float_raw("E2M1", self.raw, self.dtype.total_bits())
-
-    def _fields(self) -> tuple[int, int, int]:
-        return extract_float_fields(
-            self.raw, self.dtype.sign_bits, self.dtype.exponent_bits, self.dtype.mantissa_bits
-        )
-
-    @property
-    def sign(self) -> int:
-        return self._fields()[0]
-
-    @property
-    def exponent(self) -> int:
-        return self._fields()[1]
-
-    @property
-    def mantissa(self) -> int:
-        return self._fields()[2]
-
-    @property
-    def significand(self) -> int:
-        return self.mantissa
-
-    @property
-    def is_nan(self) -> bool:
-        return False
-
-    @property
-    def is_inf(self) -> bool:
-        return False
-
-    @property
-    def is_zero(self) -> bool:
-        return self.exponent == self.dtype.zero_code and self.mantissa == 0
-
-    @property
-    def is_sub(self) -> bool:
-        return not self.is_zero and self.exponent == self.dtype.sub_code
-
-    @property
-    def is_norm(self) -> bool:
-        return not (self.is_zero or self.is_sub)
-
-    def to_python(self) -> float:
-        multiplier = -1.0 if self.sign else 1.0
-        if self.exponent == self.dtype.sub_code:
-            fraction = self.mantissa / (2 ** self.dtype.mantissa_bits)
-            return float(multiplier * fraction * (2 ** (1 - self.dtype.exponent_bias)))
-        fraction = 1.0 + self.mantissa / (2 ** self.dtype.mantissa_bits)
-        return float(multiplier * fraction * (2 ** (self.exponent - self.dtype.exponent_bias)))
-
-    def to_spec(self, ctx):
-        from ..spec.custom_specs.e2m1 import e2m1
-        if self.is_zero:
-            return e2m1.nzero(ctx) if self.sign else e2m1.zero(ctx)
-        return e2m1(
-            value=ctx.real_val(self.to_python()),
-            sign=ctx.real_val(self.sign),
-            exponent=ctx.real_val(self.exponent),
-            mantissa=ctx.real_val(self.mantissa),
-            is_norm=ctx.bool_val(self.is_norm),
-            is_sub=ctx.bool_val(self.is_sub),
-            is_zero=ctx.bool_val(False),
-        )
-
-    def to_bitstring(self) -> str:
-        return format(self.raw, f"0{self.dtype.total_bits()}b")
-
-    def __str__(self) -> str:
-        return f"E2M1({self.to_python()})"
-
-
-__all__ = ["E2M1", "E2M1Value"]
+__all__ = ["E2M1"]

@@ -1,7 +1,7 @@
 import random
 import typing as tp
 
-from ..types import DataType, RuntimeValue
+from ..types import DataType, Value
 from ..utils import make_fixed_arguments
 from ..solver.report import (
     CheckResult,
@@ -183,8 +183,8 @@ class composite(Node):
         
         def impl_(*args):
             for var, arg in zip(self.inner_args, args):
-                var.load_value(arg)
-            return self.inner_tree.evaluate()
+                var.load_value(Value(var.dtype, arg))
+            return self.inner_tree.evaluate().raw
         
         # Signature is obtained from the inner tree
         def sign(*args):
@@ -357,8 +357,8 @@ class primitive(Node):
         def impl_(*args):
             for var, arg in zip(self.inner_args, args):
                 if isinstance(var, Var):
-                    var.load_value(arg)
-            return self.inner_tree.evaluate()
+                    var.load_value(Value(var.dtype, arg))
+            return self.inner_tree.evaluate().raw
         
         # Signature is obtained from the inner tree
         def sign(*args):
@@ -431,7 +431,7 @@ class primitive(Node):
 class Op(Node):
     def __init__(
         self,
-        impl: tp.Callable[..., RuntimeValue],
+        impl: tp.Callable[..., object],
         sign: tp.Callable[..., DataType],
         args: list[Node],
         name: str,
@@ -477,15 +477,15 @@ class Op(Node):
 
 
 class Const(Node):
-    def __init__(self, value: RuntimeValue):
-        if not isinstance(value, RuntimeValue):
+    def __init__(self, value: Value):
+        if not isinstance(value, Value):
             raise TypeError(
-                f"Const value must be a RuntimeValue, got {type(value).__name__}"
+                f"Const value must be a Value, got {type(value).__name__}"
             )
         self.value = value
         
         def impl():
-            return self.value
+            return self.value.raw
         
         def spec(ctx):
             return self.value.to_spec(ctx)
@@ -493,7 +493,9 @@ class Const(Node):
         def sign():
             return self.value.dtype
 
-        sign = make_fixed_arguments(sign, arg_types=[], return_type=type(value.dtype))
+        sign = make_fixed_arguments(
+            sign, arg_types=[], return_type=type(value.dtype)
+        )
         
         super().__init__(
             spec=spec,
@@ -514,7 +516,7 @@ class Const(Node):
     def _fingerprint(self, jittable: bool = False):
         return self._cached_fingerprint(
             jittable,
-            lambda: ("Const", self.dtype._fingerprint(), self.constant._fingerprint()),
+            lambda: ("Const", self.constant._fingerprint()),
         )
 
 
@@ -524,20 +526,25 @@ class Var(Node):
         name: str,
         dtype: DataType,
         *,
-        constant: RuntimeValue | None = None,
+        constant: Value | None = None,
     ):
         if not isinstance(dtype, DataType):
             raise TypeError(f"Var dtype must be a DataType, got {type(dtype).__name__}")
-        if constant is not None and constant.dtype != dtype:
-            raise TypeError(
-                f"Var constant descriptor {constant.dtype} does not match {dtype}"
-            )
+        if constant is not None:
+            if not isinstance(constant, Value):
+                raise TypeError(
+                    f"Var constant must be a Value, got {type(constant).__name__}"
+                )
+            if constant.dtype != dtype:
+                raise TypeError(
+                    f"Var constant descriptor {constant.dtype} does not match {dtype}"
+                )
         self._value = None
         
         def impl():
             if self._value is None:
                 raise ValueError(f"Variable {self.name} not bound to a value")
-            return self._value
+            return self._value.raw
         
         def spec(ctx):
             return dtype.to_spec(self.name, ctx)
@@ -567,15 +574,14 @@ class Var(Node):
         connector = "└── " if is_last else "├── "
         print(prefix + connector + f"{self.dtype}: {self.name} [Var]")
     
-    def load_value(self, value: RuntimeValue):
-        if not isinstance(value, RuntimeValue):
+    def load_value(self, value: Value):
+        if not isinstance(value, Value):
             raise TypeError(
-                f"Var value must be a RuntimeValue, got {type(value).__name__}"
+                f"Var value must be a Value, got {type(value).__name__}"
             )
         if value.dtype != self.dtype:
             raise TypeError(
-                f"Var value descriptor does not match {self.dtype}; "
-                f"got {value.dtype}"
+                f"Var value descriptor does not match {self.dtype}; got {value.dtype}"
             )
         self._value = value
     

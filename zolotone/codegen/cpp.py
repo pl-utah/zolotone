@@ -5,7 +5,7 @@ import typing as tp
 
 from ..ast.node import Node
 from ..ast.nodes import CLowering, Const, Op, Var, composite, primitive
-from ..types import DataType, RuntimeValue, Tuple, TupleValue
+from ..types import DataType, Tuple, Value
 
 
 class CppLoweringError(RuntimeError):
@@ -184,21 +184,27 @@ class _CppEmitter:
                 return lowered
 
         raise CppLoweringError(f"Unsupported node type: {type(node).__name__}")
-    def _lower_const(self, value: RuntimeValue) -> _CppValue:
+
+    def _lower_const(self, value: Value) -> _CppValue:
         tuple_items = None
-        if isinstance(value, TupleValue):
-            tuple_items = tuple(self._lower_const(item) for item in value.items)
+        if isinstance(value.dtype, Tuple):
+            tuple_items = tuple(
+                self._lower_const(Value(item_type, item_raw))
+                for item_raw, item_type in zip(value.raw, value.dtype.items)
+            )
         return _CppValue(
             expr=self._const_expr(value),
             tuple_items=tuple_items,
         )
 
-    def _const_expr(self, value: RuntimeValue) -> str:
-        if isinstance(value, TupleValue):
-            for item in value.items:
-                if isinstance(item, TupleValue):
-                    raise CppLoweringError("Nested tuples are not supported in C++ lowering")
-            args = [self._lower_const(item) for item in value.items]
+    def _const_expr(self, value: Value) -> str:
+        if isinstance(value.dtype, Tuple):
+            if any(isinstance(item, Tuple) for item in value.dtype.items):
+                raise CppLoweringError("Nested tuples are not supported in C++ lowering")
+            args = [
+                self._lower_const(Value(item_type, item_raw))
+                for item_raw, item_type in zip(value.raw, value.dtype.items)
+            ]
             if self.jittable:
                 return (
                     f"{self._render_type(value.dtype)}{{"
@@ -207,7 +213,7 @@ class _CppEmitter:
                 )
             return f"std::make_tuple({', '.join(arg.expr for arg in args)})"
         return self._cast(value.dtype, str(value.raw))
-    
+
     def _lower_op(
         self,
         node: Op,

@@ -1,6 +1,4 @@
-"""IEEE binary32 descriptor and runtime value."""
-
-from __future__ import annotations
+"""IEEE binary32 data-format descriptor."""
 
 from dataclasses import dataclass
 import random
@@ -14,42 +12,144 @@ from ._helpers import (
     validate_float_fields,
     validate_float_raw,
 )
-from .base import DataType, RuntimeValue
+from .base import DataType, Value, value_method
 
 
 @dataclass(frozen=True, repr=False)
-class Float32(DataType):
+class Float32(DataType[int]):
     sign_bits: ClassVar[int] = 1
     exponent_bits: ClassVar[int] = 8
     mantissa_bits: ClassVar[int] = 23
     exponent_bias: ClassVar[int] = 127
-    zero_code: ClassVar[int] = 0
-    sub_code: ClassVar[int] = 0
     inf_code: ClassVar[int] = 255
     nan_code: ClassVar[int] = 255
+    zero_code: ClassVar[int] = 0
+    sub_code: ClassVar[int] = 0
 
     def total_bits(self) -> int:
-        return 32
+        return self.sign_bits + self.exponent_bits + self.mantissa_bits
 
-    def from_bits(self, raw: int) -> "Float32Value":
-        return Float32Value(self, raw)
+    def validate_raw(self, raw: int) -> None:
+        validate_float_raw(type(self).__name__, raw, self.total_bits())
 
-    def from_fields(self, sign: int, exponent: int, mantissa: int) -> "Float32Value":
+    def from_bits(self, raw: int) -> Value[int]:
+        return Value(self, raw)
+
+    def from_fields(self, sign: int, exponent: int, mantissa: int) -> Value[int]:
         validate_float_fields(
-            type(self).__name__, sign, exponent, mantissa,
+            type(self).__name__,
+            sign,
+            exponent,
+            mantissa,
             sign_bits=self.sign_bits,
             exponent_bits=self.exponent_bits,
             mantissa_bits=self.mantissa_bits,
         )
         return self.from_bits(
-            pack_float_fields(sign, exponent, mantissa, self.exponent_bits, self.mantissa_bits)
+            pack_float_fields(
+                sign, exponent, mantissa, self.exponent_bits, self.mantissa_bits
+            )
         )
+
+    def _extract_fields(self, raw: int) -> tuple[int, int, int]:
+        self.validate_raw(raw)
+        return extract_float_fields(
+            raw, self.sign_bits, self.exponent_bits, self.mantissa_bits
+        )
+
+    @value_method
+    def fields(self, raw: int) -> tuple[int, int, int]:
+        return self._extract_fields(raw)
+
+    @value_method
+    def sign(self, raw: int) -> int:
+        return self._extract_fields(raw)[0]
+
+    @value_method
+    def exponent(self, raw: int) -> int:
+        return self._extract_fields(raw)[1]
+
+    @value_method
+    def mantissa(self, raw: int) -> int:
+        return self._extract_fields(raw)[2]
+
+    @value_method
+    def significand(self, raw: int) -> int:
+        return self.mantissa(raw)
+
+    @value_method
+    def is_nan(self, raw: int) -> bool:
+        return self.exponent(raw) == self.nan_code and self.mantissa(raw) != 0
+
+    @value_method
+    def is_inf(self, raw: int) -> bool:
+        return self.exponent(raw) == self.inf_code and self.mantissa(raw) == 0
+
+    @value_method
+    def is_zero(self, raw: int) -> bool:
+        return (
+            not self.is_nan(raw)
+            and self.exponent(raw) == self.zero_code
+            and self.mantissa(raw) == 0
+        )
+
+    @value_method
+    def is_sub(self, raw: int) -> bool:
+        return not (
+            self.is_nan(raw) or self.is_inf(raw) or self.is_zero(raw)
+        ) and self.exponent(raw) == self.sub_code
+
+    @value_method
+    def is_norm(self, raw: int) -> bool:
+        return not (
+            self.is_nan(raw)
+            or self.is_inf(raw)
+            or self.is_zero(raw)
+            or self.is_sub(raw)
+        )
+
+    def to_python(self, raw: int) -> float:
+        self.validate_raw(raw)
+        if self.is_inf(raw):
+            return float("-inf") if self.sign(raw) else float("inf")
+        if self.is_nan(raw):
+            return float("nan")
+        multiplier = -1.0 if self.sign(raw) else 1.0
+        exponent = self.exponent(raw)
+        mantissa = self.mantissa(raw)
+        if exponent == self.sub_code:
+            fraction = mantissa / (2 ** self.mantissa_bits)
+            return float(multiplier * fraction * (2 ** (1 - self.exponent_bias)))
+        fraction = 1.0 + mantissa / (2 ** self.mantissa_bits)
+        return float(multiplier * fraction * (2 ** (exponent - self.exponent_bias)))
 
     def to_spec(self, name, ctx):
         from ..spec.custom_specs.fp32 import fp32
         return fp32.fresh(name, ctx)
 
-    def random_value(self, rng: random.Random) -> "Float32Value":
+    def to_spec_value(self, raw: int, ctx):
+        from ..spec.custom_specs.fp32 import fp32
+
+        self.validate_raw(raw)
+        if self.is_inf(raw):
+            return fp32.ninf(ctx) if self.sign(raw) else fp32.inf(ctx)
+        if self.is_nan(raw):
+            return fp32.nan(ctx)
+        if self.is_zero(raw):
+            return fp32.nzero(ctx) if self.sign(raw) else fp32.zero(ctx)
+        return fp32(
+            value=ctx.real_val(self.to_python(raw)),
+            exponent=ctx.real_val(self.exponent(raw)),
+            mantissa=ctx.real_val(self.mantissa(raw)),
+            sign=ctx.real_val(self.sign(raw)),
+            is_norm=ctx.bool_val(self.is_norm(raw)),
+            is_sub=ctx.bool_val(self.is_sub(raw)),
+            is_zero=ctx.bool_val(False),
+            is_inf=ctx.bool_val(False),
+            is_nan=ctx.bool_val(False),
+        )
+
+    def random_value(self, rng: random.Random) -> Value[int]:
         return self.from_bits(rng.getrandbits(self.total_bits()))
 
     def random_generator(self, seed=None, shared_exponent_bits: int = 0):
@@ -78,19 +178,29 @@ class Float32(DataType):
 
         return generate, generate_shared_exponent
 
-    def Zero(self) -> "Float32Value":
+    def to_bitstring(self, raw: int) -> str:
+        self.validate_raw(raw)
+        return format(raw, f"0{self.total_bits()}b")
+
+    def to_cpp_type(self, jittable: bool = True) -> str:
+        return scalar_cpp_type(self.total_bits(), jittable)
+
+    def format_value(self, raw: int) -> str:
+        return f"{type(self).__name__}({self.to_python(raw)})"
+
+    def Zero(self) -> Value[int]:
         return self.from_fields(0, self.zero_code, 0)
 
-    def nZero(self) -> "Float32Value":
+    def nZero(self) -> Value[int]:
         return self.from_fields(1, self.zero_code, 0)
 
-    def Inf(self) -> "Float32Value":
+    def Inf(self) -> Value[int]:
         return self.from_fields(0, self.inf_code, 0)
 
-    def nInf(self) -> "Float32Value":
+    def nInf(self) -> Value[int]:
         return self.from_fields(1, self.inf_code, 0)
 
-    def NaN(self, payload: int | None = None) -> "Float32Value":
+    def NaN(self, payload: int | None = None) -> Value[int]:
         if payload is None:
             payload = 1 << (self.mantissa_bits - 1)
         if not isinstance(payload, int):
@@ -102,103 +212,10 @@ class Float32(DataType):
             )
         return self.from_fields(0, self.nan_code, payload)
 
-    def to_cpp_type(self, jittable: bool = True) -> str:
-        return scalar_cpp_type(self.total_bits(), jittable)
-
     def __repr__(self) -> str:
         return "Float<32>"
 
     __str__ = __repr__
 
 
-@dataclass(frozen=True)
-class Float32Value(RuntimeValue):
-    dtype: Float32
-    raw: int
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.dtype, Float32):
-            raise TypeError("Float32Value requires a Float32 descriptor")
-        validate_float_raw("Float32", self.raw, self.dtype.total_bits())
-
-    def _fields(self) -> tuple[int, int, int]:
-        return extract_float_fields(
-            self.raw, self.dtype.sign_bits, self.dtype.exponent_bits, self.dtype.mantissa_bits
-        )
-
-    @property
-    def sign(self) -> int:
-        return self._fields()[0]
-
-    @property
-    def exponent(self) -> int:
-        return self._fields()[1]
-
-    @property
-    def mantissa(self) -> int:
-        return self._fields()[2]
-
-    @property
-    def significand(self) -> int:
-        return self.mantissa
-
-    @property
-    def is_nan(self) -> bool:
-        return self.exponent == self.dtype.nan_code and self.mantissa != 0
-
-    @property
-    def is_inf(self) -> bool:
-        return self.exponent == self.dtype.inf_code and self.mantissa == 0
-
-    @property
-    def is_zero(self) -> bool:
-        return self.exponent == self.dtype.zero_code and self.mantissa == 0
-
-    @property
-    def is_sub(self) -> bool:
-        return not (self.is_nan or self.is_inf or self.is_zero) and self.exponent == self.dtype.sub_code
-
-    @property
-    def is_norm(self) -> bool:
-        return not (self.is_nan or self.is_inf or self.is_zero or self.is_sub)
-
-    def to_python(self) -> float:
-        if self.is_inf:
-            return float("-inf") if self.sign else float("inf")
-        if self.is_nan:
-            return float("nan")
-        multiplier = -1.0 if self.sign else 1.0
-        if self.exponent == self.dtype.sub_code:
-            fraction = self.mantissa / (2 ** self.dtype.mantissa_bits)
-            return float(multiplier * fraction * (2 ** (1 - self.dtype.exponent_bias)))
-        fraction = 1.0 + self.mantissa / (2 ** self.dtype.mantissa_bits)
-        return float(multiplier * fraction * (2 ** (self.exponent - self.dtype.exponent_bias)))
-
-    def to_spec(self, ctx):
-        from ..spec.custom_specs.fp32 import fp32
-        if self.is_inf:
-            return fp32.ninf(ctx) if self.sign else fp32.inf(ctx)
-        if self.is_nan:
-            return fp32.nan(ctx)
-        if self.is_zero:
-            return fp32.nzero(ctx) if self.sign else fp32.zero(ctx)
-        return fp32(
-            value=ctx.real_val(self.to_python()),
-            sign=ctx.real_val(self.sign),
-            exponent=ctx.real_val(self.exponent),
-            mantissa=ctx.real_val(self.mantissa),
-            is_norm=ctx.bool_val(self.is_norm),
-            is_sub=ctx.bool_val(self.is_sub),
-            is_zero=ctx.bool_val(False),
-            is_inf=ctx.bool_val(False),
-            is_nan=ctx.bool_val(False),
-        )
-
-    def to_bitstring(self) -> str:
-        return format(self.raw, f"0{self.dtype.total_bits()}b")
-
-    def __str__(self) -> str:
-        return f"Float32({self.to_python()})"
-
-
-__all__ = ["Float32", "Float32Value"]
+__all__ = ["Float32"]

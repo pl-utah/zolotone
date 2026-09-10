@@ -1740,81 +1740,118 @@ class TestBasicOperators(unittest.TestCase):
 
 class TestDataTypeValues(unittest.TestCase):
     def test_all_factories_return_the_exact_runtime_class(self):
-        scalar_cases = (
-            (Bool(), BoolValue),
-            (Q(2, 1), QValue),
-            (UQ(2, 1), UQValue),
-            (Float16(), Float16Value),
-            (Float32(), Float32Value),
-            (BFloat16(), BFloat16Value),
-            (E4M3FN(), E4M3FNValue),
-            (UE4M3(), UE4M3Value),
-            (E5M2(), E5M2Value),
-            (E5M2FNUZ(), E5M2FNUZValue),
-            (E2M1(), E2M1Value),
+        scalar_types = (
+            Bool(), Q(2, 1), UQ(2, 1), Float16(), Float32(), BFloat16(),
+            E4M3FN(), UE4M3(), E5M2(), E5M2FNUZ(), E2M1(),
         )
-        for dtype, value_type in scalar_cases:
+        for dtype in scalar_types:
             with self.subTest(dtype=dtype):
-                self.assertIs(type(dtype.from_bits(0)), value_type)
-                self.assertIs(type(dtype.random_value(random.Random(1))), value_type)
+                self.assertIs(type(dtype.from_bits(0)), Value)
+                self.assertIs(type(dtype.random_value(random.Random(1))), Value)
 
         field_cases = (
-            (Float16().from_fields(0, 0, 0), Float16Value),
-            (Float32().from_fields(0, 0, 0), Float32Value),
-            (BFloat16().from_fields(0, 0, 0), BFloat16Value),
-            (E4M3FN().from_fields(0, 0, 0), E4M3FNValue),
-            (UE4M3().from_fields(0, 0), UE4M3Value),
-            (E5M2().from_fields(0, 0, 0), E5M2Value),
-            (E5M2FNUZ().from_fields(0, 0, 0), E5M2FNUZValue),
-            (E2M1().from_fields(0, 0, 0), E2M1Value),
+            Float16().from_fields(0, 0, 0),
+            Float32().from_fields(0, 0, 0),
+            BFloat16().from_fields(0, 0, 0),
+            E4M3FN().from_fields(0, 0, 0),
+            UE4M3().from_fields(0, 0),
+            E5M2().from_fields(0, 0, 0),
+            E5M2FNUZ().from_fields(0, 0, 0),
+            E2M1().from_fields(0, 0, 0),
         )
-        for value, value_type in field_cases:
-            with self.subTest(factory=value_type.__name__):
-                self.assertIs(type(value), value_type)
+        for value in field_cases:
+            self.assertIs(type(value), Value)
 
         special_cases = (
-            (Float16(), Float16Value, ("Zero", "nZero", "Inf", "nInf", "NaN")),
-            (Float32(), Float32Value, ("Zero", "nZero", "Inf", "nInf", "NaN")),
-            (BFloat16(), BFloat16Value, ("Zero", "nZero", "Inf", "nInf", "NaN")),
-            (E4M3FN(), E4M3FNValue, ("Zero", "nZero", "NaN")),
-            (UE4M3(), UE4M3Value, ("Zero", "NaN")),
-            (E5M2(), E5M2Value, ("Zero", "nZero", "Inf", "nInf", "NaN")),
-            (E5M2FNUZ(), E5M2FNUZValue, ("Zero", "NaN")),
-            (E2M1(), E2M1Value, ("Zero", "nZero")),
+            (Float16(), ("Zero", "nZero", "Inf", "nInf", "NaN")),
+            (Float32(), ("Zero", "nZero", "Inf", "nInf", "NaN")),
+            (BFloat16(), ("Zero", "nZero", "Inf", "nInf", "NaN")),
+            (E4M3FN(), ("Zero", "nZero", "NaN")),
+            (UE4M3(), ("Zero", "NaN")),
+            (E5M2(), ("Zero", "nZero", "Inf", "nInf", "NaN")),
+            (E5M2FNUZ(), ("Zero", "NaN")),
+            (E2M1(), ("Zero", "nZero")),
         )
-        for dtype, value_type, factories in special_cases:
+        for dtype, factories in special_cases:
             for factory in factories:
                 with self.subTest(dtype=dtype, factory=factory):
-                    self.assertIs(type(getattr(dtype, factory)()), value_type)
+                    self.assertIs(type(getattr(dtype, factory)()), Value)
 
-        self.assertIs(type(Q.from_int(-1)), QValue)
-        self.assertIs(type(Q(2, 1).from_float(0.5)), QValue)
-        self.assertIs(type(UQ.from_int(1)), UQValue)
-        self.assertIs(type(UQ(2, 1).from_float(0.5)), UQValue)
+        self.assertIs(type(Q.from_int(-1)), Value)
+        self.assertIs(type(Q(2, 1).from_float(0.5)), Value)
+        self.assertIs(type(UQ.from_int(1)), Value)
+        self.assertIs(type(UQ(2, 1).from_float(0.5)), Value)
         tuple_type = Tuple(Q(2, 0), Bool())
-        self.assertIs(
-            type(tuple_type.from_values(Q.from_int(1), Bool().from_bits(1))),
-            TupleValue,
+        tuple_value = tuple_type.from_values(Q.from_int(1), Bool().from_bits(1))
+        self.assertIs(type(tuple_value), Value)
+        self.assertIs(type(tuple_type.random_value(random.Random(1))), Value)
+
+    def test_descriptors_inherit_directly_and_old_value_classes_are_gone(self):
+        import zolotone.types as value_types
+
+        descriptor_types = (
+            Bool, Q, UQ, Tuple, Float16, Float32, BFloat16, E4M3FN, UE4M3,
+            E5M2, E5M2FNUZ, E2M1,
         )
-        self.assertIs(type(tuple_type.random_value(random.Random(1))), TupleValue)
+        for descriptor_type in descriptor_types:
+            with self.subTest(descriptor=descriptor_type.__name__):
+                self.assertEqual(descriptor_type.__bases__, (DataType,))
+        self.assertFalse(
+            any(name.endswith("Value") and name != "Value" for name in value_types.__all__)
+        )
+        self.assertFalse(
+            (Path(__file__).parents[1] / "zolotone" / "types" / "_float.py").exists()
+        )
+
+        float_methods = (
+            "total_bits",
+            "validate_raw",
+            "from_bits",
+            "from_fields",
+            "fields",
+            "sign",
+            "exponent",
+            "mantissa",
+            "significand",
+            "is_zero",
+            "is_sub",
+            "is_norm",
+            "to_python",
+            "to_spec_value",
+            "random_value",
+            "random_generator",
+            "to_bitstring",
+            "to_cpp_type",
+            "format_value",
+        )
+        for descriptor_type in descriptor_types[4:]:
+            for method_name in float_methods:
+                with self.subTest(
+                    descriptor=descriptor_type.__name__, method=method_name
+                ):
+                    self.assertIn(method_name, descriptor_type.__dict__)
+
+        for descriptor_type in (Float16, Float32, BFloat16, E5M2):
+            with self.subTest(descriptor=descriptor_type.__name__):
+                self.assertIn("is_nan", descriptor_type.__dict__)
+                self.assertIn("is_inf", descriptor_type.__dict__)
+        for descriptor_type in (E4M3FN, UE4M3, E5M2FNUZ):
+            with self.subTest(descriptor=descriptor_type.__name__):
+                self.assertIn("is_nan", descriptor_type.__dict__)
+                self.assertNotIn("is_inf", descriptor_type.__dict__)
+        self.assertNotIn("is_nan", E2M1.__dict__)
+        self.assertNotIn("is_inf", E2M1.__dict__)
 
     def test_random_generators_return_the_exact_runtime_class(self):
-        cases = (
-            (Float16(), Float16Value),
-            (Float32(), Float32Value),
-            (BFloat16(), BFloat16Value),
-            (E4M3FN(), E4M3FNValue),
-            (UE4M3(), UE4M3Value),
-            (E5M2(), E5M2Value),
-            (E5M2FNUZ(), E5M2FNUZValue),
-            (E2M1(), E2M1Value),
-        )
-        for dtype, value_type in cases:
+        for dtype in (
+            Float16(), Float32(), BFloat16(), E4M3FN(), UE4M3(), E5M2(),
+            E5M2FNUZ(), E2M1(),
+        ):
             with self.subTest(dtype=dtype):
                 generate, advance_shared_exponent = dtype.random_generator(
                     seed=1, shared_exponent_bits=1
                 )
-                self.assertIs(type(generate()), value_type)
+                self.assertIs(type(generate()), Value)
                 self.assertIsInstance(advance_shared_exponent(), int)
 
     def test_unsupported_special_factories_are_absent(self):
@@ -1822,33 +1859,48 @@ class TestDataTypeValues(unittest.TestCase):
             with self.subTest(dtype=dtype):
                 self.assertFalse(hasattr(dtype, "Inf"))
                 self.assertFalse(hasattr(dtype, "nInf"))
+                value = dtype.from_bits(0)
+                self.assertFalse(hasattr(value, "is_inf"))
+                self.assertNotIn("is_inf", dir(value))
         for dtype in (UE4M3(), E5M2FNUZ()):
             with self.subTest(dtype=dtype):
                 self.assertFalse(hasattr(dtype, "nZero"))
         self.assertFalse(hasattr(E2M1(), "NaN"))
+        e2m1_value = E2M1().from_bits(0)
+        self.assertFalse(hasattr(e2m1_value, "is_nan"))
+        self.assertNotIn("is_nan", dir(e2m1_value))
 
-    def test_base_contracts_reject_incomplete_subclasses(self):
+    def test_base_contract_rejects_incomplete_subclasses(self):
         class IncompleteDataType(DataType):
-            pass
-
-        class IncompleteRuntimeValue(RuntimeValue):
             pass
 
         with self.assertRaises(TypeError):
             IncompleteDataType()
-        with self.assertRaises(TypeError):
-            IncompleteRuntimeValue()
-        self.assertFalse(hasattr(RuntimeValue, "to_bitstring"))
         self.assertFalse(hasattr(Tuple(Bool()), "from_bits"))
-        self.assertFalse(hasattr(Tuple(Bool()).from_values(Bool().from_bits(0)), "to_bitstring"))
+        with self.assertRaisesRegex(AttributeError, "do not support to_bitstring"):
+            Tuple(Bool()).from_values(Bool().from_bits(0)).to_bitstring()
 
-    def test_custom_type_participates_without_shared_dispatch(self):
-        class TinyType(DataType):
+    def test_custom_type_participates_through_generic_value(self):
+        class TinyType(DataType[int]):
             def total_bits(self):
                 return 2
 
+            def validate_raw(self, raw):
+                if not isinstance(raw, int):
+                    raise TypeError(raw)
+                if not 0 <= raw < 4:
+                    raise ValueError(raw)
+
             def from_bits(self, raw):
-                return TinyValue(self, raw)
+                return Value(self, raw)
+
+            def to_python(self, raw):
+                self.validate_raw(raw)
+                return raw
+
+            def to_spec_value(self, raw, ctx):
+                self.validate_raw(raw)
+                return ctx.real_val(raw)
 
             def to_spec(self, name, ctx):
                 return ctx.fresh_real(name)
@@ -1859,17 +1911,6 @@ class TestDataTypeValues(unittest.TestCase):
             def to_cpp_type(self, jittable=True):
                 return "uint8_t" if jittable else "ac_uint<2>"
 
-        class TinyValue(RuntimeValue):
-            def __init__(self, dtype, raw):
-                self.dtype = dtype
-                self.raw = raw
-
-            def to_python(self):
-                return self.raw
-
-            def to_spec(self, ctx):
-                return ctx.real_val(self.raw)
-
         dtype = TinyType()
         value = dtype.from_bits(1)
         constant = Const(value)
@@ -1879,8 +1920,8 @@ class TestDataTypeValues(unittest.TestCase):
         def sign(x: TinyType) -> TinyType:
             return dtype
 
-        def impl(x: TinyValue) -> TinyValue:
-            return dtype.from_bits(x.raw ^ 0b11)
+        def impl(raw: int) -> int:
+            return raw ^ 0b11
 
         inverted = Op(
             impl=impl,
@@ -1890,12 +1931,99 @@ class TestDataTypeValues(unittest.TestCase):
             c_lowering=lambda args, jittable: f"({args[0]} ^ 3)",
         )
         self.assertIs(constant.evaluate(), value)
-        self.assertIs(variable.evaluate(), value)
+        self.assertEqual(variable.evaluate(), value)
         self.assertEqual(inverted.evaluate().raw, 2)
         self.assertEqual(
             constant._fingerprint(), Const(dtype.from_bits(1))._fingerprint()
         )
         self.assertEqual(variable.dtype._fingerprint(), dtype._fingerprint())
+
+    def test_value_method_forwarding_is_explicit_and_discoverable(self):
+        class ForwardingType(DataType[int]):
+            def total_bits(self):
+                return 4
+
+            def validate_raw(self, raw):
+                if not isinstance(raw, int) or not 0 <= raw < 16:
+                    raise ValueError(raw)
+
+            def to_python(self, raw):
+                return raw
+
+            def to_spec_value(self, raw, ctx):
+                return ctx.real_val(raw)
+
+            def to_spec(self, name, ctx):
+                return ctx.fresh_real(name)
+
+            def random_value(self, rng):
+                return Value(self, rng.getrandbits(4))
+
+            def to_cpp_type(self, jittable=True):
+                return "uint8_t"
+
+            @value_method
+            def shifted(self, raw, amount=1):
+                return raw << amount
+
+            def factory(self, raw):
+                return Value(self, raw)
+
+            @value_method
+            def fails(self, raw):
+                raise RuntimeError(raw)
+
+        value = Value(ForwardingType(), 3)
+        self.assertEqual(value.shifted(), 6)
+        self.assertEqual(value.shifted(2), 12)
+        self.assertIn("shifted", dir(value))
+        self.assertNotIn("factory", dir(value))
+        with self.assertRaises(AttributeError):
+            value.factory(2)
+        with self.assertRaisesRegex(RuntimeError, "3"):
+            value.fails()
+
+    def test_float_value_methods_use_call_syntax(self):
+        value = Float32().from_fields(1, 30, 7)
+        self.assertEqual(value.fields(), (1, 30, 7))
+        self.assertEqual(value.sign(), 1)
+        self.assertEqual(value.exponent(), 30)
+        self.assertEqual(value.mantissa(), 7)
+        self.assertTrue(value.is_norm())
+        self.assertFalse(value.is_nan())
+
+    def test_value_and_graph_boundaries_validate_descriptors(self):
+        dtype = UQ(2, 0)
+        with self.assertRaisesRegex(ValueError, "does not fit"):
+            Value(dtype, 4)
+        with self.assertRaisesRegex(TypeError, "must be a Value"):
+            Const(3)
+
+        variable = Var("value", dtype)
+        with self.assertRaisesRegex(TypeError, "must be a Value"):
+            variable.load_value(3)
+        with self.assertRaisesRegex(TypeError, "descriptor does not match"):
+            variable.load_value(UQ(3, 0).from_bits(3))
+
+    def test_operation_outputs_must_be_valid_raw_payloads(self):
+        dtype = UQ(2, 0)
+        variable = Var("value", dtype)
+        variable.load_value(dtype.from_bits(1))
+
+        def sign(value_type: UQ) -> UQ:
+            return dtype
+
+        for invalid_output in (4, dtype.from_bits(1)):
+            with self.subTest(output=invalid_output):
+                operation = Op(
+                    impl=lambda raw, output=invalid_output: output,
+                    sign=sign,
+                    args=[variable],
+                    name="invalid_output",
+                    c_lowering=None,
+                )
+                with self.assertRaisesRegex(TypeError, "Output from invalid_output"):
+                    operation.evaluate()
 
     def test_uq_from_bits_uses_packed_encoding(self):
         value = UQ(2, 3).from_bits(3)
@@ -3748,9 +3876,9 @@ class TestFloat16Spec(unittest.TestCase):
             mantissa=1023,
         )
         self.assertEqual(largest_negative.raw, 0xFBFF)
-        self.assertEqual(largest_negative.sign, 1)
-        self.assertEqual(largest_negative.exponent, 30)
-        self.assertEqual(largest_negative.mantissa, 1023)
+        self.assertEqual(largest_negative.sign(), 1)
+        self.assertEqual(largest_negative.exponent(), 30)
+        self.assertEqual(largest_negative.mantissa(), 1023)
         self.assertEqual(largest_negative.dtype, Float16())
 
         self.assertEqual(Float16().from_bits(0x0001).to_python(), 2 ** -24)
@@ -3828,7 +3956,7 @@ class TestFloat16Spec(unittest.TestCase):
         ctx = SpecContext("static-fp16")
         self.assertIsInstance(Float16().to_spec("input", ctx), fp16)
         rng = random.Random(1)
-        self.assertIsInstance(Float16().random_value(rng), Float16Value)
+        self.assertIsInstance(Float16().random_value(rng), Value)
 
     def test_fp16_encode_classifies_representative_boundaries(self):
         cases = (
@@ -3935,7 +4063,7 @@ class TestE4M3FNSpec(unittest.TestCase):
         self.assertTrue(math.isnan(E4M3FN().from_bits(0xFF).to_python()))
 
         value = E4M3FN().from_fields(1, 15, 6)
-        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 15, 6))
+        self.assertEqual((value.sign(), value.exponent(), value.mantissa()), (1, 15, 6))
         self.assertEqual(value.dtype, E4M3FN())
         self.assertEqual(value.dtype.total_bits(), 8)
 
@@ -3992,7 +4120,7 @@ class TestE4M3FNSpec(unittest.TestCase):
         self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
         self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
         self.assertIsInstance(E4M3FN().to_spec("input", ctx), e4m3fn)
-        self.assertIsInstance(E4M3FN().random_value(random.Random(1)), E4M3FNValue)
+        self.assertIsInstance(E4M3FN().random_value(random.Random(1)), Value)
 
         self.assertEqual(e4m3fn.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
         self.assertEqual(e4m3fn.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
@@ -4081,16 +4209,16 @@ class TestE4M3FNSpec(unittest.TestCase):
         try:
             for bits in range(256):
                 runtime = E4M3FN().from_bits(bits)
-                if runtime.is_nan:
+                if runtime.is_nan():
                     continue
-                if runtime.exponent == 0:
+                if runtime.exponent() == 0:
                     exponent_value = 1
-                    mantissa_value = runtime.mantissa / 8
+                    mantissa_value = runtime.mantissa() / 8
                 else:
-                    exponent_value = runtime.exponent
-                    mantissa_value = 1 + runtime.mantissa / 8
+                    exponent_value = runtime.exponent()
+                    mantissa_value = 1 + runtime.mantissa() / 8
 
-                sign_value = UQ(1, 0).from_bits(runtime.sign)
+                sign_value = UQ(1, 0).from_bits(runtime.sign())
                 exponent_value = Q(8, 0).from_bits(exponent_value)
                 mantissa_value = UQ(2, 12).from_float(mantissa_value)
                 sign.load_value(sign_value)
@@ -4138,7 +4266,7 @@ class TestUE4M3Spec(unittest.TestCase):
         self.assertTrue(math.isnan(UE4M3().from_bits(0x7F).to_python()))
 
         value = UE4M3().from_fields(15, 6)
-        self.assertEqual((value.exponent, value.mantissa), (15, 6))
+        self.assertEqual((value.exponent(), value.mantissa()), (15, 6))
         self.assertEqual(value.dtype, UE4M3())
         self.assertEqual(value.dtype.total_bits(), 8)
 
@@ -4194,7 +4322,7 @@ class TestUE4M3Spec(unittest.TestCase):
         )
         self.assertEqual(value.observables_for_classification("zero"), (BoolLit(True),))
         self.assertIsInstance(UE4M3().to_spec("input", ctx), ue4m3)
-        self.assertIsInstance(UE4M3().random_value(random.Random(1)), UE4M3Value)
+        self.assertIsInstance(UE4M3().random_value(random.Random(1)), Value)
 
         positive_ctx = SpecContext("positive-ue4m3")
         positive = ue4m3.encode(RealLit(1), positive_ctx)
@@ -4362,13 +4490,13 @@ class TestE5M2Spec(unittest.TestCase):
             self.assertTrue(math.isnan(E5M2().from_bits(bits).to_python()))
 
         value = E5M2().from_fields(1, 30, 3)
-        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 30, 3))
+        self.assertEqual((value.sign(), value.exponent(), value.mantissa()), (1, 30, 3))
         self.assertEqual(value.dtype, E5M2())
         self.assertEqual(value.dtype.total_bits(), 8)
         generator, next_shared = E5M2().random_generator(
             seed=1, shared_exponent_bits=2
         )
-        self.assertIsInstance(generator(), E5M2Value)
+        self.assertIsInstance(generator(), Value)
         self.assertEqual(next_shared() & 0x07, 0)
 
         for invalid in (-1, 256, 1.5, "0"):
@@ -4444,7 +4572,7 @@ class TestE5M2Spec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown e5m2 classification"):
             value.observables_for_classification("finite")
         self.assertIsInstance(E5M2().to_spec("input", ctx), e5m2)
-        self.assertIsInstance(E5M2().random_value(random.Random(1)), E5M2Value)
+        self.assertIsInstance(E5M2().random_value(random.Random(1)), Value)
         self.assertEqual(e5m2.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
         self.assertEqual(e5m2.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
         self.assertEqual(e5m2.inf(ctx).is_pinf.constant_fold(), BoolLit(True))
@@ -4500,17 +4628,17 @@ class TestE5M2Spec(unittest.TestCase):
 
             for bits in range(256):
                 runtime = E5M2().from_bits(bits)
-                if runtime.is_inf or runtime.is_nan:
+                if runtime.is_inf() or runtime.is_nan():
                     continue
-                exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
+                exponent_value = 1 if runtime.exponent() == 0 else runtime.exponent()
                 mantissa_value = (
-                    runtime.mantissa / 4
-                    if runtime.exponent == 0
-                    else 1 + runtime.mantissa / 4
+                    runtime.mantissa() / 4
+                    if runtime.exponent() == 0
+                    else 1 + runtime.mantissa() / 4
                 )
                 expected = 0x00 if bits == E5M2().nZero().raw else bits
                 self.assertEqual(
-                    run(runtime.sign, exponent_value, mantissa_value),
+                    run(runtime.sign(), exponent_value, mantissa_value),
                     (expected, expected),
                 )
         finally:
@@ -4547,13 +4675,13 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         self.assertTrue(math.isnan(E5M2FNUZ().from_bits(0x80).to_python()))
 
         value = E5M2FNUZ().from_fields(1, 31, 3)
-        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 31, 3))
+        self.assertEqual((value.sign(), value.exponent(), value.mantissa()), (1, 31, 3))
         self.assertEqual(value.dtype, E5M2FNUZ())
         self.assertEqual(value.dtype.total_bits(), 8)
         generator, next_shared = E5M2FNUZ().random_generator(
             seed=1, shared_exponent_bits=2
         )
-        self.assertIsInstance(generator(), E5M2FNUZValue)
+        self.assertIsInstance(generator(), Value)
         self.assertEqual(next_shared() & 0x07, 0)
 
         for invalid in (-1, 256, 1.5, "0"):
@@ -4613,7 +4741,7 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         self.assertEqual(value.observables_for_classification("nan"), (BoolLit(True),))
         self.assertIsInstance(E5M2FNUZ().to_spec("input", ctx), e5m2fnuz)
         self.assertIsInstance(
-            E5M2FNUZ().random_value(random.Random(1)), E5M2FNUZValue
+            E5M2FNUZ().random_value(random.Random(1)), Value
         )
         self.assertEqual(e5m2fnuz.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
         self.assertEqual(e5m2fnuz.nan(ctx).is_nan.constant_fold(), BoolLit(True))
@@ -4682,16 +4810,16 @@ class TestE5M2FNUZSpec(unittest.TestCase):
 
             for bits in range(256):
                 runtime = E5M2FNUZ().from_bits(bits)
-                if runtime.is_nan:
+                if runtime.is_nan():
                     continue
-                exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
+                exponent_value = 1 if runtime.exponent() == 0 else runtime.exponent()
                 mantissa_value = (
-                    runtime.mantissa / 4
-                    if runtime.exponent == 0
-                    else 1 + runtime.mantissa / 4
+                    runtime.mantissa() / 4
+                    if runtime.exponent() == 0
+                    else 1 + runtime.mantissa() / 4
                 )
                 self.assertEqual(
-                    run(runtime.sign, exponent_value, mantissa_value), (bits, bits)
+                    run(runtime.sign(), exponent_value, mantissa_value), (bits, bits)
                 )
         finally:
             tempdir.cleanup()
@@ -4723,7 +4851,7 @@ class TestE2M1Spec(unittest.TestCase):
         self.assertEqual(E2M1().from_bits(0x7).to_python(), 6.0)
         self.assertEqual(E2M1().from_bits(0xF).to_python(), -6.0)
         value = E2M1().from_fields(1, 3, 1)
-        self.assertEqual((value.sign, value.exponent, value.mantissa), (1, 3, 1))
+        self.assertEqual((value.sign(), value.exponent(), value.mantissa()), (1, 3, 1))
         self.assertEqual(value.dtype, E2M1())
         self.assertEqual(value.dtype.total_bits(), 4)
         with self.assertRaises(AttributeError):
@@ -4731,7 +4859,7 @@ class TestE2M1Spec(unittest.TestCase):
         with self.assertRaises(AttributeError):
             E2M1().Inf()
         generator, next_shared = E2M1().random_generator(seed=1, shared_exponent_bits=1)
-        self.assertIsInstance(generator(), E2M1Value)
+        self.assertIsInstance(generator(), Value)
         self.assertEqual(next_shared() & 0x01, 0)
 
         for invalid in (-1, 16, 1.5, "0"):
@@ -4781,7 +4909,7 @@ class TestE2M1Spec(unittest.TestCase):
         self.assertEqual(tuple(value.classification_flags()), ("norm", "sub", "zero"))
         self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
         self.assertIsInstance(E2M1().to_spec("input", ctx), e2m1)
-        self.assertIsInstance(E2M1().random_value(random.Random(1)), E2M1Value)
+        self.assertIsInstance(E2M1().random_value(random.Random(1)), Value)
         self.assertEqual(e2m1.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
         self.assertEqual(e2m1.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
         self.assertFalse(hasattr(e2m1, "nan"))
@@ -4848,15 +4976,15 @@ class TestE2M1Spec(unittest.TestCase):
 
             for bits in range(16):
                 runtime = E2M1().from_bits(bits)
-                exponent_value = 1 if runtime.exponent == 0 else runtime.exponent
+                exponent_value = 1 if runtime.exponent() == 0 else runtime.exponent()
                 mantissa_value = (
-                    runtime.mantissa / 2
-                    if runtime.exponent == 0
-                    else 1 + runtime.mantissa / 2
+                    runtime.mantissa() / 2
+                    if runtime.exponent() == 0
+                    else 1 + runtime.mantissa() / 2
                 )
                 expected = 0x0 if bits == E2M1().nZero().raw else bits
                 self.assertEqual(
-                    run(runtime.sign, exponent_value, mantissa_value),
+                    run(runtime.sign(), exponent_value, mantissa_value),
                     (expected, expected),
                 )
         finally:
@@ -5067,7 +5195,7 @@ class TestFloatFormatConversions(unittest.TestCase):
                         expected = Float32().NaN().raw
                     elif math.isinf(value.to_python()):
                         expected = (
-                            Float32().nInf().raw if value.sign else Float32().Inf().raw
+                            Float32().nInf().raw if value.sign() else Float32().Inf().raw
                         )
                     else:
                         expected = struct.unpack(
@@ -5502,19 +5630,19 @@ class TestReducedWGMMA(unittest.TestCase):
         else:
             mantissa_bits, bias = 10, 15
 
-        if value.exponent == 0:
-            significand = value.mantissa
+        if value.exponent() == 0:
+            significand = value.mantissa()
             exponent = 1 - bias - mantissa_bits
         else:
-            significand = (1 << mantissa_bits) + value.mantissa
-            exponent = value.exponent - bias - mantissa_bits
+            significand = (1 << mantissa_bits) + value.mantissa()
+            exponent = value.exponent() - bias - mantissa_bits
         scale = (
             Fraction(1 << exponent)
             if exponent >= 0
             else Fraction(1, 1 << -exponent)
         )
         result = significand * scale
-        return -result if value.sign else result
+        return -result if value.sign() else result
 
     @staticmethod
     def _round_even(value):
@@ -5793,9 +5921,9 @@ class TestReducedWGMMA(unittest.TestCase):
                             value = dtype.from_bits(rng.getrandbits(bits))
                             exponent_is_special = (
                                 dtype.inf_code is not None
-                                and value.exponent == dtype.inf_code
+                                and value.exponent() == dtype.inf_code
                             )
-                            e4m3_nan = isinstance(value.dtype, E4M3FN) and value.is_nan
+                            e4m3_nan = isinstance(value.dtype, E4M3FN) and value.is_nan()
                             if not exponent_is_special and not e4m3_nan:
                                 break
                         values.append(value)
@@ -5814,7 +5942,7 @@ class TestReducedWGMMA(unittest.TestCase):
 class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
     @staticmethod
     def _reference_bits(scale0, scale1, x0, x1):
-        if scale0.is_nan or scale1.is_nan:
+        if scale0.is_nan() or scale1.is_nan():
             return Float32().NaN().raw
 
         value = scale0.to_python() * x0.to_python() + scale1.to_python() * x1.to_python()
@@ -5987,12 +6115,12 @@ class TestUE4M3x2E2M1x2AddFP32(unittest.TestCase):
 class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
     @staticmethod
     def _reference_bits(a0, a1, b0, b1):
-        if a0.is_nan or a1.is_nan:
+        if a0.is_nan() or a1.is_nan():
             return Float32().NaN().raw
 
-        sign = b0.sign ^ b1.sign
+        sign = b0.sign() ^ b1.sign()
         values = (a0, a1, b0, b1)
-        if any(value.exponent == 0 and value.mantissa == 0 for value in values):
+        if any(value.exponent() == 0 and value.mantissa() == 0 for value in values):
             return Float32().nZero().raw if sign else Float32().Zero().raw
 
         product = a0.to_python() * a1.to_python() * b0.to_python() * b1.to_python()
@@ -6157,9 +6285,9 @@ class TestUE4M3x2E2M1x2MultFP32(unittest.TestCase):
 class TestBFloat16ReLU(unittest.TestCase):
     @staticmethod
     def _reference_bits(value: BFloat16) -> int:
-        if value.exponent == BFloat16.nan_code and value.mantissa != 0:
+        if value.exponent() == BFloat16.nan_code and value.mantissa() != 0:
             return BFloat16().NaN().raw
-        if value.sign:
+        if value.sign():
             return BFloat16().Zero().raw
         return value.raw
 

@@ -11,8 +11,8 @@ from .basics import *
 
 
 def _ue4m3_mantissa(x: Node) -> Op:
-    def impl(x: UE4M3Value) -> UQValue:
-        return UQ(UE4M3.mantissa_bits, 0).from_bits(x.mantissa)
+    def impl(x: int) -> int:
+        return UE4M3().mantissa(x)
 
     def sign(x: UE4M3) -> UQ:
         return UQ(UE4M3.mantissa_bits, 0)
@@ -27,8 +27,8 @@ def _ue4m3_mantissa(x: Node) -> Op:
 
 
 def _ue4m3_exponent(x: Node) -> Op:
-    def impl(x: UE4M3Value) -> UQValue:
-        return UQ(UE4M3.exponent_bits, 0).from_bits(x.exponent)
+    def impl(x: int) -> int:
+        return UE4M3().exponent(x)
 
     def sign(x: UE4M3) -> UQ:
         return UQ(UE4M3.exponent_bits, 0)
@@ -46,8 +46,8 @@ def _ue4m3_alloc(exponent: Node, mantissa: Node) -> Op:
     def sign(exponent: UQ, mantissa: UQ) -> UE4M3:
         return UE4M3()
 
-    def impl(exponent: UQValue, mantissa: UQValue) -> UE4M3Value:
-        return UE4M3().from_fields(exponent.raw, mantissa.raw)
+    def impl(exponent: int, mantissa: int) -> int:
+        return UE4M3().from_fields(exponent, mantissa).raw
 
     return Op(
         sign=sign,

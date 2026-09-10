@@ -10,8 +10,8 @@ from .basics import *
 
 
 def _e2m1_mantissa(x: Node) -> Op:
-    def impl(value: E2M1Value) -> UQValue:
-        return UQ(E2M1.mantissa_bits, 0).from_bits(value.mantissa)
+    def impl(value: int) -> int:
+        return E2M1().mantissa(value)
 
     def sign(value_type: E2M1) -> UQ:
         return UQ(E2M1.mantissa_bits, 0)
@@ -26,8 +26,8 @@ def _e2m1_mantissa(x: Node) -> Op:
 
 
 def _e2m1_exponent(x: Node) -> Op:
-    def impl(value: E2M1Value) -> UQValue:
-        return UQ(E2M1.exponent_bits, 0).from_bits(value.exponent)
+    def impl(value: int) -> int:
+        return E2M1().exponent(value)
 
     def sign(value_type: E2M1) -> UQ:
         return UQ(E2M1.exponent_bits, 0)
@@ -42,8 +42,8 @@ def _e2m1_exponent(x: Node) -> Op:
 
 
 def _e2m1_sign(x: Node) -> Op:
-    def impl(value: E2M1Value) -> UQValue:
-        return UQ(1, 0).from_bits(value.sign)
+    def impl(value: int) -> int:
+        return E2M1().sign(value)
 
     def sign(value_type: E2M1) -> UQ:
         return UQ(1, 0)
@@ -66,11 +66,11 @@ def _e2m1_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
         return E2M1()
 
     def impl(
-        sign_bit: UQValue,
-        exponent: UQValue,
-        mantissa: UQValue,
-    ) -> E2M1Value:
-        return E2M1().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
+        sign_bit: int,
+        exponent: int,
+        mantissa: int,
+    ) -> int:
+        return E2M1().from_fields(sign_bit, exponent, mantissa).raw
 
     return Op(
         sign=sign,

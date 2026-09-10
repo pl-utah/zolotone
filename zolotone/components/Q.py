@@ -9,12 +9,12 @@ from ..spec import *
 
 # Does not have spec
 def _q_is_min_val(x: Node) -> Op:
-    def impl(x: QValue) -> UQValue:
-        if x.raw == (1 << (x.dtype.total_bits() - 1)):
+    def impl(value: int) -> int:
+        if value == (1 << (x.dtype.total_bits() - 1)):
             res = 1
         else:
             res = 0
-        return UQ(1, 0).from_bits(res)
+        return res
     
     def sign(x: Q) -> UQ:
         return UQ(1, 0)
@@ -38,8 +38,8 @@ def q_alloc(int_bits: Node, frac_bits: Node) -> Op:
     def sign(x: UQ, y: UQ) -> Q:
         return result_dtype
 
-    def impl(x: UQValue, y: UQValue) -> QValue:
-        return result_dtype.from_bits(0)
+    def impl(x: int, y: int) -> int:
+        return 0
 
     return Op(
         sign=sign,

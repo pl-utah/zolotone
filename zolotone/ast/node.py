@@ -2,7 +2,7 @@ import inspect
 import typing as tp
 from contextvars import ContextVar
 
-from ..types import DataType, RuntimeValue
+from ..types import DataType, Value
 
 
 def _is_dtype_annotation(annotation: tp.Any) -> bool:
@@ -10,14 +10,14 @@ def _is_dtype_annotation(annotation: tp.Any) -> bool:
 
 
 class Node:
-    _eval_cache: ContextVar[tp.Optional[dict["Node", RuntimeValue]]] = ContextVar(
+    _eval_cache: ContextVar[tp.Optional[dict["Node", Value]]] = ContextVar(
         "eval_cache", default=None
     )
 
     def __init__(
         self,
         spec: tp.Callable[..., tp.Any],
-        impl: tp.Callable[..., RuntimeValue],
+        impl: tp.Callable[..., object],
         sign: tp.Callable[..., DataType],
         args: list["Node"],
         name: str,
@@ -31,13 +31,13 @@ class Node:
         self.sign = sign
         self.args = list(args)
         self.name = name
-        self.constant: RuntimeValue | None = None
+        self.constant: Value | None = None
         self._fingerprint_cache: dict[bool, tp.Any] = {}
 
-        def compute(inputs: list[RuntimeValue]) -> RuntimeValue:
-            output = impl(*inputs)
-            self._dynamic_typecheck(inputs, output)
-            return output
+        def compute(inputs: list[Value]) -> Value:
+            self._dynamic_typecheck(inputs)
+            raw_output = impl(*(value.raw for value in inputs))
+            return Value(self.dtype, raw_output)
 
         self.impl = compute
         self._static_typecheck()
@@ -63,21 +63,19 @@ class Node:
 
         constants = [arg.constant for arg in self.args]
         if constants and all(value is not None for value in constants):
-            self.constant = self.impl(tp.cast(list[RuntimeValue], constants))
+            self.constant = self.impl(tp.cast(list[Value], constants))
         return self.dtype
 
-    def _dynamic_typecheck(
-        self, inputs: list[RuntimeValue], output: RuntimeValue
-    ) -> None:
+    def _dynamic_typecheck(self, inputs: list[Value]) -> None:
         if len(inputs) != len(self.args_types):
             raise TypeError(
                 f"Arguments do not match Node's signature at {self.name}:\n"
                 f"  Given count: {len(inputs)}\n"
                 f"  Required count: {len(self.args_types)}\n"
             )
-        if not all(isinstance(value, RuntimeValue) for value in inputs):
+        if not all(isinstance(value, Value) for value in inputs):
             raise TypeError(
-                f"Arguments to {self.name} must be RuntimeValue instances, got "
+                f"Arguments to {self.name} must be Value instances, got "
                 f"{[type(value).__name__ for value in inputs]}"
             )
         given = [value.dtype for value in inputs]
@@ -86,19 +84,6 @@ class Node:
                 f"Arguments do not match Node's signature at {self.name}:\n"
                 f"  Given: {given}\n"
                 f"  Required: {self.args_types}\n"
-            )
-        if not isinstance(output, RuntimeValue):
-            raise TypeError(
-                f"Output does not match Node's signature at {self.name}:\n"
-                f"  impl returned non-RuntimeValue: {type(output).__name__}\n"
-                f"  expected descriptor: {self.dtype}\n"
-            )
-        if output.dtype != self.dtype:
-            raise TypeError(
-                f"Output does not match Node's signature at {self.name}:\n"
-                f"  impl: {output}\n"
-                f"  impl descriptor: {output.dtype}\n"
-                f"  expected descriptor: {self.dtype}\n"
             )
 
     def _primitive_signature_check(self, sign) -> None:
@@ -168,8 +153,8 @@ class Node:
         return Tuple_get_item(self, index)
 
     def evaluate(
-        self, cache: tp.Optional[dict["Node", RuntimeValue]] = None
-    ) -> RuntimeValue:
+        self, cache: tp.Optional[dict["Node", Value]] = None
+    ) -> Value:
         if self.constant is not None:
             return self.constant
 

@@ -1,6 +1,4 @@
-"""E5M2FNUZ descriptor and runtime value."""
-
-from __future__ import annotations
+"""E5M2FNUZ data-format descriptor."""
 
 from dataclasses import dataclass
 import random
@@ -14,45 +12,134 @@ from ._helpers import (
     validate_float_fields,
     validate_float_raw,
 )
-from .base import DataType, RuntimeValue
+from .base import DataType, Value, value_method
 
 
 @dataclass(frozen=True, repr=False)
-class E5M2FNUZ(DataType):
+class E5M2FNUZ(DataType[int]):
     sign_bits: ClassVar[int] = 1
     exponent_bits: ClassVar[int] = 5
     mantissa_bits: ClassVar[int] = 2
     exponent_bias: ClassVar[int] = 16
-    zero_code: ClassVar[int] = 0
-    sub_code: ClassVar[int] = 0
-    inf_code: ClassVar[int | None] = None
     nan_code: ClassVar[int] = 0
     nan_mantissa: ClassVar[int] = 0
     max_finite_code: ClassVar[int] = 31
     max_finite_mantissa: ClassVar[int] = 3
+    zero_code: ClassVar[int] = 0
+    sub_code: ClassVar[int] = 0
+    inf_code: ClassVar[int | None] = None
 
     def total_bits(self) -> int:
-        return 8
+        return self.sign_bits + self.exponent_bits + self.mantissa_bits
 
-    def from_bits(self, raw: int) -> "E5M2FNUZValue":
-        return E5M2FNUZValue(self, raw)
+    def validate_raw(self, raw: int) -> None:
+        validate_float_raw(type(self).__name__, raw, self.total_bits())
 
-    def from_fields(self, sign: int, exponent: int, mantissa: int) -> "E5M2FNUZValue":
+    def from_bits(self, raw: int) -> Value[int]:
+        return Value(self, raw)
+
+    def from_fields(self, sign: int, exponent: int, mantissa: int) -> Value[int]:
         validate_float_fields(
-            type(self).__name__, sign, exponent, mantissa,
+            type(self).__name__,
+            sign,
+            exponent,
+            mantissa,
             sign_bits=self.sign_bits,
             exponent_bits=self.exponent_bits,
             mantissa_bits=self.mantissa_bits,
         )
         return self.from_bits(
-            pack_float_fields(sign, exponent, mantissa, self.exponent_bits, self.mantissa_bits)
+            pack_float_fields(
+                sign, exponent, mantissa, self.exponent_bits, self.mantissa_bits
+            )
         )
+
+    def _extract_fields(self, raw: int) -> tuple[int, int, int]:
+        self.validate_raw(raw)
+        return extract_float_fields(
+            raw, self.sign_bits, self.exponent_bits, self.mantissa_bits
+        )
+
+    @value_method
+    def fields(self, raw: int) -> tuple[int, int, int]:
+        return self._extract_fields(raw)
+
+    @value_method
+    def sign(self, raw: int) -> int:
+        return self._extract_fields(raw)[0]
+
+    @value_method
+    def exponent(self, raw: int) -> int:
+        return self._extract_fields(raw)[1]
+
+    @value_method
+    def mantissa(self, raw: int) -> int:
+        return self._extract_fields(raw)[2]
+
+    @value_method
+    def significand(self, raw: int) -> int:
+        return self.mantissa(raw)
+
+    @value_method
+    def is_nan(self, raw: int) -> bool:
+        self.validate_raw(raw)
+        return raw == 0x80
+
+    @value_method
+    def is_zero(self, raw: int) -> bool:
+        return (
+            not self.is_nan(raw)
+            and self.exponent(raw) == self.zero_code
+            and self.mantissa(raw) == 0
+        )
+
+    @value_method
+    def is_sub(self, raw: int) -> bool:
+        return not (self.is_nan(raw) or self.is_zero(raw)) and self.exponent(
+            raw
+        ) == self.sub_code
+
+    @value_method
+    def is_norm(self, raw: int) -> bool:
+        return not (self.is_nan(raw) or self.is_zero(raw) or self.is_sub(raw))
+
+    def to_python(self, raw: int) -> float:
+        self.validate_raw(raw)
+        if self.is_nan(raw):
+            return float("nan")
+        multiplier = -1.0 if self.sign(raw) else 1.0
+        exponent = self.exponent(raw)
+        mantissa = self.mantissa(raw)
+        if exponent == self.sub_code:
+            fraction = mantissa / (2 ** self.mantissa_bits)
+            return float(multiplier * fraction * (2 ** (1 - self.exponent_bias)))
+        fraction = 1.0 + mantissa / (2 ** self.mantissa_bits)
+        return float(multiplier * fraction * (2 ** (exponent - self.exponent_bias)))
 
     def to_spec(self, name, ctx):
         from ..spec.custom_specs.e5m2fnuz import e5m2fnuz
         return e5m2fnuz.fresh(name, ctx)
 
-    def random_value(self, rng: random.Random) -> "E5M2FNUZValue":
+    def to_spec_value(self, raw: int, ctx):
+        from ..spec.custom_specs.e5m2fnuz import e5m2fnuz
+
+        self.validate_raw(raw)
+        if self.is_nan(raw):
+            return e5m2fnuz.nan(ctx)
+        if self.is_zero(raw):
+            return e5m2fnuz.zero(ctx)
+        return e5m2fnuz(
+            value=ctx.real_val(self.to_python(raw)),
+            exponent=ctx.real_val(self.exponent(raw)),
+            mantissa=ctx.real_val(self.mantissa(raw)),
+            sign=ctx.real_val(self.sign(raw)),
+            is_norm=ctx.bool_val(self.is_norm(raw)),
+            is_sub=ctx.bool_val(self.is_sub(raw)),
+            is_zero=ctx.bool_val(False),
+            is_nan=ctx.bool_val(False),
+        )
+
+    def random_value(self, rng: random.Random) -> Value[int]:
         return self.from_bits(rng.getrandbits(self.total_bits()))
 
     def random_generator(self, seed=None, shared_exponent_bits: int = 0):
@@ -81,16 +168,23 @@ class E5M2FNUZ(DataType):
 
         return generate, generate_shared_exponent
 
-    def Zero(self) -> "E5M2FNUZValue":
-        return self.from_fields(0, self.zero_code, 0)
-
-    def NaN(self, payload: int | None = None) -> "E5M2FNUZValue":
-        if payload is not None:
-            raise ValueError("E5M2FNUZ has a single NaN encoding")
-        return self.from_bits(0x80)
+    def to_bitstring(self, raw: int) -> str:
+        self.validate_raw(raw)
+        return format(raw, f"0{self.total_bits()}b")
 
     def to_cpp_type(self, jittable: bool = True) -> str:
         return scalar_cpp_type(self.total_bits(), jittable)
+
+    def format_value(self, raw: int) -> str:
+        return f"{type(self).__name__}({self.to_python(raw)})"
+
+    def Zero(self) -> Value[int]:
+        return self.from_fields(0, self.zero_code, 0)
+
+    def NaN(self, payload: int | None = None) -> Value[int]:
+        if payload is not None:
+            raise ValueError("E5M2FNUZ has a single NaN encoding")
+        return self.from_bits(0x80)
 
     def __repr__(self) -> str:
         return "E5M2FNUZ<8>"
@@ -98,89 +192,4 @@ class E5M2FNUZ(DataType):
     __str__ = __repr__
 
 
-@dataclass(frozen=True)
-class E5M2FNUZValue(RuntimeValue):
-    dtype: E5M2FNUZ
-    raw: int
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.dtype, E5M2FNUZ):
-            raise TypeError("E5M2FNUZValue requires an E5M2FNUZ descriptor")
-        validate_float_raw("E5M2FNUZ", self.raw, self.dtype.total_bits())
-
-    def _fields(self) -> tuple[int, int, int]:
-        return extract_float_fields(
-            self.raw, self.dtype.sign_bits, self.dtype.exponent_bits, self.dtype.mantissa_bits
-        )
-
-    @property
-    def sign(self) -> int:
-        return self._fields()[0]
-
-    @property
-    def exponent(self) -> int:
-        return self._fields()[1]
-
-    @property
-    def mantissa(self) -> int:
-        return self._fields()[2]
-
-    @property
-    def significand(self) -> int:
-        return self.mantissa
-
-    @property
-    def is_nan(self) -> bool:
-        return self.raw == 0x80
-
-    @property
-    def is_inf(self) -> bool:
-        return False
-
-    @property
-    def is_zero(self) -> bool:
-        return self.raw == 0
-
-    @property
-    def is_sub(self) -> bool:
-        return not (self.is_nan or self.is_zero) and self.exponent == self.dtype.sub_code
-
-    @property
-    def is_norm(self) -> bool:
-        return not (self.is_nan or self.is_zero or self.is_sub)
-
-    def to_python(self) -> float:
-        if self.is_nan:
-            return float("nan")
-        multiplier = -1.0 if self.sign else 1.0
-        if self.exponent == self.dtype.sub_code:
-            fraction = self.mantissa / (2 ** self.dtype.mantissa_bits)
-            return float(multiplier * fraction * (2 ** (1 - self.dtype.exponent_bias)))
-        fraction = 1.0 + self.mantissa / (2 ** self.dtype.mantissa_bits)
-        return float(multiplier * fraction * (2 ** (self.exponent - self.dtype.exponent_bias)))
-
-    def to_spec(self, ctx):
-        from ..spec.custom_specs.e5m2fnuz import e5m2fnuz
-        if self.is_nan:
-            return e5m2fnuz.nan(ctx)
-        if self.is_zero:
-            return e5m2fnuz.zero(ctx)
-        return e5m2fnuz(
-            value=ctx.real_val(self.to_python()),
-            sign=ctx.real_val(self.sign),
-            exponent=ctx.real_val(self.exponent),
-            mantissa=ctx.real_val(self.mantissa),
-            is_norm=ctx.bool_val(self.is_norm),
-            is_sub=ctx.bool_val(self.is_sub),
-            is_zero=ctx.bool_val(False),
-            is_nan=ctx.bool_val(False),
-        )
-
-    def to_bitstring(self) -> str:
-        return format(self.raw, f"0{self.dtype.total_bits()}b")
-
-    def __str__(self) -> str:
-        return f"E5M2FNUZ({self.to_python()})"
-
-
-__all__ = ["E5M2FNUZ", "E5M2FNUZValue"]
+__all__ = ["E5M2FNUZ"]

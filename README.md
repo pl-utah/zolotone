@@ -62,8 +62,9 @@ verified against this golden specification.
 
 ## Data formats and concrete values
 
-Implementation data types are immutable descriptors. Concrete values are
-constructed explicitly according to where their input comes from:
+Implementation data types are immutable descriptors. Every concrete value is
+represented by the same frozen `Value(dtype, raw)` carrier, while descriptors
+own validation, construction, decoding, and conversion:
 
 ```python
 from zolotone import Bool, Q, Tuple, UQ
@@ -71,8 +72,10 @@ from zolotone import Bool, Q, Tuple, UQ
 uq = UQ(2, 3)
 encoded = uq.from_bits(0b00011)  # raw bits 00.011, numeric value 0.375
 numeric = uq.from_float(3.0)     # numeric 3.0, encoded as raw bits 11.000
+assert encoded.to_python() == 0.375
+assert encoded.to_bitstring() == "00011"
 
-inferred = UQ.from_int(3)        # UQ<2,0> containing numeric integer 3
+inferred = UQ.from_int(3)       # Value(dtype=UQ<2,0>, raw=3)
 pair_type = Tuple(UQ(2, 0), Bool())
 pair = pair_type.from_values(UQ(2, 0).from_bits(3), Bool().from_bits(1))
 ```
@@ -81,9 +84,15 @@ pair = pair_type.from_values(UQ(2, 0).from_bits(3), Bool().from_bits(1))
 the descriptor width rather than stored in the Python integer. `from_float()`
 quantizes into an existing `Q` or `UQ` descriptor using round-to-nearest,
 ties-to-even, and saturation. `from_int()` infers a minimal zero-fraction
-descriptor. `from_values()` constructs a typed tuple from concrete component
-values. Use `value.raw`, `value.to_bitstring()`, and `value.to_python()` to
-inspect the packed integer, padded encoding, and interpreted Python value.
+descriptor. `from_values()` constructs a typed tuple after checking every
+component descriptor. Use `value.raw`, `value.to_bitstring()`, and
+`value.to_python()` to inspect the packed payload, padded encoding, and
+interpreted Python value. Constants accept the typed value directly, for
+example `Const(UQ(4, 0).from_bits(3))` or `Const(UQ.from_int(3))`.
+
+Floating-point field and classification helpers are available through marked
+value methods, for example `value.sign()`, `value.exponent()`, and
+`value.is_nan()`. Other descriptor methods are not implicitly proxied.
 
 For code written against the former split static/runtime type API, the common
 migrations are:

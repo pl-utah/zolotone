@@ -10,8 +10,8 @@ from .basics import *
 
 
 def _e4m3fn_mantissa(x: Node) -> Op:
-    def impl(x: E4M3FNValue) -> UQValue:
-        return UQ(E4M3FN.mantissa_bits, 0).from_bits(x.mantissa)
+    def impl(x: int) -> int:
+        return E4M3FN().mantissa(x)
 
     def sign(x: E4M3FN) -> UQ:
         return UQ(E4M3FN.mantissa_bits, 0)
@@ -26,8 +26,8 @@ def _e4m3fn_mantissa(x: Node) -> Op:
 
 
 def _e4m3fn_exponent(x: Node) -> Op:
-    def impl(x: E4M3FNValue) -> UQValue:
-        return UQ(E4M3FN.exponent_bits, 0).from_bits(x.exponent)
+    def impl(x: int) -> int:
+        return E4M3FN().exponent(x)
 
     def sign(x: E4M3FN) -> UQ:
         return UQ(E4M3FN.exponent_bits, 0)
@@ -42,8 +42,8 @@ def _e4m3fn_exponent(x: Node) -> Op:
 
 
 def _e4m3fn_sign(x: Node) -> Op:
-    def impl(x: E4M3FNValue) -> UQValue:
-        return UQ(1, 0).from_bits(x.sign)
+    def impl(x: int) -> int:
+        return E4M3FN().sign(x)
 
     def sign(x: E4M3FN) -> UQ:
         return UQ(1, 0)
@@ -66,11 +66,11 @@ def _e4m3fn_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
         return E4M3FN()
     
     def impl(
-        sign_bit: UQValue,
-        exponent: UQValue,
-        mantissa: UQValue,
-    ) -> E4M3FNValue:
-        return E4M3FN().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
+        sign_bit: int,
+        exponent: int,
+        mantissa: int,
+    ) -> int:
+        return E4M3FN().from_fields(sign_bit, exponent, mantissa).raw
     
     return Op(
         sign=sign,

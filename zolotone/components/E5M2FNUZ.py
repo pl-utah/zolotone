@@ -11,8 +11,8 @@ from .basics import *
 
 
 def _e5m2fnuz_mantissa(x: Node) -> Op:
-    def impl(value: E5M2FNUZValue) -> UQValue:
-        return UQ(E5M2FNUZ.mantissa_bits, 0).from_bits(value.mantissa)
+    def impl(value: int) -> int:
+        return E5M2FNUZ().mantissa(value)
 
     def sign(value_type: E5M2FNUZ) -> UQ:
         return UQ(E5M2FNUZ.mantissa_bits, 0)
@@ -27,8 +27,8 @@ def _e5m2fnuz_mantissa(x: Node) -> Op:
 
 
 def _e5m2fnuz_exponent(x: Node) -> Op:
-    def impl(value: E5M2FNUZValue) -> UQValue:
-        return UQ(E5M2FNUZ.exponent_bits, 0).from_bits(value.exponent)
+    def impl(value: int) -> int:
+        return E5M2FNUZ().exponent(value)
 
     def sign(value_type: E5M2FNUZ) -> UQ:
         return UQ(E5M2FNUZ.exponent_bits, 0)
@@ -43,8 +43,8 @@ def _e5m2fnuz_exponent(x: Node) -> Op:
 
 
 def _e5m2fnuz_sign(x: Node) -> Op:
-    def impl(value: E5M2FNUZValue) -> UQValue:
-        return UQ(1, 0).from_bits(value.sign)
+    def impl(value: int) -> int:
+        return E5M2FNUZ().sign(value)
 
     def sign(value_type: E5M2FNUZ) -> UQ:
         return UQ(1, 0)
@@ -67,11 +67,11 @@ def _e5m2fnuz_alloc(sign_bit: Node, exponent: Node, mantissa: Node) -> Op:
         return E5M2FNUZ()
 
     def impl(
-        sign_bit: UQValue,
-        exponent: UQValue,
-        mantissa: UQValue,
-    ) -> E5M2FNUZValue:
-        return E5M2FNUZ().from_fields(sign_bit.raw, exponent.raw, mantissa.raw)
+        sign_bit: int,
+        exponent: int,
+        mantissa: int,
+    ) -> int:
+        return E5M2FNUZ().from_fields(sign_bit, exponent, mantissa).raw
 
     return Op(
         sign=sign,

@@ -11,8 +11,8 @@ from .UQ import *
 ########### Private Helpers ############
 
 def _bf16_mantissa(x: Node) -> Op:
-    def impl(x: BFloat16Value) -> UQValue:
-        return UQ(7, 0).from_bits(x.mantissa)
+    def impl(x: int) -> int:
+        return BFloat16().mantissa(x)
 
     def sign(x: BFloat16) -> UQ:
         return UQ(7, 0)
@@ -25,8 +25,8 @@ def _bf16_mantissa(x: Node) -> Op:
             name="_bf16_mantissa")
 
 def _bf16_exponent(x: Node) -> Op:
-    def impl(x: BFloat16Value) -> UQValue:
-        return UQ(8, 0).from_bits(x.exponent)
+    def impl(x: int) -> int:
+        return BFloat16().exponent(x)
     
     def sign(x: BFloat16) -> UQ:
         return UQ(8, 0)
@@ -39,8 +39,8 @@ def _bf16_exponent(x: Node) -> Op:
             name="_bf16_exponent")
 
 def _bf16_sign(x: Node) -> Op:
-    def impl(x: BFloat16Value) -> UQValue:
-        return UQ(1, 0).from_bits(x.sign)
+    def impl(x: int) -> int:
+        return BFloat16().sign(x)
     
     def sign(x: BFloat16) -> UQ:
         return UQ(1, 0)
@@ -65,15 +65,15 @@ def _bf16_alloc(
         return BFloat16()
 
     def impl(
-        sign_bit: UQValue,
-        exponent: UQValue,
-        mantissa: UQValue,
-    ) -> BFloat16Value:
+        sign_bit: int,
+        exponent: int,
+        mantissa: int,
+    ) -> int:
         return BFloat16().from_fields(
-            sign=sign_bit.raw,
-            exponent=exponent.raw,
-            mantissa=mantissa.raw,
-        )
+            sign=sign_bit,
+            exponent=exponent,
+            mantissa=mantissa,
+        ).raw
 
     return Op(
         sign=sign,

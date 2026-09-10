@@ -1,9 +1,9 @@
-from .base import DataType, RuntimeValue
+from .base import DataType, Value
 
 def _fingerprint_value(value):
-    if isinstance(value, RuntimeValue):
-        return value._fingerprint()
     if isinstance(value, DataType):
+        return value._fingerprint()
+    if isinstance(value, Value):
         return value._fingerprint()
     if isinstance(value, tuple):
         return tuple(_fingerprint_value(item) for item in value)

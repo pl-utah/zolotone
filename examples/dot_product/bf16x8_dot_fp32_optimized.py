@@ -140,7 +140,7 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     # A zero product has no meaningful exponent and must not control
     # alignment of the nonzero products.
     zero_product_exponent = Const(
-        UQ(E_p[0].dtype.int_bits, E_p[0].dtype.frac_bits).from_bits(0)
+        UQ(E_p[0].dtype.int_bits, E_p[0].dtype.frac_bits).from_bits(0),
     )
     E_p_for_alignment = [
         if_then_else(
