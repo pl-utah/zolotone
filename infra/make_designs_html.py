@@ -220,6 +220,18 @@ def _format_latex_elapsed(check: dict[str, Any] | None) -> str:
     return f"{float(check['elapsed_s']):.3f}\\,s"
 
 
+def _format_latex_case_count(result: dict[str, Any]) -> str:
+    checks = result.get("checks", {})
+    if not checks:
+        return r"\todo{...}"
+    total = sum(
+        len(check.get("cases", {}))
+        for check in checks.values()
+        if check is not None
+    )
+    return f"{total:,}"
+
+
 def build_latex_table(
     report: dict[str, Any],
     expected_designs: list[tuple[str, str]] | None = None,
@@ -240,11 +252,12 @@ def build_latex_table(
         r"\begin{table}[t]",
         r"\centering",
         r"\small",
-        r"\begin{tabular}{lrr}",
+        r"\begin{tabular}{lrrr}",
         r"\toprule",
         "Design",
         r"& \makecell{Determinism\\check (s)}",
-        r"& \makecell{Equivalence\\check (s)} \\",
+        r"& \makecell{Equivalence\\check (s)}",
+        r"& \makecell{Number of\\cases} \\",
         r"\midrule",
     ]
 
@@ -257,15 +270,16 @@ def build_latex_table(
             lines.append(r"\midrule")
         category_written = True
         label = LATEX_CATEGORY_LABELS[category]
-        lines.append(rf"\multicolumn{{3}}{{l}}{{\textit{{{label}}}}} \\")
+        lines.append(rf"\multicolumn{{4}}{{l}}{{\textit{{{label}}}}} \\")
         for name, result in sorted(designs):
             checks = result.get("checks", {})
             equivalence = _format_latex_elapsed(checks.get("specification"))
             determinism = _format_latex_elapsed(checks.get("determinism"))
+            case_count = _format_latex_case_count(result)
             lines.extend(
                 (
                     _escape_latex(name),
-                    f"    & {determinism} & {equivalence} \\\\",
+                    f"    & {determinism} & {equivalence} & {case_count} \\\\",
                 )
             )
 
@@ -273,7 +287,7 @@ def build_latex_table(
         (
             r"\bottomrule",
             r"\end{tabular}",
-            r"\caption{\tool's runtime spent on verification time for the circuit designs.}",
+            r"\caption{\tool's verification runtime and number of cases for the circuit designs.}",
             r"\label{tab:verification-time}",
             r"\end{table}",
         )

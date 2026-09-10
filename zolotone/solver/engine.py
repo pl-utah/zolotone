@@ -120,8 +120,6 @@ def check_equivalence(
     ctx: SpecContext,
     schedule: list[str | dict[str, Any]],
 ):
-    # if ctx.name != "bf16x8_dot_fp32_conventional[path=3,output=norm]":
-    #      return "unknown", [{'feasibility_status': 'unknown', 'status': 'unknown', 'tool':"simplfiy"}]
     current_tracks: list[list[ProofReport]] = [[]]
     current_ctxs = [ctx.copy()]
     normalized_schedule = _normalize_schedule(schedule=schedule)
