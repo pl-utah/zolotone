@@ -16,32 +16,16 @@ def spec_e5m2_to_fp32(x: e5m2, ctx):
 def e5m2_to_fp32(x: Node) -> Node:
     X = e5m2_decode(x)
 
-    mantissa_fraction = uq_integer_to_fraction(X.mantissa)
-    significand = if_then_else(
-        X.is_norm,
-        add_implicit_bit(mantissa_fraction),
-        uq_resize(mantissa_fraction, 1, E5M2.mantissa_bits),
-    )
+    significand = effective_significand(X)
     significand = uq_resize(
         significand,
         1,
         max(E5M2.mantissa_bits, Float32.mantissa_bits),
     )
 
-    subnormal_exponent = Const(
-        UQ(
-            1,
-            X.exponent.node_type.int_bits,
-            X.exponent.node_type.frac_bits,
-        )
-    )
-    effective_exponent = if_then_else(
-        X.is_sub,
-        subnormal_exponent,
-        X.exponent,
-    )
+    source_exponent = effective_exponent(X)
     target_exponent = q_add(
-        uq_to_q(effective_exponent),
+        uq_to_q(source_exponent),
         Const(Q.from_int(Float32.exponent_bias - E5M2.exponent_bias)),
     )
 

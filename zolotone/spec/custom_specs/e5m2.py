@@ -6,11 +6,6 @@ from typing import ClassVar
 from ..spec_ast import BoolExpr, BoolLit, FPExpr, If, RealExpr, RealLit
 from .fp32 import sign_multiplier
 
-
-def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
-    return (~lhs) | rhs
-
-
 @dataclass(frozen=True)
 class e5m2(FPExpr):
     """Symbolic OCP E5M2 value with signed zeros and infinities."""
@@ -84,12 +79,12 @@ class e5m2(FPExpr):
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
         out._assume_exclusive_classification(ctx)
         ctx.assume(
-            _implies(is_norm, (exponent >= one) & (exponent < max_exponent))
+            is_norm.implies((exponent >= one) & (exponent < max_exponent))
         )
-        ctx.assume(_implies(is_sub, exponent.eq(zero) & (mantissa >= one)))
-        ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
-        ctx.assume(_implies(is_inf, exponent.eq(max_exponent) & mantissa.eq(zero)))
-        ctx.assume(_implies(is_nan, exponent.eq(max_exponent) & (mantissa >= one)))
+        ctx.assume(is_sub.implies(exponent.eq(zero) & (mantissa >= one)))
+        ctx.assume(is_zero.implies(exponent.eq(zero) & mantissa.eq(zero)))
+        ctx.assume(is_inf.implies(exponent.eq(max_exponent) & mantissa.eq(zero)))
+        ctx.assume(is_nan.implies(exponent.eq(max_exponent) & (mantissa >= one)))
         return out
 
     @classmethod
@@ -150,14 +145,14 @@ class e5m2(FPExpr):
 
         ctx.assume((exponent >= zero) & (exponent <= max_exponent))
         ctx.assume((mantissa >= zero) & (mantissa <= max_mantissa))
-        ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
-        ctx.assume(_implies(is_sub, exponent.eq(zero) & (mantissa >= one)))
+        ctx.assume(is_zero.implies(exponent.eq(zero) & mantissa.eq(zero)))
+        ctx.assume(is_sub.implies(exponent.eq(zero) & (mantissa >= one)))
         ctx.assume(
-            _implies(is_norm, (exponent >= one) & (exponent < max_exponent))
+            is_norm.implies((exponent >= one) & (exponent < max_exponent))
         )
-        ctx.assume(_implies(is_inf, exponent.eq(max_exponent) & mantissa.eq(zero)))
-        ctx.assume(_implies(is_norm, magnitude.eq(normal_magnitude)))
-        ctx.assume(_implies(is_sub, magnitude.eq(subnormal_magnitude)))
+        ctx.assume(is_inf.implies(exponent.eq(max_exponent) & mantissa.eq(zero)))
+        ctx.assume(is_norm.implies(magnitude.eq(normal_magnitude)))
+        ctx.assume(is_sub.implies(magnitude.eq(subnormal_magnitude)))
         return out
 
     @classmethod

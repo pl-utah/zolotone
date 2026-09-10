@@ -358,6 +358,9 @@ class BoolExpr(SpecNode):
     def and_(self, other: "BoolExpr") -> "BoolExpr":
         return And(self, other)
 
+    def implies(self, other: "BoolExpr") -> "BoolExpr":
+        return (~self) | other
+
 
 @dataclass(frozen=True)
 class RealVar(RealExpr):

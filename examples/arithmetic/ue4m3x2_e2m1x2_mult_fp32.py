@@ -18,30 +18,6 @@ def spec_ue4m3x2_e2m1x2_mult_fp32(a0, a1, b0, b1, ctx):
     )
 
 
-def _significand(decoded, mantissa_bits):
-    fraction = uq_integer_to_fraction(decoded.mantissa)
-    return if_then_else(
-        decoded.is_norm,
-        add_implicit_bit(fraction),
-        uq_resize(fraction, 1, mantissa_bits),
-    )
-
-
-def _effective_exponent(decoded):
-    subnormal_exponent = Const(
-        UQ(
-            1,
-            decoded.exponent.node_type.int_bits,
-            decoded.exponent.node_type.frac_bits,
-        )
-    )
-    return if_then_else(
-        decoded.is_sub,
-        subnormal_exponent,
-        decoded.exponent,
-    )
-
-
 @Composite(
     name="ue4m3x2_e2m1x2_mult_fp32",
     spec=spec_ue4m3x2_e2m1x2_mult_fp32,
@@ -67,12 +43,12 @@ def ue4m3x2_e2m1x2_mult_fp32(
     # UQ1.3 x UQ1.3 x UQ1.1 x UQ1.1 is an exact UQ4.8 product.
     significand_product = uq_mul(
         uq_mul(
-            _significand(A0, UE4M3.mantissa_bits),
-            _significand(A1, UE4M3.mantissa_bits),
+            effective_significand(A0),
+            effective_significand(A1),
         ),
         uq_mul(
-            _significand(B0, E2M1.mantissa_bits),
-            _significand(B1, E2M1.mantissa_bits),
+            effective_significand(B0),
+            effective_significand(B1),
         ),
     )
     significand_product = uq_resize(
@@ -82,8 +58,8 @@ def ue4m3x2_e2m1x2_mult_fp32(
     )
 
     effective_exponent_sum = uq_add(
-        uq_add(_effective_exponent(A0), _effective_exponent(A1)),
-        uq_add(_effective_exponent(B0), _effective_exponent(B1)),
+        uq_add(effective_exponent(A0), effective_exponent(A1)),
+        uq_add(effective_exponent(B0), effective_exponent(B1)),
     )
     fp32_exponent = q_add(
         uq_to_q(effective_exponent_sum),

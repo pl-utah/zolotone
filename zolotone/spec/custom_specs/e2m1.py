@@ -6,11 +6,6 @@ from typing import ClassVar
 from ..spec_ast import BoolExpr, FPExpr, If, RealExpr, RealLit
 from .fp32 import sign_multiplier
 
-
-def _implies(lhs: BoolExpr, rhs: BoolExpr) -> BoolExpr:
-    return (~lhs) | rhs
-
-
 @dataclass(frozen=True)
 class e2m1(FPExpr):
     """Symbolic finite-only E2M1 value with signed zeros."""
@@ -66,9 +61,9 @@ class e2m1(FPExpr):
         ctx.assume((exponent >= zero) & (exponent <= ctx.real_val(3)))
         ctx.assume((mantissa >= zero) & (mantissa <= one))
         out._assume_exclusive_classification(ctx)
-        ctx.assume(_implies(is_norm, exponent >= one))
-        ctx.assume(_implies(is_sub, exponent.eq(zero) & mantissa.eq(one)))
-        ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
+        ctx.assume(is_norm.implies(exponent >= one))
+        ctx.assume(is_sub.implies(exponent.eq(zero) & mantissa.eq(one)))
+        ctx.assume(is_zero.implies(exponent.eq(zero) & mantissa.eq(zero)))
         return out
 
     @classmethod
@@ -113,21 +108,19 @@ class e2m1(FPExpr):
 
         ctx.assume((exponent >= zero) & (exponent <= ctx.real_val(3)))
         ctx.assume((mantissa >= zero) & (mantissa <= one))
-        ctx.assume(_implies(is_zero, exponent.eq(zero) & mantissa.eq(zero)))
-        ctx.assume(_implies(is_sub, mantissa.eq(one)))
+        ctx.assume(is_zero.implies(exponent.eq(zero) & mantissa.eq(zero)))
+        ctx.assume(is_sub.implies(mantissa.eq(one)))
         ctx.assume(
-            _implies(
-                is_norm & (magnitude > max_finite),
+            (is_norm & (magnitude > max_finite)).implies(
                 exponent.eq(ctx.real_val(3)) & mantissa.eq(one),
             )
         )
         ctx.assume(
-            _implies(
-                is_norm & (magnitude <= max_finite),
+            (is_norm & (magnitude <= max_finite)).implies(
                 magnitude.eq(normal_magnitude),
             )
         )
-        ctx.assume(_implies(is_sub, magnitude.eq(subnormal_magnitude)))
+        ctx.assume(is_sub.implies(magnitude.eq(subnormal_magnitude)))
         return out
 
     @classmethod

@@ -9,12 +9,13 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DESIGN_TIMEOUT_S = 20 * 60
+DEFAULT_DESIGN_TIMEOUT_S = 5
 DEFAULT_REPORT_PATH = Path("reports/run_designs.json")
 CHECK_NAMES = ("determinism", "specification")
 PROCESS_TERMINATION_GRACE_S = 5
@@ -27,22 +28,27 @@ if __package__ in {None, ""}:
 
 
 from examples.CSA import CSA_tree4
-from examples.bf16_add import bf16_add
-from examples.bf16_mult import bf16_mult
-from examples.bf16_relu import bf16_relu
-from examples.bf16x8_dot_fp32_conventional import bf16x8_dot_fp32_conventional
-from examples.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.arithmetic.bf16_add import bf16_add
+from examples.arithmetic.bf16_mult import bf16_mult
+from examples.arithmetic.bf16_relu import bf16_relu
+from examples.arithmetic.fp32_add import fp32_add
+from examples.arithmetic.fp32_mult import fp32_mult
+from examples.arithmetic.ue4m3x2_e2m1x2_add_fp32 import ue4m3x2_e2m1x2_add_fp32
+from examples.arithmetic.ue4m3x2_e2m1x2_mult_fp32 import (
+    ue4m3x2_e2m1x2_mult_fp32,
+)
 from examples.converters import (
     CONVERTER_FORMATS,
     CONVERTER_REGISTRY,
     FORMAT_STATIC_TYPES,
 )
-from examples.ue4m3x2_e2m1x2_mult_fp32 import ue4m3x2_e2m1x2_mult_fp32
-from examples.fp32_add import fp32_add
-from examples.fp32_mult import fp32_mult
-from examples.wgmma_fp16_e4m3_e5m2 import wgmma_fp16_e4m3_e5m2
-from examples.wgmma_fp32_e4m3_e4m3 import wgmma_fp32_e4m3_e4m3
-from examples.wgmma_fp32_e5m2_e4m3 import wgmma_fp32_e5m2_e4m3
+from examples.dot_product.bf16x8_dot_fp32_conventional import (
+    bf16x8_dot_fp32_conventional,
+)
+from examples.dot_product.bf16x8_dot_fp32_optimized import bf16x8_dot_fp32_optimized
+from examples.dot_product.wgmma_fp16_e4m3_e5m2 import wgmma_fp16_e4m3_e5m2
+from examples.dot_product.wgmma_fp32_e4m3_e4m3 import wgmma_fp32_e4m3_e4m3
+from examples.dot_product.wgmma_fp32_e5m2_e4m3 import wgmma_fp32_e5m2_e4m3
 from zolotone import (
     BFloat16T,
     E2M1T,
@@ -55,6 +61,7 @@ from zolotone import (
     UE4M3T,
     Var,
 )
+from zolotone.ast.parallel_verification import MAX_WORKERS_ENV
 from zolotone.solver import CaseVerificationResult
 
 
@@ -62,6 +69,7 @@ from zolotone.solver import CaseVerificationResult
 class DesignCase:
     name: str
     build: Callable[[], Node]
+    category: str = "arithmetic"
 
 
 def _build_csa_tree4() -> Node:
@@ -94,7 +102,11 @@ def _build_converter(name: str) -> Node:
 
 
 def _converter_design_case(name: str) -> DesignCase:
-    return DesignCase(name, lambda name=name: _build_converter(name))
+    return DesignCase(
+        name,
+        lambda name=name: _build_converter(name),
+        category="converter",
+    )
 
 
 def _build_fp32_add() -> Node:
@@ -117,6 +129,15 @@ def _build_ue4m3x2_e2m1x2_mult_fp32() -> Node:
         Var(name="a1", sign=UE4M3T()),
         Var(name="b0", sign=E2M1T()),
         Var(name="b1", sign=E2M1T()),
+    )
+
+
+def _build_ue4m3x2_e2m1x2_add_fp32() -> Node:
+    return ue4m3x2_e2m1x2_add_fp32(
+        Var(name="scale0", sign=UE4M3T()),
+        Var(name="scale1", sign=UE4M3T()),
+        Var(name="x0", sign=E2M1T()),
+        Var(name="x1", sign=E2M1T()),
     )
 
 
@@ -168,14 +189,38 @@ DESIGNS = (
     DesignCase("fp32_add", _build_fp32_add),
     DesignCase("fp32_mult", _build_fp32_mult),
     DesignCase(
+        "ue4m3x2_e2m1x2_add_fp32",
+        _build_ue4m3x2_e2m1x2_add_fp32,
+    ),
+    DesignCase(
         "ue4m3x2_e2m1x2_mult_fp32",
         _build_ue4m3x2_e2m1x2_mult_fp32,
     ),
-    DesignCase("bf16x8_dot_fp32_conventional", _build_conventional_dot_product),
-    DesignCase("bf16x8_dot_fp32_optimized", _build_optimized_dot_product),
-    DesignCase("wgmma_fp32_e4m3_e4m3", _build_wgmma_fp32_e4m3_e4m3),
-    DesignCase("wgmma_fp32_e5m2_e4m3", _build_wgmma_fp32_e5m2_e4m3),
-    DesignCase("wgmma_fp16_e4m3_e5m2", _build_wgmma_fp16_e4m3_e5m2),
+    DesignCase(
+        "bf16x8_dot_fp32_conventional",
+        _build_conventional_dot_product,
+        category="dot_product",
+    ),
+    DesignCase(
+        "bf16x8_dot_fp32_optimized",
+        _build_optimized_dot_product,
+        category="dot_product",
+    ),
+    DesignCase(
+        "wgmma_fp32_e4m3_e4m3",
+        _build_wgmma_fp32_e4m3_e4m3,
+        category="dot_product",
+    ),
+    DesignCase(
+        "wgmma_fp32_e5m2_e4m3",
+        _build_wgmma_fp32_e5m2_e4m3,
+        category="dot_product",
+    ),
+    DesignCase(
+        "wgmma_fp16_e4m3_e5m2",
+        _build_wgmma_fp16_e4m3_e5m2,
+        category="dot_product",
+    ),
 )
 
 
@@ -230,7 +275,31 @@ def check_design(
     observer = CompletedCaseJournal(completed_cases_path)
     print(f"Checking {design_case.name} {check_name}...", flush=True)
     try:
-        result = checks[check_name](observer=observer)
+        try:
+            result = checks[check_name](observer=observer)
+        except Exception as exc:
+            elapsed_s = time.perf_counter() - started_at
+            error_result = {
+                "name": design_case.name,
+                "status": "error",
+                "elapsed_s": elapsed_s,
+                "checks": {
+                    check_name: {
+                        "status": "error",
+                        "proved": False,
+                        "cases": _read_completed_cases(completed_cases_path),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                },
+            }
+            _write_json(result_path, error_result)
+            print(
+                f"[ERROR] {design_case.name} {check_name}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
     finally:
         observer.close()
 
@@ -253,25 +322,82 @@ def check_design(
 
 
 def _terminate_process_group(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
-
+    process_group_id = process.pid
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(process_group_id, signal.SIGTERM)
     except ProcessLookupError:
+        process.wait()
         return
 
-    try:
-        process.wait(timeout=PROCESS_TERMINATION_GRACE_S)
-        return
-    except subprocess.TimeoutExpired:
-        pass
+    deadline = time.monotonic() + PROCESS_TERMINATION_GRACE_S
+    while _process_group_exists(process_group_id):
+        # Reap the leader as soon as it exits, but keep watching its process
+        # group: a descendant may outlive the leader after SIGTERM.
+        process.poll()
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            break
+        time.sleep(min(0.05, remaining_s))
 
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    if _process_group_exists(process_group_id):
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    # wait() is safe after poll() has already observed the exit and guarantees
+    # that this coordinator reaps its direct child on every cleanup path.
     process.wait()
+
+
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _signal_process_group(
+    process: subprocess.Popen,
+    signum: signal.Signals,
+) -> None:
+    """Signal a design group, even if its original leader has exited."""
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        process.poll()
+
+
+@contextmanager
+def _manage_design_process_signals(process: subprocess.Popen):
+    """Keep a detached design group aligned with terminal job control."""
+    previous_handlers = {}
+
+    def interrupt_run(_signum, _frame) -> None:
+        raise KeyboardInterrupt
+
+    def suspend_run(_signum, _frame) -> None:
+        _signal_process_group(process, signal.SIGSTOP)
+        os.kill(os.getpid(), signal.SIGSTOP)
+        _signal_process_group(process, signal.SIGCONT)
+
+    handlers = {
+        signal.SIGTERM: interrupt_run,
+        signal.SIGHUP: interrupt_run,
+        signal.SIGQUIT: interrupt_run,
+        signal.SIGTSTP: suspend_run,
+    }
+    try:
+        for signum, handler in handlers.items():
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, handler)
+        yield
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def _read_completed_cases(path: Path) -> dict[str, Any]:
@@ -289,6 +415,27 @@ def _read_completed_cases(path: Path) -> dict[str, Any]:
             cases[event["case_name"]] = event["result"]
 
     return cases
+
+
+def _wait_for_design_process(
+    process: subprocess.Popen,
+    timeout_s: float,
+) -> tuple[str | None, int]:
+    """Wait for one check and clean up its complete process group on failure."""
+    try:
+        with _manage_design_process_signals(process):
+            try:
+                return None, process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                status = "timeout"
+            except KeyboardInterrupt:
+                status = "interrupted"
+            _terminate_process_group(process)
+    except BaseException:
+        _terminate_process_group(process)
+        raise
+
+    return status, process.returncode
 
 
 def _run_design_subprocess(
@@ -315,17 +462,7 @@ def _run_design_subprocess(
             ],
             start_new_session=True,
         )
-        try:
-            returncode = process.wait(timeout=timeout_s)
-            status = None
-        except subprocess.TimeoutExpired:
-            _terminate_process_group(process)
-            status = "timeout"
-            returncode = process.returncode
-        except KeyboardInterrupt:
-            _terminate_process_group(process)
-            status = "interrupted"
-            returncode = process.returncode
+        status, returncode = _wait_for_design_process(process, timeout_s)
         elapsed_s = time.perf_counter() - started_at
         if result_path.exists():
             design_result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -384,7 +521,11 @@ def run_designs(
     for design_case in designs:
         total += 1
         design_started_at = time.perf_counter()
-        design_result = {"name": design_case.name, "checks": {}}
+        design_result = {
+            "name": design_case.name,
+            "category": design_case.category,
+            "checks": {},
+        }
 
         for check_name in CHECK_NAMES:
             print(
@@ -457,6 +598,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"JSON report path (default: {DEFAULT_REPORT_PATH})",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_DESIGN_TIMEOUT_S,
+        help=(
+            "wall-clock timeout in seconds for each determinism/specification "
+            f"check (default: {DEFAULT_DESIGN_TIMEOUT_S})"
+        ),
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        help=(
+            "maximum parallel classification workers; defaults to "
+            f"${MAX_WORKERS_ENV}, then available CPUs"
+        ),
+    )
+    parser.add_argument(
         "--design",
         choices=[design_case.name for design_case in DESIGNS],
         help=argparse.SUPPRESS,
@@ -476,11 +634,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help=argparse.SUPPRESS,
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.timeout <= 0:
+        parser.error("--timeout must be greater than zero")
+    if args.max_workers is not None and args.max_workers < 1:
+        parser.error("--max-workers must be at least one")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.max_workers is not None:
+        os.environ[MAX_WORKERS_ENV] = str(args.max_workers)
     if args.design is not None:
         check_design(
             _find_design(args.design),
@@ -489,7 +654,7 @@ def main(argv: list[str] | None = None) -> int:
             completed_cases_path=args.completed_cases_file,
         )
         return 0
-    run_designs(report_path=args.report)
+    run_designs(timeout_s=args.timeout, report_path=args.report)
     return 0
 
 if __name__ == "__main__":

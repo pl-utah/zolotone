@@ -1,6 +1,5 @@
-import typing as tp
 import random
-import sys
+import typing as tp
 from itertools import product
 
 from ..types.runtime import RuntimeType
@@ -11,86 +10,20 @@ from ..solver.report import (
     CaseVerificationResult,
     CheckResult,
     ProofReport,
+    StdoutVerificationObserver,
     VerificationObserver,
 )
 from .node import Node
+from .parallel_verification import (
+    resolve_max_workers,
+    run_verification_cases,
+)
 from .proofs import SpecRecorder, record_specs
 from ..spec import FPExpr, SpecContext, special_encoding
 from ..spec.spec_context import simplify_ctx
 
 
 CLowering = tp.Callable[[list[str], bool], str]
-
-
-class StdoutVerificationObserver:
-    """Print completed verification cases as a streaming stdout table."""
-
-    def __init__(self, stream: tp.TextIO | None = None) -> None:
-        self._stream = stream
-        self._header_printed = False
-
-    def _print(self, value: str) -> None:
-        print(
-            value,
-            file=self._stream if self._stream is not None else sys.stdout,
-            flush=True,
-        )
-
-    @staticmethod
-    def _decisive_tool(result: CaseVerificationResult) -> str:
-        if (
-            result["proved"]
-            and result["feasibility_status"] == "not feasible"
-            and result["side_feasibility_reports"]
-        ):
-            tools = dict.fromkeys(
-                str(report["tool"])
-                for report in result["side_feasibility_reports"]
-            )
-            return '+'.join(tools)
-
-        proof_trace = result["proof_trace"]
-        if not proof_trace:
-            return "-"
-        decisive_report = next(
-            (
-                report
-                for report in reversed(proof_trace)
-                if report["status"] in {"sat", "unsat"}
-            ),
-            proof_trace[-1],
-        )
-        return str(decisive_report["tool"])
-
-    @staticmethod
-    def _elapsed_s(result: CaseVerificationResult) -> float:
-        reports = (
-            list(result["proof_trace"])
-            + list(result["side_feasibility_reports"])
-        )
-        return sum(float(report.get("runtime_s", 0.0)) for report in reports)
-
-    def case_completed(self, result: CaseVerificationResult) -> None:
-        if not self._header_printed:
-            self._print("Verification cases:")
-            self._print(
-                f"{'PROVED':<7} "
-                f"{'STATUS':<8} "
-                f"{'FEASIBILITY':<15} "
-                f"{'TOOL':<24} "
-                f"{'TIME':>9}  "
-                "CASE"
-            )
-            self._header_printed = True
-
-        self._print(
-            f"{'yes' if result['proved'] else 'no':<7} "
-            f"{result['status']:<8} "
-            f"{result['feasibility_status'] or 'unknown':<15} "
-            f"{self._decisive_tool(result):<24} "
-            f"{self._elapsed_s(result):>8.3f}s  "
-            f"{result['name']}"
-        )
 
 
 class _Spec(tp.NamedTuple):
@@ -351,6 +284,42 @@ def _side_feasibilities_match(
     return statuses[0] == statuses[1], reports
 
 
+def _verify_classification_case(
+    case_ctx: SpecContext,
+    schedule: list[str | dict[str, tp.Any]],
+    side_contexts: tuple[SpecContext, SpecContext],
+    outputs: tuple[tp.Any, tp.Any],
+    inputs: list[tp.Any],
+) -> CaseVerificationResult:
+    """Verify one classification case in either this or a worker process."""
+    labels = _case_labels(case_ctx.name)
+    status, proof_trace = _solver_check_equivalence(case_ctx, schedule=schedule)
+    combined_feasibility = proof_trace[0].get(
+        "feasibility_status",
+        "unknown",
+    )
+    side_feasibility_reports = []
+
+    if combined_feasibility == "not feasible":
+        case_proved, side_feasibility_reports = _side_feasibilities_match(
+            side_contexts,
+            outputs,
+            inputs=inputs,
+            labels=labels,
+        )
+    else:
+        case_proved = status == "unsat"
+
+    return CaseVerificationResult(
+        name=case_ctx.name,
+        proved=case_proved,
+        status=status,
+        feasibility_status=combined_feasibility,
+        proof_trace=proof_trace,
+        side_feasibility_reports=side_feasibility_reports,
+    )
+
+
 def check_equivalence(
     first: _Spec,
     second: _Spec,
@@ -358,7 +327,9 @@ def check_equivalence(
     inputs: list[tp.Any],
     schedule: list[str | dict[str, tp.Any]] | None = None,
     observer: VerificationObserver | None = None,
+    max_workers: int | None = None,
 ):
+    worker_count = resolve_max_workers(max_workers)
     if first.name == second.name:
         raise ValueError("Equivalent specification sides must have distinct names")
     if schedule is None:
@@ -395,36 +366,19 @@ def check_equivalence(
         second_output,
     )
 
-    case_results: list[CaseVerificationResult] = []
-    proved = True
-
-    for case_ctx in cases:
-        labels = _case_labels(case_ctx.name)
-        status, proof_trace = _solver_check_equivalence(case_ctx, schedule=schedule)
-        combined_feasibility = proof_trace[0].get("feasibility_status", "unknown")
-        side_feasibility_reports = []
-
-        if combined_feasibility == "not feasible":
-            case_proved, side_feasibility_reports = _side_feasibilities_match(
-                (first_ctx, second_ctx),
-                (first_output, second_output),
-                inputs=inputs,
-                labels=labels,
-            )
-        else:
-            case_proved = status == "unsat"
-
-        proved = proved and case_proved
-        case_result = CaseVerificationResult(
-            name=case_ctx.name,
-            proved=case_proved,
-            status=status,
-            feasibility_status=combined_feasibility,
-            proof_trace=proof_trace,
-            side_feasibility_reports=side_feasibility_reports,
-        )
-        case_results.append(case_result)
-        active_observer.case_completed(case_result)
+    case_results = run_verification_cases(
+        cases,
+        verify_case=_verify_classification_case,
+        verification_args=(
+            schedule,
+            (first_ctx, second_ctx),
+            (first_output, second_output),
+            inputs,
+        ),
+        observer=active_observer,
+        max_workers=worker_count,
+    )
+    proved = all(result["proved"] for result in case_results)
 
     return CheckResult(
         proved=proved,
@@ -437,6 +391,7 @@ def _check_determinism(
     node: "composite | primitive",
     schedule: list[str | dict[str, tp.Any]] | None = None,
     observer: VerificationObserver | None = None,
+    max_workers: int | None = None,
 ):
     base_ctx = SpecContext(f"{node.name}_determinism")
     inputs = [base_ctx.spec_of(arg) for arg in node.inner_args]
@@ -455,6 +410,7 @@ def _check_determinism(
         inputs=inputs,
         schedule=schedule,
         observer=observer,
+        max_workers=max_workers,
     )
 
     print(f"{node.name} specification {'is' if result['proved'] else 'is not'} deterministic")
@@ -529,6 +485,7 @@ class composite(Node):
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
         observer: VerificationObserver | None = None,
+        max_workers: int | None = None,
     ):
         base_ctx = self.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in self.inner_args]
@@ -556,6 +513,7 @@ class composite(Node):
             inputs=inputs,
             schedule=schedule,
             observer=observer,
+            max_workers=max_workers,
         )
         
         print(f"{self.ctx.name} {'has' if result['proved'] else 'has not'} been proved")
@@ -566,11 +524,13 @@ class composite(Node):
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
         observer: VerificationObserver | None = None,
+        max_workers: int | None = None,
     ):
         return _check_determinism(
             self,
             schedule=schedule,
             observer=observer,
+            max_workers=max_workers,
         )
     
     def _validate_components(self, composite_name: str) -> None:
@@ -697,11 +657,13 @@ class primitive(Node):
         self,
         schedule: list[str | dict[str, tp.Any]] | None = None,
         observer: VerificationObserver | None = None,
+        max_workers: int | None = None,
     ):
         return _check_determinism(
             self,
             schedule=schedule,
             observer=observer,
+            max_workers=max_workers,
         )
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):

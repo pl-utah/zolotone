@@ -1,6 +1,6 @@
 from zolotone import *
-from .CSA import CSA_tree4
-from .max_exponent import *
+from ..CSA import CSA_tree4
+from ..max_exponent import *
 
 s = 2
 N = 4
@@ -128,21 +128,10 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     ############ CONSTANTS #############
     
     bf16_bias = Const(Q.from_int(BFloat16.exponent_bias))
-    subnormal_exponent = Const(
-        UQ(
-            1,
-            A[0].exponent.node_type.int_bits,
-            A[0].exponent.node_type.frac_bits,
-        )
-    )
-    
     ############ EXPONENTS #############
 
-    # Subnormals store exponent zero but behave as exponent 1-bias.
-    E_a, E_b = [0] * N, [0] * N
-    for i in range(N):
-        E_a[i] = if_then_else(A[i].is_sub, subnormal_exponent, A[i].exponent)
-        E_b[i] = if_then_else(B[i].is_sub, subnormal_exponent, B[i].exponent)
+    E_a = [effective_exponent(value) for value in A]
+    E_b = [effective_exponent(value) for value in B]
 
     # Step 1. Exponents add. Each E_p is shifted by bias twice!
     E_p = [uq_add(E_a[i], E_b[i]) for i in range(N)]
@@ -180,28 +169,8 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     
     ############# MANTISSAS ############
     
-    # Step 1. Convert mantissas to UQ1.7. Only normal values have an
-    # implicit leading bit; subnormals and zero use the stored fraction.
-    M_a, M_b = [0] * N, [0] * N
-    for i in range(N):
-        M_a[i] = if_then_else(
-            A[i].is_norm,
-            add_implicit_bit(uq_integer_to_fraction(A[i].mantissa)),
-            uq_resize(
-                uq_integer_to_fraction(A[i].mantissa),
-                1,
-                BFloat16.mantissa_bits,
-            ),
-        )
-        M_b[i] = if_then_else(
-            B[i].is_norm,
-            add_implicit_bit(uq_integer_to_fraction(B[i].mantissa)),
-            uq_resize(
-                uq_integer_to_fraction(B[i].mantissa),
-                1,
-                BFloat16.mantissa_bits,
-            ),
-        )
+    M_a = [effective_significand(value) for value in A]
+    M_b = [effective_significand(value) for value in B]
     
     # Step 2. Multiply mantissas into UQ2.14
     M_p = [uq_mul(M_a[i], M_b[i]) for i in range(N)]

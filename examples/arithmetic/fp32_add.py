@@ -54,36 +54,10 @@ def fp32_add(x: Node, y: Node) -> Node:
     )
 
     # 3. Format and align significands.
-    # Decode gives the mantissa as UQ<23, 0>; the adder datapath wants UQ<0, 23>.
-    x_mantissa_fraction = uq_integer_to_fraction(X.mantissa)
-    y_mantissa_fraction = uq_integer_to_fraction(Y.mantissa)
-
-    # Normal numbers have an implicit leading 1. Subnormals do not.
-    x_significand = if_then_else(
-        X.is_norm,
-        add_implicit_bit(x_mantissa_fraction),
-        uq_resize(x_mantissa_fraction, 1, Float32.mantissa_bits),
-    )
-    y_significand = if_then_else(
-        Y.is_norm,
-        add_implicit_bit(y_mantissa_fraction),
-        uq_resize(y_mantissa_fraction, 1, Float32.mantissa_bits),
-    )
-
-    # Subnormals store exponent 0 but behave as exponent 1-bias.
-    subnormal_exponent = Const(
-        UQ(1, X.exponent.node_type.int_bits, X.exponent.node_type.frac_bits)
-    )
-    x_effective_exponent = if_then_else(
-        X.is_sub,
-        subnormal_exponent,
-        X.exponent,
-    )
-    y_effective_exponent = if_then_else(
-        Y.is_sub,
-        subnormal_exponent,
-        Y.exponent,
-    )
+    x_significand = effective_significand(X)
+    y_significand = effective_significand(Y)
+    x_effective_exponent = effective_exponent(X)
+    y_effective_exponent = effective_exponent(Y)
 
     aligned_exponent = uq_max(x_effective_exponent, y_effective_exponent)
     x_shift_amount = uq_sub(aligned_exponent, x_effective_exponent)
