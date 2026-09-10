@@ -78,6 +78,13 @@ classification cases so finite values, zeros, infinities, and NaNs are compared
 with the appropriate semantics. Both checks accept an optional solver schedule
 and return `{"proved": bool, "proof_traces": [...]}`.
 
+When a specification directly returns `Cases`, verification splits each
+ordered branch by its output classification. If one of those partitions
+remains `unknown`, only input classification predicates referenced by that
+branch guard are split into true/false refinements. Multiple `Cases`
+expressions in one specification are not yet supported; other specifications use
+exhaustive input and output classification splitting.
+
 Classification cases run concurrently by default. Pass `max_workers=1` to
 `check_equivalence()`, `check_spec()`, or `check_determinism()` for serial
 verification, or pass a positive integer to bound the spawn-based process
@@ -88,6 +95,12 @@ Cases are still returned in classification-generation order, while streaming
 observer notifications arrive in completion order. Each case worker runs its
 solver schedule directly and sequentially; solver-specific budgets such as the
 Z3 timeout remain unchanged.
+
+RIVAL rectangle extraction is capped at 10,000 candidate rectangles by
+default. Set `ZOLOTONE_RIVAL_MAX_RECTS` to a positive integer to tune the cap.
+When the cap is exceeded, feasibility conservatively returns `unknown` and
+context trimming leaves the context unchanged; partial rectangle sets are
+never used as proof evidence.
 
 `infra/run_designs.py` also accepts `--max-workers` and a per-check `--timeout`.
 Designs and their determinism/specification checks run sequentially, and each

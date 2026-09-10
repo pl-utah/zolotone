@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .spec_ast import *
+from .spec_ast import _CasePartition
 from ..egglog import *
 from egglog import rewrite, vars_
 from ..solver.report import ProofReport, build_proof_report
@@ -14,12 +15,17 @@ import warnings
 
 def _assumption_conjuncts(assume: BoolExpr) -> tuple[BoolExpr, ...]:
     """Return the facts asserted by a possibly nested conjunction."""
-    if isinstance(assume, And):
-        return (
-            *_assumption_conjuncts(assume.lhs),
-            *_assumption_conjuncts(assume.rhs),
-        )
-    return (assume,)
+    conjuncts = []
+    pending = [assume]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, And):
+            # Stack order preserves the original left-to-right traversal.
+            pending.append(current.rhs)
+            pending.append(current.lhs)
+        else:
+            conjuncts.append(current)
+    return tuple(conjuncts)
 
 
 class SpecContext:
@@ -29,6 +35,7 @@ class SpecContext:
         self.assumes: list[BoolExpr] = []
         self.checks: list[BoolExpr] = []
         self.requirements: list[BoolExpr] = []
+        self.case_partitions: list[_CasePartition] = []
         self._sym_counter = 0
         self.name = name
         self.spec_cache = {}
@@ -204,8 +211,9 @@ class SpecContext:
         if isinstance(assume, Not):
             return assume.value, BoolLit(False)
         if isinstance(assume, Eq):
-            rhs_folded = assume.rhs.constant_fold()
-            lhs_folded = assume.lhs.constant_fold()
+            # constant_fold() already returns a node with folded children.
+            rhs_folded = assume.rhs
+            lhs_folded = assume.lhs
             if (
                 isinstance(lhs_folded, RealExpr)
                 and not isinstance(lhs_folded, RealLit)
@@ -220,8 +228,8 @@ class SpecContext:
                 return rhs_folded, lhs_folded
         
         elif isinstance(assume, BoolEq):
-            rhs_folded = assume.rhs.constant_fold()
-            lhs_folded = assume.lhs.constant_fold()
+            rhs_folded = assume.rhs
+            lhs_folded = assume.lhs
             if (
                 isinstance(lhs_folded, BoolExpr)
                 and not isinstance(lhs_folded, BoolLit)
@@ -352,6 +360,7 @@ class SpecContext:
         self.assumes.clear()
         self.checks.clear()
         self.requirements.clear()
+        self.case_partitions.clear()
         self._sym_counter = 0
         self.spec_cache.clear()
         self._spec_cache_valid = True
@@ -380,7 +389,13 @@ class SpecContext:
         lines.extend(format_section("Requirements", self.requirements))
         return "\n".join(lines)
     
-    def copy(self, assumes=None, checks=None, requirements=None):
+    def copy(
+        self,
+        assumes=None,
+        checks=None,
+        requirements=None,
+        case_partitions=None,
+    ):
         if assumes is None:
             # Spec AST nodes are immutable, so a shallow list copy is enough here.
             # Deep-copying rebuilds nodes such as Eq via pickle-style protocols,
@@ -390,11 +405,14 @@ class SpecContext:
             checks = list(self.checks)
         if requirements is None:
             requirements = list(self.requirements)
+        if case_partitions is None:
+            case_partitions = list(self.case_partitions)
         
         new_ctx = SpecContext(self.name)
         new_ctx.assumes = assumes
         new_ctx.checks = checks
         new_ctx.requirements = requirements
+        new_ctx.case_partitions = case_partitions
         new_ctx._sym_counter = self._sym_counter
         new_ctx.spec_cache = dict(self.spec_cache)
         new_ctx._spec_cache_valid = self._spec_cache_valid
@@ -419,17 +437,21 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
     seen_states = set()
     max_passes = 32
 
-    for _ in range(max_passes):
+    for i in range(max_passes):
         current_state = _context_expression_state(current)
         if current_state in seen_states:
             warnings.warn(f"Simplification cycle detected for {ctx.name!r}", RuntimeWarning)
             break
         seen_states.add(current_state)
 
-        rewritten = rival_trim_context(current.simplify())
+        simplified = current.simplify()
+        regular_state = _context_expression_state(simplified)
+        rewritten = rival_trim_context(simplified)
         rewritten_state = _context_expression_state(rewritten)
         current = rewritten
-        if rewritten_state == current_state:
+        # Ordinary simplification already reached its own fixpoint. If Rival
+        # then made no change, another identical combined pass cannot help.
+        if rewritten_state == regular_state or rewritten_state == current_state:
             break
     else:
         warnings.warn(f"Simplification did not saturate after {max_passes} passes for {ctx.name!r}", RuntimeWarning)
@@ -468,11 +490,14 @@ def simplify_ctx(ctx: SpecContext):
         if any([identical_nodes(x, BoolLit(False)) for x in simplified_ctx.checks]):
              satisfiability_status = "sat"
         else:
-            
-            if rival_feasibility_check(simplified_ctx, max_depth=0, checks=True) == "not feasible":
+            # With no checks, checks=True analyzes exactly the assumptions that
+            # were just analyzed above, so a second Rival run is redundant.
+            if len(simplified_ctx.checks) == 0:
+                satisfiability_status = "unsat"
+            elif rival_feasibility_check(simplified_ctx, max_depth=0, checks=True) == "not feasible":
                 satisfiability_status = "sat"
             else:
-                satisfiability_status = "unsat" if len(simplified_ctx.checks) == 0 else "unknown"
+                satisfiability_status = "unknown"
     ##############################################
     
     return build_proof_report(

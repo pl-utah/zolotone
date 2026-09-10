@@ -136,6 +136,7 @@ def check_equivalence(
                     return status, next_track
                 next_tracks.append(next_track)
                 next_ctxs.append(report["new_ctx"])
+            
 
         current_tracks = next_tracks
         current_ctxs = next_ctxs

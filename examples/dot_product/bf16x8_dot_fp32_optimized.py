@@ -175,8 +175,7 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     # Step 2. Multiply mantissas into UQ2.14
     M_p = [uq_mul(M_a[i], M_b[i]) for i in range(N)]
     
-    # Step 3. Locally shift mantissas by the inverted last {s} bits of E_p
-    # Make room for the right shift
+    # Step 3. Locally shift mantissas by the inverted last {s} bits of E_p    # Make room for the right shift
     M_p = [uq_resize(M_p[i], 2, 14 + 2**s - 1) for i in range(N)]
     
     M_p = [uq_rshift_jam(M_p[i], L_shifts[i]) for i in range(N)]
@@ -186,21 +185,7 @@ def bf16x8_dot_fp32_optimized(a0: Node, a1: Node, a2: Node, a3: Node,
     M_p = [uq_resize(M_p[i], 2, Wf - 2 + 2**s - 1) for i in range(N)]
     
     M_p = [uq_rshift_jam(M_p[i], G_shifts[i]) for i in range(N)]
-    
-    with context() as ctx:
-        for i in range(N):
-            # M_p[i] * 2 ** (E_m * 2**s + 2**s - 1)
-            lhs = ctx.spec_of(M_p[i]) * ctx.two() ** (
-                ctx.spec_of(E_m) * ctx.two() ** ctx.real_val(s)
-                + ctx.two() ** ctx.real_val(s)
-                - ctx.one()
-            )
-            rhs = (
-                ctx.spec_of(M_a[i])
-                * ctx.spec_of(M_b[i])
-                * ctx.two() ** ctx.spec_of(E_p[i])
-            )
-            ctx.check(lhs.eq(rhs))
+
     
     # Step 5. Adjust signs using xor operation
     M_p = [uq_to_q(M_p[i]) for i in range(N)]

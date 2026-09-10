@@ -1,7 +1,6 @@
 from zolotone import *
 
 
-
 # Non-bit-precise concept specification of a single-precision IEEE adder.
 def spec_fp32_add(x: fp32, y: fp32, ctx):
     nan_case = (
@@ -30,7 +29,7 @@ def fp32_add(x: Node, y: Node) -> Node:
     # 1. Decode both packed FP32 inputs into sign, exponent, mantissa, and flags.
     X = fp32_decode(x)
     Y = fp32_decode(y)
-
+    
     # 2. Resolve IEEE special-result flags before the finite-number datapath.
     x_is_ninf = bit_and(X.is_inf, X.sign)
     y_is_ninf = bit_and(Y.is_inf, Y.sign)
@@ -52,34 +51,34 @@ def fp32_add(x: Node, y: Node) -> Node:
         bit_and(X.is_zero, Y.is_zero),
         bit_and(X.sign, Y.sign),
     )
-
+    
     # 3. Format and align significands.
     x_significand = effective_significand(X)
     y_significand = effective_significand(Y)
     x_effective_exponent = effective_exponent(X)
     y_effective_exponent = effective_exponent(Y)
-
+    
     aligned_exponent = uq_max(x_effective_exponent, y_effective_exponent)
     x_shift_amount = uq_sub(aligned_exponent, x_effective_exponent)
     y_shift_amount = uq_sub(aligned_exponent, y_effective_exponent)
-
+    
     # Keep three extra low bits so right-shift-jam can preserve rounding evidence.
     x_significand_wide = uq_resize(x_significand, 1, Float32.mantissa_bits + 3)
     y_significand_wide = uq_resize(y_significand, 1, Float32.mantissa_bits + 3)
-
+    
     x_aligned_significand = uq_rshift_jam(x_significand_wide, x_shift_amount)
     y_aligned_significand = uq_rshift_jam(y_significand_wide, y_shift_amount)
-
+    
     # 4. Apply signs, then add the aligned signed significands.
     x_signed_significand = q_add_sign(uq_to_q(x_aligned_significand), X.sign)
     y_signed_significand = q_add_sign(uq_to_q(y_aligned_significand), Y.sign)
     significand_sum = q_add(x_signed_significand, y_signed_significand)
-
+    
     # 5. Encode FP32.
     finite_sign = q_sign_bit(significand_sum)
     finite_mantissa = q_to_uq(q_abs(significand_sum))
     finite_exponent = uq_to_q(aligned_exponent)
-
+    
     # 6. Normalize, round, and pack the final FP32 result.
     finite_result = fp32_encode(
         finite_sign,

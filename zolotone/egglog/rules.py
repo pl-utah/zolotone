@@ -294,6 +294,36 @@ def constant_rules(fold_base_two_powers: bool = True):
         rewrite(Math.Abs(Math.Num(m))).to(Math.Num(abs(m))),
         rewrite(Math.Pow(Math.Num(m), Math.Num(BigRat(2, 1)))).to(Math.Num(m * m)),
         rewrite(Math.Pow(Math.Num(BigRat(-1, 1)), Math.Num(m))).to(Math.Num(BigRat(-1, 1) ** m), eq(m.denom).to(1)),
+        # Turn known signs into absolute-value equalities. The bound-weakening
+        # rules make nonnegative literal bounds, such as x >= 1/64, usable by
+        # the x >= 0 rule without requiring a general inequality solver.
+        rule(eq(Math.Ge(a, zero)).to(MathBool.True_())).then(
+            union(Math.Abs(a)).with_(a)
+        ),
+        rule(eq(Math.Le(a, zero)).to(MathBool.True_())).then(
+            union(Math.Abs(a)).with_(Math.Neg(a))
+        ),
+        rewrite(Math.Ge(Math.Pow(two, a), zero)).to(MathBool.True_()),
+        rewrite(Math.Gt(Math.Pow(two, a), zero)).to(MathBool.True_()),
+        rule(eq(a).to(Math.Pow(two, b))).then(
+            union(Math.Ge(a, zero)).with_(MathBool.True_())
+        ),
+        rule(
+            eq(Math.Ge(a, b)).to(MathBool.True_()),
+            eq(Math.Ge(b, zero)).to(MathBool.True_()),
+        ).then(union(Math.Ge(a, zero)).with_(MathBool.True_())),
+        rule(
+            eq(Math.Gt(a, b)).to(MathBool.True_()),
+            eq(Math.Ge(b, zero)).to(MathBool.True_()),
+        ).then(union(Math.Ge(a, zero)).with_(MathBool.True_())),
+        rule(
+            eq(Math.Ge(a, Math.Num(m))).to(MathBool.True_()),
+            m >= BigRat(0, 1),
+        ).then(union(Math.Ge(a, zero)).with_(MathBool.True_())),
+        rule(
+            eq(Math.Gt(a, Math.Num(m))).to(MathBool.True_()),
+            m >= BigRat(0, 1),
+        ).then(union(Math.Ge(a, zero)).with_(MathBool.True_())),
     ]
     if fold_base_two_powers:
         # Proof e-graphs disable this fold so dyadic scales remain visible to

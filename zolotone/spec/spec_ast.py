@@ -35,26 +35,12 @@ class SpecNode:
             return self
         
         folded_args = tuple(arg.constant_fold() for arg in args)
-        
-        # Try shortcut
-        shortcut = _shortcut_fold(self, folded_args)
-        if shortcut is not None:
-            return shortcut.constant_fold()
-        
-        # Else, general case
-        output_type = _literal_type(self)
-        fold = self.fold()
-        if all(isinstance(arg, (RealLit, BoolLit)) for arg in folded_args):
-            folded_value = fold(*(arg.value for arg in folded_args))
-            if folded_value is not None and _can_constant_fold_literal(output_type, folded_value):
-                # Successfully folded
-                return output_type(folded_value)
-        
-        # Nothing got folded
-        if all(old is new for old, new in zip(args, folded_args)):
-            return self
-        # Partially folded
-        return type(self)(*folded_args)
+        rebuilt = (
+            self
+            if all(old is new for old, new in zip(args, folded_args))
+            else type(self)(*folded_args)
+        )
+        return _fold_node_with_folded_args(rebuilt, folded_args)
     
     def fold(self):
         raise NotImplementedError
@@ -712,10 +698,7 @@ class If(RealExpr):
     def __str__(self):
         return f"(if {self.cond} then {self.on_true} else {self.on_false})"
 
-
-_CaseValue = BoolExpr | RealExpr | FPExpr
-
-
+    
 def _coerce_case_value(value: object) -> _CaseValue:
     if isinstance(value, (BoolExpr, RealExpr, FPExpr)):
         return value
@@ -728,7 +711,15 @@ def _coerce_case_value(value: object) -> _CaseValue:
 @dataclass(frozen=True)
 class _CaseEntry:
     condition: BoolExpr
-    value: _CaseValue
+    value: SpecNode
+
+
+@dataclass(frozen=True)
+class _CasePartition:
+    """Source-level Cases entries paired with their lowered expression."""
+
+    entries: tuple[_CaseEntry, ...]
+    value: SpecNode
 
 
 def case(condition: BoolExpr, value: _CaseValue) -> _CaseEntry:
@@ -774,6 +765,9 @@ def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
         raise ValueError("Cases requires at least one case() entry")
     if not hasattr(ctx, "require"):
         raise TypeError("Cases ctx must be a SpecContext")
+    # TODO: WE CAN UNION NESTED CASES
+    # if ctx.case_partitions:
+    #     raise NotImplementedError("Multiple Cases are not supported")
 
     coverage = entries[0].condition
     for entry in entries[1:]:
@@ -783,6 +777,7 @@ def Cases(*entries: _CaseEntry, ctx) -> _CaseValue:
     for entry in reversed(entries[:-1]):
         result = _select_case_value(entry.condition, entry.value, result)
     ctx.require(coverage)
+    ctx.case_partitions.append(_CasePartition(tuple(entries), result))
     return result
 
 
@@ -1135,7 +1130,32 @@ def substitute_literals(
         if all(old is new for old, new in zip(args, substituted_args))
         else type(node)(*substituted_args)
     )
+    # The recursive calls already folded every child. Folding only this node
+    # avoids revisiting the full subtree at each parent of a deep expression.
+    if isinstance(rebuilt, (RealExpr, BoolExpr)):
+        return _fold_node_with_folded_args(rebuilt, substituted_args)
     return rebuilt.constant_fold()
+
+
+def _fold_node_with_folded_args(
+    node: SpecNode,
+    folded_args: tuple[SpecNode, ...],
+) -> SpecNode:
+    """Apply one node's fold rules when its children are already folded."""
+    shortcut = _shortcut_fold(node, folded_args)
+    if shortcut is not None:
+        return shortcut.constant_fold()
+
+    output_type = _literal_type(node)
+    fold = node.fold()
+    if all(isinstance(arg, (RealLit, BoolLit)) for arg in folded_args):
+        folded_value = fold(*(arg.value for arg in folded_args))
+        if (
+            folded_value is not None
+            and _can_constant_fold_literal(output_type, folded_value)
+        ):
+            return output_type(folded_value)
+    return node
 
 
 def _shortcut_fold(
