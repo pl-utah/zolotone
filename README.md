@@ -60,6 +60,53 @@ alignment, significand formatting, rounding logic, or other implementation
 choices. Those belong in `fp32_add`, the implementation model, and are
 verified against this golden specification.
 
+## Data formats and concrete values
+
+Implementation data types are immutable descriptors. Every concrete value is
+represented by the same frozen `Value(dtype, raw)` carrier, while descriptors
+own validation, construction, decoding, and conversion:
+
+```python
+from zolotone import Bool, Q, Tuple, UQ
+
+uq = UQ(2, 3)
+encoded = uq.from_bits(0b00011)  # raw bits 00.011, numeric value 0.375
+numeric = uq.from_float(3.0)     # numeric 3.0, encoded as raw bits 11.000
+assert encoded.to_python() == 0.375
+assert encoded.to_bitstring() == "00011"
+
+inferred = UQ.from_int(3)       # Value(dtype=UQ<2,0>, raw=3)
+pair_type = Tuple(UQ(2, 0), Bool())
+pair = pair_type.from_values(UQ(2, 0).from_bits(3), Bool().from_bits(1))
+```
+
+`from_bits()` takes a packed integer encoding; leading zeroes are supplied by
+the descriptor width rather than stored in the Python integer. `from_float()`
+quantizes into an existing `Q` or `UQ` descriptor using round-to-nearest,
+ties-to-even, and saturation. `from_int()` infers a minimal zero-fraction
+descriptor. `from_values()` constructs a typed tuple after checking every
+component descriptor. Use `value.raw`, `value.to_bitstring()`, and
+`value.to_python()` to inspect the packed payload, padded encoding, and
+interpreted Python value. Constants accept the typed value directly, for
+example `Const(UQ(4, 0).from_bits(3))` or `Const(UQ.from_int(3))`.
+
+Floating-point field and classification helpers are available through marked
+value methods, for example `value.sign()`, `value.exponent()`, and
+`value.is_nan()`. Other descriptor methods are not implicitly proxied.
+
+For code written against the former split static/runtime type API, the common
+migrations are:
+
+| Former API | Current API |
+| --- | --- |
+| `UQT(I, F)` / `QT(I, F)` | `UQ(I, F)` / `Q(I, F)` |
+| `UQ(raw, I, F)` | `UQ(I, F).from_bits(raw)` |
+| `Float32(raw)` | `Float32().from_bits(raw)` |
+| `node.node_type` | `node.dtype` |
+| `node.node_type.runtime_val` | `node.constant` |
+| `value.val` / `value.to_val()` | `value.raw` / `value.to_python()` |
+| `variable.load_val(value)` | `variable.load_value(value)` |
+
 ## Verification workflow
 
 Zolotone connects golden specifications to typed implementation models:

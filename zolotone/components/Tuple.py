@@ -4,15 +4,15 @@ from ..utils import make_fixed_arguments
 
 
 def basic_tuple_maker(*args) -> Op:
-    def sign(*args: StaticType) -> TupleT:
-        return TupleT(*args)
+    def sign(*args: DataType) -> Tuple:
+        return Tuple(*args)
     
-    def op(*vals: RuntimeType) -> Tuple:
-        return Tuple(*vals)
+    def op(*vals: object) -> tuple:
+        return tuple(vals)
     
     return Op(
-        impl=make_fixed_arguments(op, [RuntimeType] * len(args)),
-        sign=make_fixed_arguments(sign, [StaticType] * len(args)),
+        impl=make_fixed_arguments(op, [object] * len(args)),
+        sign=make_fixed_arguments(sign, [DataType] * len(args)),
         c_lowering=lambda lowered_args, jittable: (
             f"std::array<uint64_t, {len(args)}>{{"
             + ", ".join(f"static_cast<uint64_t>({arg})" for arg in lowered_args)

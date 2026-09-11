@@ -87,16 +87,16 @@ def bf16_add(x: Node, y: Node) -> Node:
     # Handling special cases
     return if_then_else(
         encode_nan,
-        Const(BFloat16.NaN()),
+        Const(BFloat16().NaN()),
         if_then_else(
             encode_ninf,
-            Const(BFloat16.nInf()),
+            Const(BFloat16().nInf()),
             if_then_else(
                 encode_pinf,
-                Const(BFloat16.Inf()),
+                Const(BFloat16().Inf()),
                 if_then_else(
                     encode_nzero,
-                    Const(BFloat16.nZero()),
+                    Const(BFloat16().nZero()),
                     finite_result,
                 ),
             ),
@@ -106,8 +106,8 @@ def bf16_add(x: Node, y: Node) -> Node:
 
 if __name__ == "__main__":
     adder = bf16_add(
-        Var(name="a", sign=BFloat16T()),
-        Var(name="b", sign=BFloat16T()),
+        Var(name="a", dtype=BFloat16()),
+        Var(name="b", dtype=BFloat16()),
     )
 
     adder.check_determinism()

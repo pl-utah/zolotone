@@ -5,7 +5,7 @@ import ctypes
 import subprocess
 from pathlib import Path
 
-from zolotone import Node, StaticType, TupleT
+from zolotone import Node, DataType, Tuple
 
 _INFRA_DIR = Path(__file__).resolve().parent
 _AC_TYPES_INCLUDE_DIR = _INFRA_DIR / "ac_types" / "include"
@@ -19,8 +19,8 @@ def _find_cpp_compiler() -> str | None:
     raise unittest.SkipTest("A C++ compiler is required for lowering round-trip tests")
 
 
-def _abi_bits(type_: StaticType) -> int:
-    if isinstance(type_, TupleT):
+def _abi_bits(type_: DataType) -> int:
+    if isinstance(type_, Tuple):
         raise TypeError("compile helpers support only scalar arguments and return types")
 
     total_bits = type_.total_bits()
@@ -35,15 +35,15 @@ def _abi_bits(type_: StaticType) -> int:
     raise TypeError("compile helpers support only values up to 64 bits")
 
 
-def _cpp_abi_type(type_: StaticType) -> str:
+def _cpp_abi_type(type_: DataType) -> str:
     return f"std::uint{_abi_bits(type_)}_t"
 
 
-def _lowered_cpp_type(type_: StaticType, jittable: bool) -> str:
+def _lowered_cpp_type(type_: DataType, jittable: bool) -> str:
     return type_.to_cpp_type(jittable=jittable)
 
 
-def _ctypes_abi_type(type_: StaticType):
+def _ctypes_abi_type(type_: DataType):
     bits = _abi_bits(type_)
     if bits == 8:
         return ctypes.c_uint8
@@ -54,15 +54,15 @@ def _ctypes_abi_type(type_: StaticType):
     return ctypes.c_uint64
 
 
-def _arg_mask(type_: StaticType) -> str:
+def _arg_mask(type_: DataType) -> str:
     return str((1 << type_.total_bits()) - 1)
 
 
 def _wrapper_arg_expr(arg, idx: int, *, jittable: bool) -> str:
     expr = f"arg_{idx}"
     if jittable:
-        expr = f"static_cast<{_cpp_abi_type(arg.node_type)}>({expr} & {_arg_mask(arg.node_type)})"
-    lowered_type = _lowered_cpp_type(arg.node_type, jittable=jittable)
+        expr = f"static_cast<{_cpp_abi_type(arg.dtype)}>({expr} & {_arg_mask(arg.dtype)})"
+    lowered_type = _lowered_cpp_type(arg.dtype, jittable=jittable)
     return f"static_cast<{lowered_type}>({expr})"
 
 
@@ -82,14 +82,14 @@ def compile_(node: Node, jittable: bool):
 
     header_path.write_text(source, encoding="utf-8")
     arg_decls = [
-        f"{_cpp_abi_type(arg.node_type)} arg_{idx}"
+        f"{_cpp_abi_type(arg.dtype)} arg_{idx}"
         for idx, arg in enumerate(node.inner_args)
     ]
     call_args = ", ".join(
         _wrapper_arg_expr(arg, idx, jittable=jittable)
         for idx, arg in enumerate(node.inner_args)
     )
-    return_type = _cpp_abi_type(node.node_type)
+    return_type = _cpp_abi_type(node.dtype)
 
     wrapper_path.write_text(
         "\n".join(
@@ -136,8 +136,8 @@ def compile_(node: Node, jittable: bool):
 
     library = ctypes.CDLL(str(library_path))
     func = getattr(library, f"{function_name}_entry")
-    func.argtypes = [_ctypes_abi_type(arg.node_type) for arg in node.inner_args]
-    func.restype = _ctypes_abi_type(node.node_type)
+    func.argtypes = [_ctypes_abi_type(arg.dtype) for arg in node.inner_args]
+    func.restype = _ctypes_abi_type(node.dtype)
     return tempdir, func
 
 

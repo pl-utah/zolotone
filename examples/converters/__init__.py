@@ -1,14 +1,14 @@
 """Conversions between FP32 and every other supported floating-point format."""
 
 from zolotone import (
-    BFloat16T,
-    E2M1T,
-    E4M3FNT,
-    E5M2FNUZT,
-    E5M2T,
-    Float16T,
-    Float32T,
-    UE4M3T,
+    BFloat16,
+    E2M1,
+    E4M3FN,
+    E5M2FNUZ,
+    E5M2,
+    Float16,
+    Float32,
+    UE4M3,
 )
 
 from .bf16_to_fp32 import bf16_to_fp32
@@ -69,15 +69,15 @@ CONVERTER_FORMATS = {
     "e2m1_to_fp32": ("e2m1", "fp32"),
     "fp32_to_e2m1": ("fp32", "e2m1"),
 }
-FORMAT_STATIC_TYPES = {
-    "bf16": BFloat16T,
-    "fp16": Float16T,
-    "fp32": Float32T,
-    "e5m2": E5M2T,
-    "e5m2fnuz": E5M2FNUZT,
-    "e4m3fn": E4M3FNT,
-    "ue4m3": UE4M3T,
-    "e2m1": E2M1T,
+FORMAT_DTYPES = {
+    "bf16": BFloat16,
+    "fp16": Float16,
+    "fp32": Float32,
+    "e5m2": E5M2,
+    "e5m2fnuz": E5M2FNUZ,
+    "e4m3fn": E4M3FN,
+    "ue4m3": UE4M3,
+    "e2m1": E2M1,
 }
 
 __all__ = [
@@ -98,5 +98,5 @@ __all__ = [
     "CONVERTER_FORMATS",
     "CONVERTER_REGISTRY",
     "FORMAT_NAMES",
-    "FORMAT_STATIC_TYPES",
+    "FORMAT_DTYPES",
 ]

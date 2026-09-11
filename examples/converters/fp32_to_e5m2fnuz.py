@@ -33,20 +33,20 @@ def fp32_to_e5m2fnuz(x: Node) -> Node:
     encode_positive_infinity = bit_and(X.is_inf, bit_neg(X.sign))
     result = if_then_else(
         encode_positive_infinity,
-        Const(E5M2FNUZ.from_fields(sign=0, exponent=31, mantissa=3)),
+        Const(E5M2FNUZ().from_fields(sign=0, exponent=31, mantissa=3)),
         result,
     )
 
     encode_negative_infinity = bit_and(X.is_inf, X.sign)
     result = if_then_else(
         encode_negative_infinity,
-        Const(E5M2FNUZ.from_fields(sign=1, exponent=31, mantissa=3)),
+        Const(E5M2FNUZ().from_fields(sign=1, exponent=31, mantissa=3)),
         result,
     )
 
     result = if_then_else(
         X.is_nan,
-        Const(E5M2FNUZ.NaN()),
+        Const(E5M2FNUZ().NaN()),
         result,
     )
     return result
@@ -54,7 +54,7 @@ def fp32_to_e5m2fnuz(x: Node) -> Node:
 
 if __name__ == "__main__":
     cast = fp32_to_e5m2fnuz(
-        Var(name="x", sign=Float32T()),
+        Var(name="x", dtype=Float32()),
     )
 
     cast.check_determinism()

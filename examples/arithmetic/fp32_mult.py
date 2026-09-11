@@ -71,16 +71,16 @@ def fp32_mult(x: Node, y: Node) -> Node:
     )
     return if_then_else(
         encode_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         if_then_else(
             encode_ninf,
-            Const(Float32.nInf()),
+            Const(Float32().nInf()),
             if_then_else(
                 encode_pinf,
-                Const(Float32.Inf()),
+                Const(Float32().Inf()),
                 if_then_else(
                     encode_nzero,
-                    Const(Float32.nZero()),
+                    Const(Float32().nZero()),
                     finite_result,
                 ),
             ),
@@ -91,8 +91,8 @@ def fp32_mult(x: Node, y: Node) -> Node:
 if __name__ == '__main__':
     from pprint import pprint
     multiplier = fp32_mult(
-        Var(name="a", sign=Float32T()),
-        Var(name="b", sign=Float32T()),
+        Var(name="a", dtype=Float32()),
+        Var(name="b", dtype=Float32()),
     )
     multiplier.check_spec()
     # pprint(multiplier.check_spec())

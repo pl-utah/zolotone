@@ -34,27 +34,27 @@ def e5m2_to_fp32(x: Node) -> Node:
     encode_negative_zero = bit_and(X.is_zero, X.sign)
     result = if_then_else(
         encode_negative_zero,
-        Const(Float32.nZero()),
+        Const(Float32().nZero()),
         result,
     )
 
     encode_positive_infinity = bit_and(X.is_inf, bit_neg(X.sign))
     result = if_then_else(
         encode_positive_infinity,
-        Const(Float32.Inf()),
+        Const(Float32().Inf()),
         result,
     )
 
     encode_negative_infinity = bit_and(X.is_inf, X.sign)
     result = if_then_else(
         encode_negative_infinity,
-        Const(Float32.nInf()),
+        Const(Float32().nInf()),
         result,
     )
 
     result = if_then_else(
         X.is_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         result,
     )
     return result
@@ -62,7 +62,7 @@ def e5m2_to_fp32(x: Node) -> Node:
 
 if __name__ == "__main__":
     cast = e5m2_to_fp32(
-        Var(name="x", sign=E5M2T()),
+        Var(name="x", dtype=E5M2()),
     )
 
     cast.check_determinism()

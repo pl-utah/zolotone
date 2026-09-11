@@ -109,10 +109,10 @@ def ue4m3x2_e2m1x2_add_fp32(
     
     return if_then_else(
         any_nan,
-        Const(Float32.NaN()),
+        Const(Float32().NaN()),
         if_then_else(
             encode_negative_zero,
-            Const(Float32.nZero()),
+            Const(Float32().nZero()),
             finite_result,
         ),
     )
@@ -120,10 +120,10 @@ def ue4m3x2_e2m1x2_add_fp32(
 
 if __name__ == "__main__":
     design = ue4m3x2_e2m1x2_add_fp32(
-        Var(name="scale0", sign=UE4M3T()),
-        Var(name="scale1", sign=UE4M3T()),
-        Var(name="x0", sign=E2M1T()),
-        Var(name="x1", sign=E2M1T()),
+        Var(name="scale0", dtype=UE4M3()),
+        Var(name="scale1", dtype=UE4M3()),
+        Var(name="x0", dtype=E2M1()),
+        Var(name="x1", dtype=E2M1()),
     )
     
     design.check_determinism()
