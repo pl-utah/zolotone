@@ -60,6 +60,27 @@ class DataType(ABC, Generic[RawT]):
         self.validate_raw(raw)
         return str(self.to_python(raw))
 
+    def to_hex(self, raw: RawT) -> str:
+        """Format an integer raw payload as width-padded hexadecimal."""
+
+        self.validate_raw(raw)
+        if not isinstance(raw, int):
+            raise TypeError(
+                f"{type(self).__name__} does not have an integer raw encoding"
+            )
+        digits = max(1, (self.total_bits() + 3) // 4)
+        return f"0x{raw:0{digits}X}"
+
+    def to_dec(self, raw: RawT) -> str:
+        """Format an integer raw payload as decimal."""
+
+        self.validate_raw(raw)
+        if not isinstance(raw, int):
+            raise TypeError(
+                f"{type(self).__name__} does not have an integer raw encoding"
+            )
+        return str(raw)
+
     def _fingerprint(self):
         descriptor_fields = ()
         if hasattr(self, "__dataclass_fields__"):
@@ -96,6 +117,12 @@ class Value(Generic[RawT]):
                 f"{type(self.dtype).__name__} values do not support to_bitstring"
             )
         return method(self.raw)
+
+    def to_hex(self) -> str:
+        return self.dtype.to_hex(self.raw)
+
+    def to_dec(self) -> str:
+        return self.dtype.to_dec(self.raw)
 
     def _fingerprint(self):
         return ("Value", self.dtype._fingerprint(), self.raw)
