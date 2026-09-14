@@ -9,10 +9,10 @@ N = 4
 
 
 def spec_wgmma_fp16_e4m3_e5m2(
-    a0: e4m3fn, a1: e4m3fn, a2: e4m3fn, a3: e4m3fn,
-    b0: e5m2, b1: e5m2, b2: e5m2, b3: e5m2,
-    c: fp16, ctx
-):
+    a0: E4M3FN(), a1: E4M3FN(), a2: E4M3FN(), a3: E4M3FN(),
+    b0: E5M2(), b1: E5M2(), b2: E5M2(), b3: E5M2(),
+    c: Float16(), ctx
+) -> Float16():
     A = (a0, a1, a2, a3)
     B = (b0, b1, b2, b3)
     product_signs = [A[i].sign.ne(B[i].sign) for i in range(N)]

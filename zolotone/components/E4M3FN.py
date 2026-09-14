@@ -95,7 +95,18 @@ class DecodedE4M3FN(NamedTuple):
     is_nan: Node
 
 
-def e4m3fn_decode_spec(x: e4m3fn, ctx):
+def e4m3fn_decode_spec(
+    x: E4M3FN(),
+    ctx,
+) -> Tuple(
+    UQ(1, 0),
+    UQ(4, 0),
+    UQ(3, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+):
     decoded = x.decode()[1:]
     classification_count = len(x.classification_flags())
     fields = decoded[:-classification_count]
@@ -105,7 +116,12 @@ def e4m3fn_decode_spec(x: e4m3fn, ctx):
     )
 
 
-def e4m3fn_pack_spec(s, e, m, ctx):
+def e4m3fn_pack_spec(
+    s: UQ(1, 0),
+    e: UQ(4, 0),
+    m: UQ(3, 0),
+    ctx,
+) -> E4M3FN():
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -196,7 +212,7 @@ def e4m3fn_decode(x: Node) -> DecodedE4M3FN:
     )
 
 
-def e4m3fn_encodings_spec(m, e, ctx):
+def e4m3fn_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
     integer_m = m * ctx.two() ** ctx.real_val(E4M3FN.mantissa_bits)
     max_e = ctx.real_val(E4M3FN.max_finite_code)
     max_m = ctx.real_val(E4M3FN.max_finite_mantissa)
@@ -241,7 +257,7 @@ def e4m3fn_encodings(m_rounded: Node, e_rounded: Node):
     return make_Tuple(final_m, final_e)
 
 
-def e4m3fn_encode_spec(s, e, m, ctx):
+def e4m3fn_encode_spec(s: UQ, e: Q, m: UQ, ctx) -> E4M3FN:
     finite_value = (
         sign_multiplier(ctx, s)
         * m

@@ -17,7 +17,7 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
     if bits_to_cut >= m.dtype.total_bits():
         raise ValueError("Cannot cut all bits of a fixed-point value")
 
-    def spec(x, ctx):
+    def spec(x: UQ, ctx) -> Tuple:
         increment = ctx.fresh_real("increment")
         ctx.assume(increment.eq(ctx.zero()))
         return x, increment
@@ -63,7 +63,7 @@ def uq_RNE_IEEE(m: Node, bits_to_cut: int):
     return impl(m)
 
 
-def round_mantissa_spec(m, e, ctx):
+def round_mantissa_spec(m: UQ, e: UQ, ctx) -> Tuple:
     rounded_m = ctx.fresh_real("rounded_m")
     rounded_e = ctx.fresh_real("rounded_e")
     ctx.assume((m * ctx.two() ** e).eq(rounded_m * ctx.two() ** rounded_e))
@@ -103,7 +103,7 @@ def round_mantissa(
     return impl(m, e)
 
 
-def lzc_spec(x, ctx):
+def lzc_spec(x: UQ, ctx) -> UQ:
     raise NotImplementedError
 
 
@@ -138,7 +138,7 @@ def lzc(x: Node) -> Node:
     return impl(x)
 
 
-def normalize_to_1_xxx_spec(m, e, ctx):
+def normalize_to_1_xxx_spec(m: UQ, e: Q, ctx) -> Tuple:
     normalized_m = ctx.fresh_real("normalized_m")
     normalized_e = ctx.fresh_real("normalized_e")
     ctx.assume((m * ctx.two() ** e).eq(normalized_m * ctx.two() ** normalized_e))
@@ -176,12 +176,16 @@ def normalize_to_1_xxx(m: Node, e: Node):
     return impl(m, e)
 
 
-@Primitive(name="drop_implicit_bit", spec=lambda x, ctx: x - ctx.one())
+def drop_implicit_bit_spec(x: UQ, ctx) -> UQ:
+    return x - ctx.one()
+
+
+@Primitive(name="drop_implicit_bit", spec=drop_implicit_bit_spec)
 def drop_implicit_bit(x: Node):
     return uq_select(x, x.dtype.frac_bits - 1, 0)
 
 
-def shift_if_subnormal_spec(m, e, ctx):
+def shift_if_subnormal_spec(m: UQ, e: Q, ctx) -> Tuple:
     shifted_m = ctx.fresh_real("classified_m")
     shifted_e = ctx.fresh_real("classified_e")
     ctx.assume((m * ctx.two() ** e).eq(shifted_m * ctx.two() ** shifted_e))

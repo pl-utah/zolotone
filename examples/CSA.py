@@ -17,7 +17,7 @@ def _exact_or(a: Node, b: Node):
     return basic_or(a_, b_, a_.dtype)
 
 
-def csa_spec(x, y, z, ctx):
+def csa_spec(x: Q, y: Q, z: Q, ctx) -> Tuple:
     carry = ctx.fresh_real("carry")
     sum_ = ctx.fresh_real("sum")
     ctx.assume((x + y + z).eq(carry + sum_))
@@ -33,7 +33,7 @@ def CSA(x: Node, y: Node, z: Node) -> Node:
     return make_Tuple(sum_, carry)
 
 
-def CSA_tree4_spec(m0, m1, m2, m3, ctx):
+def CSA_tree4_spec(m0: Q, m1: Q, m2: Q, m3: Q, ctx) -> Q:
         return m0 + m1 + m2 + m3
 
 @Composite(name="CSA_tree4", spec=CSA_tree4_spec)

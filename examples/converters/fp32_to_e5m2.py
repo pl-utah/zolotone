@@ -1,7 +1,7 @@
 from zolotone import *
 
 
-def spec_fp32_to_e5m2(x: fp32, ctx):
+def spec_fp32_to_e5m2(x: Float32(), ctx) -> E5M2():
     return Cases(
         case(x.is_nan, e5m2.nan(ctx)),
         case(x.is_ninf, e5m2.ninf(ctx)),

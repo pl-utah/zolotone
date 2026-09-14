@@ -1,4 +1,5 @@
 ### Type notation
+
 - `Q<I,F>`: signed fixed-point with `I` integer and `F` fractional bits; `UQ<I,F>` unsigned.
 - `Float16`, `BFloat16`, `Float32`: IEEE754 formats; `E4M3FN` is the
   finite-only 8-bit `S.EEEE.MMM` format (bias 7, signed zeros, subnormals,
@@ -18,6 +19,42 @@
 - `T`: result `DataType` descriptor supplied as Python metadata; it is not a graph
   input and has no runtime value. `Any`: unconstrained node chosen by the caller.
 - `n<int>, s<int> etc.`: literal integers passed as Python args, not nodes.
+
+### Specification dtype contracts
+
+Every specification passed to `Primitive` or `Composite` declares the dtypes
+of all implementation inputs and its implementation output. The `ctx`
+parameter is intentionally left unannotated because it is not an implementation
+input. Return annotations describe the implementation node's dtype, not the
+Python class of the symbolic expression returned by the specification.
+
+A specification uses exactly one of two annotation modes. Exact mode uses
+descriptor instances and checks descriptor equality, including widths:
+
+```python
+def fixed_spec(
+    x: Q(3, 4),
+    y: UQ(2, 2),
+    ctx,
+) -> Q(3, 4):
+    ...
+```
+
+Family mode uses descriptor classes and accepts any width in the declared
+families. This is appropriate when the result width depends on its inputs:
+
+```python
+def uq_add_spec(x: UQ, y: UQ, ctx) -> UQ:
+    return x + y
+```
+
+Use `DataType` in family mode for an input or output that intentionally accepts
+any descriptor family, as in a generic copy helper. Variadic annotations apply
+to every supplied argument. Exact instances and family classes cannot be mixed
+within one specification, and every non-`ctx` parameter plus the return must be
+annotated. Postponed and string annotations are resolved when the decorator is
+defined. Annotations constrain the implementation contract only: they never
+cast, resize, or create caller-visible variables.
 
 ### Public API
 

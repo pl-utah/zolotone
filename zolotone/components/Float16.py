@@ -115,7 +115,19 @@ class DecodedFP16(NamedTuple):
     is_nan: Node
 
 
-def fp16_decode_spec(x: fp16, ctx):
+def fp16_decode_spec(
+    x: Float16(),
+    ctx,
+) -> Tuple(
+    UQ(1, 0),
+    UQ(5, 0),
+    UQ(10, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+):
     decoded = x.decode()[1:]
     classification_count = len(x.classification_flags())
     fields = decoded[:-classification_count]
@@ -125,7 +137,12 @@ def fp16_decode_spec(x: fp16, ctx):
     )
 
 
-def fp16_pack_spec(s, e, m, ctx):
+def fp16_pack_spec(
+    s: UQ(1, 0),
+    e: UQ(5, 0),
+    m: UQ(10, 0),
+    ctx,
+) -> Float16():
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -265,7 +282,7 @@ def fp16_decode(x: Node) -> DecodedFP16:
     )
 
 
-def fp16_encodings_spec(m, e, ctx):
+def fp16_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
     return m * ctx.two() ** ctx.real_val(Float16.mantissa_bits), e
 
 
@@ -289,7 +306,7 @@ def fp16_encodings(m_rounded: Node, e_rounded: Node):
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 
 
-def fp16_encode_spec(s, e, m, ctx):
+def fp16_encode_spec(s: UQ, e: Q, m: UQ, ctx) -> Float16:
     signed = sign_multiplier(ctx, s)
     finite_value = (
         signed

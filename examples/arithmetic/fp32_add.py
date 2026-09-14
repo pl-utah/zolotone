@@ -2,7 +2,7 @@ from zolotone import *
 
 
 # Non-bit-precise concept specification of a single-precision IEEE adder.
-def spec_fp32_add(x: fp32, y: fp32, ctx):
+def spec_fp32_add(x: Float32(), y: Float32(), ctx) -> Float32():
     nan_case = (
         x.is_nan
         | y.is_nan

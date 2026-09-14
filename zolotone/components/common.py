@@ -9,7 +9,7 @@ def add_implicit_bit(x: Node) -> Primitive:
     assert x.dtype.int_bits == 0
     frac_bits = x.dtype.frac_bits
 
-    def spec(x, ctx):
+    def spec(x: UQ, ctx) -> UQ:
         return x + ctx.one()
 
     @Primitive(name="add_implicit_bit", spec=spec)
@@ -51,7 +51,7 @@ def effective_exponent(value) -> Node:
     )
 
 
-def and_spec(x, y, ctx):
+def and_spec(x: DataType, y: DataType, ctx) -> UQ:
     return If(
         x.eq(ctx.one()) & y.eq(ctx.one()),
         ctx.one(),
@@ -70,7 +70,7 @@ def bit_and(x: Node, y: Node) -> Node:
     return basic_and(x, y, UQ(1, 0))
 
 
-def xor_spec(x, y, ctx):
+def xor_spec(x: DataType, y: DataType, ctx) -> UQ:
     return If(x.ne(y), ctx.one(), ctx.zero())
 
 
@@ -85,7 +85,7 @@ def bit_xor(x: Node, y: Node) -> Node:
     return basic_xor(x, y, UQ(1, 0))
 
 
-def or_spec(x, y, ctx):
+def or_spec(x: DataType, y: DataType, ctx) -> UQ:
     return If(
         x.eq(ctx.one()) | y.eq(ctx.one()),
         ctx.one(),
@@ -104,7 +104,7 @@ def bit_or(x: Node, y: Node) -> Node:
     return basic_or(x, y, UQ(1, 0))
 
 
-def neg_spec(x, ctx):
+def neg_spec(x: DataType, ctx) -> UQ:
     return If(
         x.eq(ctx.one()),
         ctx.zero(),

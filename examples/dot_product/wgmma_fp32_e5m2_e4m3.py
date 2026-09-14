@@ -9,10 +9,10 @@ N = 4
 
 
 def spec_wgmma_fp32_e5m2_e4m3(
-    a0: e5m2, a1: e5m2, a2: e5m2, a3: e5m2,
-    b0: e4m3fn, b1: e4m3fn, b2: e4m3fn, b3: e4m3fn,
-    c: fp32, ctx
-):
+    a0: E5M2(), a1: E5M2(), a2: E5M2(), a3: E5M2(),
+    b0: E4M3FN(), b1: E4M3FN(), b2: E4M3FN(), b3: E4M3FN(),
+    c: Float32(), ctx
+) -> Float32():
     A = (a0, a1, a2, a3)
     B = (b0, b1, b2, b3)
     product_signs = [A[i].sign.ne(B[i].sign) for i in range(N)]

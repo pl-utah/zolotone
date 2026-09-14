@@ -101,7 +101,19 @@ class DecodedFP32(NamedTuple):
     is_nan: Node
 
 
-def fp32_decode_spec(x: fp32, ctx):
+def fp32_decode_spec(
+    x: Float32(),
+    ctx,
+) -> Tuple(
+    UQ(1, 0),
+    UQ(8, 0),
+    UQ(23, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+):
     decoded = x.decode()[1:]
     classification_count = len(x.classification_flags())
     fields = decoded[:-classification_count]
@@ -111,7 +123,12 @@ def fp32_decode_spec(x: fp32, ctx):
     )
 
 
-def fp32_pack_spec(s, e, m, ctx):
+def fp32_pack_spec(
+    s: UQ(1, 0),
+    e: UQ(8, 0),
+    m: UQ(23, 0),
+    ctx,
+) -> Float32():
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -226,7 +243,7 @@ def fp32_decode(x: Node) -> DecodedFP32:
     )
 
 
-def fp32_encodings_spec(m, e, ctx):
+def fp32_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
     return m * ctx.two() ** ctx.real_val(Float32.mantissa_bits), e
 
 
@@ -250,7 +267,7 @@ def fp32_encodings(m_rounded: Node, e_rounded: Node):
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 
 
-def fp32_encode_spec(s, e, m, ctx):
+def fp32_encode_spec(s: UQ, e: Q, m: UQ, ctx) -> Float32:
     signed = sign_multiplier(ctx, s)
     finite_value = (
         signed

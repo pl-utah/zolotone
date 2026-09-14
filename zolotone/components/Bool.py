@@ -4,6 +4,10 @@ from ..ast import *
 from ..egglog import *
 from ..spec import *
 
-@Primitive(name="negate", spec=lambda x, ctx: ~x)
+def negate_spec(x: Bool(), ctx) -> Bool():
+    return ~x
+
+
+@Primitive(name="negate", spec=negate_spec)
 def negate(x: Node) -> Node:
     return basic_invert(x, out=Bool())

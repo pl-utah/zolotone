@@ -1,3 +1,4 @@
+import inspect
 import random
 import typing as tp
 
@@ -16,6 +17,168 @@ from ..spec import SpecContext, special_encoding
 
 
 CLowering = tp.Callable[[list[str], bool], str]
+
+
+class _SpecContract(tp.NamedTuple):
+    signature: inspect.Signature
+    annotations: dict[str, DataType | type[DataType]]
+    exact: bool
+    display_name: str
+
+
+def _spec_display_name(name: str, spec: tp.Callable[..., tp.Any]) -> str:
+    function_name = getattr(
+        spec,
+        "__qualname__",
+        getattr(spec, "__name__", repr(spec)),
+    )
+    return f"{name!r} ({function_name})"
+
+
+def _build_spec_contract(
+    name: str,
+    spec: tp.Callable[..., tp.Any],
+) -> _SpecContract:
+    """Resolve and validate a Primitive/Composite dtype contract."""
+
+    display_name = _spec_display_name(name, spec)
+    try:
+        signature = inspect.signature(spec)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"Specification {display_name} has no inspectable signature: {exc}"
+        ) from exc
+
+    ctx_parameter = signature.parameters.get("ctx")
+    if (
+        ctx_parameter is not None
+        and ctx_parameter.annotation is not inspect.Parameter.empty
+    ):
+        raise TypeError(
+            f"Specification {display_name} annotation for 'ctx' is invalid: "
+            f"{ctx_parameter.annotation!r}; ctx is excluded from the dtype contract"
+        )
+
+    try:
+        resolved = tp.get_type_hints(spec)
+    except Exception as exc:
+        raise TypeError(
+            f"Specification {display_name} has an annotation that could not be "
+            f"resolved: {getattr(spec, '__annotations__', {})!r}"
+        ) from exc
+
+    contract_annotations: dict[str, DataType | type[DataType]] = {}
+    for parameter in signature.parameters.values():
+        if parameter.name == "ctx":
+            continue
+        if parameter.annotation is inspect.Parameter.empty:
+            raise TypeError(
+                f"Specification {display_name} is missing an annotation for "
+                f"parameter {parameter.name!r}"
+            )
+        annotation = resolved.get(parameter.name, parameter.annotation)
+        contract_annotations[parameter.name] = annotation
+
+    if signature.return_annotation is inspect.Signature.empty:
+        raise TypeError(
+            f"Specification {display_name} is missing a return annotation"
+        )
+    contract_annotations["return"] = resolved.get(
+        "return", signature.return_annotation
+    )
+
+    annotation_modes: set[str] = set()
+    for annotation_name, annotation in contract_annotations.items():
+        if isinstance(annotation, DataType):
+            annotation_modes.add("exact")
+        elif isinstance(annotation, type) and issubclass(annotation, DataType):
+            annotation_modes.add("family")
+        else:
+            raise TypeError(
+                f"Specification {display_name} has invalid annotation for "
+                f"{annotation_name!r}: {annotation!r}; expected a DataType "
+                "descriptor or DataType subclass"
+            )
+
+    if len(annotation_modes) != 1:
+        rendered = ", ".join(
+            f"{annotation_name}={annotation!r}"
+            for annotation_name, annotation in contract_annotations.items()
+        )
+        raise TypeError(
+            f"Specification {display_name} mixes exact descriptor and dtype "
+            f"family annotations: {rendered}"
+        )
+
+    return _SpecContract(
+        signature=signature,
+        annotations=contract_annotations,
+        exact=annotation_modes == {"exact"},
+        display_name=display_name,
+    )
+
+
+def _annotation_matches(
+    dtype: DataType,
+    annotation: DataType | type[DataType],
+    *,
+    exact: bool,
+) -> bool:
+    return dtype == annotation if exact else isinstance(dtype, annotation)
+
+
+def _validate_spec_inputs(
+    contract: _SpecContract,
+    args: tuple[Node, ...],
+) -> None:
+    if not all(isinstance(arg, Node) for arg in args):
+        bad_args = [type(arg).__name__ for arg in args if not isinstance(arg, Node)]
+        raise TypeError(
+            f"Arguments to specification {contract.display_name} must be Node "
+            f"instances, got {bad_args}"
+        )
+
+    marker = object()
+    try:
+        bound = contract.signature.bind(*([marker] * len(args)), ctx=marker)
+    except TypeError as exc:
+        raise TypeError(
+            f"Arguments do not match specification {contract.display_name}: {exc}"
+        ) from exc
+
+    arg_index = 0
+    for parameter in contract.signature.parameters.values():
+        if parameter.name == "ctx":
+            continue
+        annotation = contract.annotations[parameter.name]
+        supplied = bound.arguments.get(parameter.name, ())
+        count = (
+            len(supplied)
+            if parameter.kind is inspect.Parameter.VAR_POSITIONAL
+            else int(parameter.name in bound.arguments)
+        )
+        for _ in range(count):
+            dtype = args[arg_index].dtype
+            if not _annotation_matches(dtype, annotation, exact=contract.exact):
+                raise TypeError(
+                    f"Input {arg_index} to specification {contract.display_name} "
+                    f"has descriptor {dtype!r}; expected {annotation!r}"
+                )
+            arg_index += 1
+
+
+def _validate_spec_output(contract: _SpecContract, inner_tree: Node) -> None:
+    if not isinstance(inner_tree, Node):
+        raise TypeError(
+            f"Implementation for specification {contract.display_name} returned "
+            f"{type(inner_tree).__name__}, expected Node"
+        )
+    annotation = contract.annotations["return"]
+    if not _annotation_matches(inner_tree.dtype, annotation, exact=contract.exact):
+        raise TypeError(
+            f"Output from specification {contract.display_name} has descriptor "
+            f"{inner_tree.dtype!r}; expected {annotation!r}"
+        )
 
 
 class _Spec(tp.NamedTuple):
@@ -144,10 +307,13 @@ def Composite(
     c_inline: bool = False,
     c_lowering: tp.Optional[CLowering] = None,
 ):
+    contract = _build_spec_contract(name, spec)
+
     def wrapper1(impl: tp.Callable[..., Node]):
         def wrapper2(*args):
             return composite(
                 spec=spec,
+                spec_contract=contract,
                 impl=impl,
                 args=args,
                 name=name,
@@ -161,6 +327,7 @@ class composite(Node):
     def __init__(
         self,
         spec: tp.Callable[..., tp.Any],
+        spec_contract: _SpecContract,
         impl: tp.Callable[..., Node],
         args: list[Node],
         name: str,
@@ -170,6 +337,7 @@ class composite(Node):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
         self.ctx = SpecContext(name)
+        _validate_spec_inputs(spec_contract, args)
         self.inner_args = [
             Var(name=f"arg_{i}", dtype=x.dtype, constant=x.constant)
             for i, x in enumerate(args)
@@ -178,6 +346,8 @@ class composite(Node):
         recorder = SpecRecorder(self.ctx)
         with record_specs(recorder):
             self.inner_tree = impl(*self.inner_args)
+
+        _validate_spec_output(spec_contract, self.inner_tree)
         
         self._validate_components(name)
         
@@ -322,10 +492,13 @@ def Primitive(
     c_inline: bool = False,
     c_lowering: tp.Optional[CLowering] = None,
 ):
+    contract = _build_spec_contract(name, spec)
+
     def wrapper1(impl: tp.Callable[..., Node]):
         def wrapper2(*args):
             return primitive(
                 spec=spec,
+                spec_contract=contract,
                 impl=impl,
                 args=args,
                 name=name,
@@ -339,6 +512,7 @@ class primitive(Node):
     def __init__(
         self,
         spec: tp.Callable[..., tp.Any],
+        spec_contract: _SpecContract,
         impl: tp.Callable[..., Node],
         args: list[Node],
         name: str,
@@ -347,12 +521,15 @@ class primitive(Node):
     ):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
+        _validate_spec_inputs(spec_contract, args)
         self.inner_args = [
             Var(name=f"arg_{i}", dtype=x.dtype, constant=x.constant)
             for i, x in enumerate(args)
         ]
         
         self.inner_tree = impl(*self.inner_args)
+
+        _validate_spec_output(spec_contract, self.inner_tree)
         
         def impl_(*args):
             for var, arg in zip(self.inner_args, args):

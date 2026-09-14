@@ -4005,7 +4005,7 @@ class TestFloat16Spec(unittest.TestCase):
                 self.assertIs(decoded.is_nan, decoded[7])
 
     def test_fp16_pack_round_trips_in_python_and_cpp(self):
-        def identity_spec(x, ctx):
+        def identity_spec(x: Float16(), ctx) -> Float16():
             del ctx
             return x
 
@@ -4094,7 +4094,10 @@ class TestE4M3FNSpec(unittest.TestCase):
         self.assertEqual(counts, {"norm": 238, "sub": 14, "zero": 2, "nan": 2})
 
     def test_pack_decode_round_trip_in_python_and_jit_cpp(self):
-        @Composite(name="e4m3fn_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: E4M3FN(), ctx) -> E4M3FN():
+            return x
+
+        @Composite(name="e4m3fn_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = e4m3fn_decode(x)
             return e4m3fn_pack(decoded.sign, decoded.exponent, decoded.mantissa)
@@ -4234,7 +4237,7 @@ class TestE4M3FNSpec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_saturating_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx):
+        def spec(ctx) -> E4M3FN():
             return e4m3fn.encode(ctx.two() ** ctx.real_val(13), ctx)
 
         @Composite(name="e4m3fn_encode_saturation_proof", spec=spec)
@@ -4280,7 +4283,10 @@ class TestUE4M3Spec(unittest.TestCase):
                     UE4M3().from_fields(*fields)
 
     def test_exhaustive_decode_classification_values_and_pack_round_trip(self):
-        @Composite(name="ue4m3_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: UE4M3(), ctx) -> UE4M3():
+            return x
+
+        @Composite(name="ue4m3_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = ue4m3_decode(x)
             return ue4m3_pack(decoded.exponent, decoded.mantissa)
@@ -4523,7 +4529,10 @@ class TestE5M2Spec(unittest.TestCase):
         counts = {"norm": 0, "sub": 0, "zero": 0, "inf": 0, "nan": 0}
         names = tuple(counts)
 
-        @Composite(name="e5m2_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: E5M2(), ctx) -> E5M2():
+            return x
+
+        @Composite(name="e5m2_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = e5m2_decode(x)
             return e5m2_pack(decoded.sign, decoded.exponent, decoded.mantissa)
@@ -4645,7 +4654,7 @@ class TestE5M2Spec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_overflow_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx):
+        def spec(ctx) -> E5M2():
             return e5m2.encode(ctx.two() ** ctx.real_val(24), ctx)
 
         @Composite(name="e5m2_encode_overflow_proof", spec=spec)
@@ -4702,7 +4711,10 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         counts = {"norm": 0, "sub": 0, "zero": 0, "nan": 0}
         names = tuple(counts)
 
-        @Composite(name="e5m2fnuz_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: E5M2FNUZ(), ctx) -> E5M2FNUZ():
+            return x
+
+        @Composite(name="e5m2fnuz_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = e5m2fnuz_decode(x)
             return e5m2fnuz_pack(decoded.sign, decoded.exponent, decoded.mantissa)
@@ -4825,7 +4837,7 @@ class TestE5M2FNUZSpec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_saturating_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx):
+        def spec(ctx) -> E5M2FNUZ():
             return e5m2fnuz.encode(ctx.two() ** ctx.real_val(24), ctx)
 
         @Composite(name="e5m2fnuz_encode_saturation_proof", spec=spec)
@@ -4874,7 +4886,10 @@ class TestE2M1Spec(unittest.TestCase):
         counts = {"norm": 0, "sub": 0, "zero": 0}
         names = tuple(counts)
 
-        @Composite(name="e2m1_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: E2M1(), ctx) -> E2M1():
+            return x
+
+        @Composite(name="e2m1_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = e2m1_decode(x)
             return e2m1_pack(decoded.sign, decoded.exponent, decoded.mantissa)
@@ -4991,7 +5006,7 @@ class TestE2M1Spec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_saturating_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx):
+        def spec(ctx) -> E2M1():
             return e2m1.encode(ctx.real_val(16), ctx)
 
         @Composite(name="e2m1_encode_saturation_proof", spec=spec)
@@ -8017,9 +8032,185 @@ class TestParallelClassificationVerification(unittest.TestCase):
             )
 
 
+class TestSpecificationDTypeContracts(unittest.TestCase):
+    def test_complete_exact_and_family_contracts_are_accepted(self):
+        def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        @Primitive(name="exact_contract", spec=exact_spec)
+        def exact_contract(x):
+            return x.copy()
+
+        exact_node = exact_contract(Var("exact", UQ(2, 0)))
+        self.assertEqual(exact_node.dtype, UQ(2, 0))
+
+        def family_spec(x: UQ, ctx) -> UQ:
+            return x
+
+        @Composite(name="family_contract", spec=family_spec)
+        def family_contract(x):
+            return x.copy()
+
+        for dtype in (UQ(1, 0), UQ(3, 7)):
+            with self.subTest(dtype=dtype):
+                self.assertEqual(
+                    family_contract(Var("family", dtype)).dtype,
+                    dtype,
+                )
+
+    def test_declaration_rejects_incomplete_and_invalid_annotations(self):
+        def missing_input(x, ctx) -> UQ:
+            return x
+
+        def missing_return(x: UQ, ctx):
+            return x
+
+        def unrelated(x: int, ctx) -> UQ:
+            return x
+
+        def annotated_ctx(x: UQ, ctx: UQ) -> UQ:
+            return x
+
+        for name, spec, expected in (
+            ("missing_input", missing_input, "parameter 'x'"),
+            ("missing_return", missing_return, "return annotation"),
+            ("unrelated", unrelated, "invalid annotation"),
+            ("annotated_ctx", annotated_ctx, "ctx is excluded"),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                TypeError, f"{name}.*{expected}"
+            ):
+                Primitive(name=name, spec=spec)
+
+    def test_declaration_rejects_mixed_exact_and_family_modes(self):
+        def mixed_input(x: UQ(2, 0), y: UQ, ctx) -> UQ:
+            return x + y
+
+        def mixed_return(x: UQ, ctx) -> UQ(2, 0):
+            return x
+
+        for name, spec in (
+            ("mixed_input", mixed_input),
+            ("mixed_return", mixed_return),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                TypeError, f"{name}.*mixes exact descriptor"
+            ):
+                Composite(name=name, spec=spec)
+
+    def test_exact_contract_rejects_wrong_width_and_family(self):
+        def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        @Primitive(name="exact_inputs", spec=exact_spec)
+        def exact_inputs(x):
+            return x.copy()
+
+        for dtype in (UQ(3, 0), Q(2, 0)):
+            with self.subTest(dtype=dtype), self.assertRaisesRegex(
+                TypeError, "exact_inputs.*expected UQ<2,0>"
+            ):
+                exact_inputs(Var("x", dtype))
+
+    def test_family_contract_accepts_widths_and_rejects_other_families(self):
+        def family_spec(x: UQ, ctx) -> UQ:
+            return x
+
+        @Primitive(name="family_inputs", spec=family_spec)
+        def family_inputs(x):
+            return x.copy()
+
+        self.assertEqual(
+            family_inputs(Var("narrow", UQ(1, 0))).dtype,
+            UQ(1, 0),
+        )
+        self.assertEqual(
+            family_inputs(Var("wide", UQ(7, 5))).dtype,
+            UQ(7, 5),
+        )
+        with self.assertRaisesRegex(TypeError, "family_inputs.*expected.*UQ"):
+            family_inputs(Var("signed", Q(7, 5)))
+
+        def any_dtype_spec(x: DataType, ctx) -> DataType:
+            return x
+
+        @Primitive(name="any_dtype", spec=any_dtype_spec)
+        def any_dtype(x):
+            return x.copy()
+
+        for dtype in (UQ(2, 0), Q(3, 1), Float32()):
+            with self.subTest(any_dtype=dtype):
+                self.assertEqual(any_dtype(Var("any", dtype)).dtype, dtype)
+
+    def test_input_contract_is_checked_before_inner_var_allocation(self):
+        def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        @Primitive(name="preallocation_check", spec=exact_spec)
+        def preallocation_check(x):
+            return x.copy()
+
+        wrong_input = Var("wrong", UQ(3, 0))
+        with patch.object(ast_nodes, "Var", wraps=Var) as inner_var:
+            with self.assertRaisesRegex(TypeError, "preallocation_check"):
+                preallocation_check(wrong_input)
+        inner_var.assert_not_called()
+
+    def test_output_contract_is_checked_during_tree_construction(self):
+        implementation_calls = []
+
+        def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        @Primitive(name="output_contract", spec=exact_spec)
+        def output_contract(x):
+            implementation_calls.append(x)
+            return Const(UQ(3, 0).from_bits(0))
+
+        with self.assertRaisesRegex(
+            TypeError, "output_contract.*descriptor UQ<3,0>.*expected UQ<2,0>"
+        ):
+            output_contract(Var("x", UQ(2, 0)))
+        self.assertEqual(len(implementation_calls), 1)
+
+    def test_variadic_family_contract_applies_to_every_argument(self):
+        def variadic_spec(*values: UQ, ctx) -> Tuple:
+            return tuple(values)
+
+        @Primitive(name="variadic_contract", spec=variadic_spec)
+        def variadic_contract(*values):
+            return make_Tuple(*values)
+
+        node = variadic_contract(
+            Var("first", UQ(2, 0)),
+            Var("second", UQ(1, 3)),
+        )
+        self.assertEqual(node.dtype, Tuple(UQ(2, 0), UQ(1, 3)))
+        with self.assertRaisesRegex(TypeError, "Input 1.*variadic_contract"):
+            variadic_contract(
+                Var("first", UQ(2, 0)),
+                Var("second", Q(2, 0)),
+            )
+
+    def test_postponed_annotations_are_resolved(self):
+        def postponed_spec(x, ctx):
+            return x
+
+        postponed_spec.__annotations__ = {"x": "UQ", "return": "UQ"}
+
+        @Primitive(name="postponed_contract", spec=postponed_spec)
+        def postponed_contract(x):
+            return x.copy()
+
+        self.assertEqual(
+            postponed_contract(Var("x", UQ(4, 2))).dtype,
+            UQ(4, 2),
+        )
+
+
 class TestSpecificationDeterminism(unittest.TestCase):
     def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):
-        def malformed_spec(x, ctx):
+        def malformed_spec(x: UQ, ctx) -> UQ:
             return Cases(
                 case(BoolLit(False), x),
                 ctx=ctx,
@@ -8036,7 +8227,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
     def test_deterministic_primitive_uses_same_inputs_for_both_spec_runs(self):
         seen_inputs = []
 
-        def deterministic_spec(x, ctx):
+        def deterministic_spec(x: UQ, ctx) -> UQ:
             seen_inputs.append(x)
             out = ctx.fresh_real("out")
             ctx.assume(out.eq(x + ctx.one()))
@@ -8063,7 +8254,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
     def test_fp_inputs_get_independent_special_encoding_per_spec_run(self):
         seen_inputs = []
 
-        def identity_spec(x, ctx):
+        def identity_spec(x: Float32(), ctx) -> Float32():
             del ctx
             seen_inputs.append(x)
             return x
@@ -8091,7 +8282,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         inner_inputs = []
         outer_inputs = []
 
-        def inner_spec(x, ctx):
+        def inner_spec(x: Float32(), ctx) -> Float32():
             del ctx
             inner_inputs.append(x)
             return x
@@ -8100,7 +8291,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         def inner_fp_identity(x):
             return x.copy()
 
-        def outer_spec(x, ctx):
+        def outer_spec(x: Float32(), ctx) -> Float32():
             del ctx
             outer_inputs.append(x)
             return x
@@ -8126,7 +8317,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertNotEqual(inner.value.on_false, outer.value.on_false)
 
     def test_underconstrained_primitive_is_not_deterministic(self):
-        def nondeterministic_spec(_x, ctx):
+        def nondeterministic_spec(_x: UQ, ctx) -> UQ:
             out = ctx.fresh_real("out")
             zero = ctx.zero()
             one = ctx.one()
@@ -8261,7 +8452,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertFalse(result["proved"])
 
     def test_composite_determinism_ignores_inner_proof_context(self):
-        def identity_spec(x, ctx):
+        def identity_spec(x: UQ, ctx) -> UQ:
             del ctx
             return x
 
@@ -8280,7 +8471,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertTrue(result["proved"])
 
     def test_nested_tuple_outputs_are_compared_recursively(self):
-        def identity_spec(x, ctx):
+        def identity_spec(x: Tuple, ctx) -> Tuple:
             del ctx
             return x
 
@@ -8305,7 +8496,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
     def test_output_shape_mismatch_raises_type_error(self):
         call_count = 0
 
-        def unstable_shape_spec(x, ctx):
+        def unstable_shape_spec(x: UQ, ctx) -> UQ:
             del ctx
             nonlocal call_count
             call_count += 1
@@ -8320,7 +8511,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
             node.check_determinism(schedule=[{"tool": "simplify"}])
 
     def test_unobservable_nan_fields_do_not_make_spec_nondeterministic(self):
-        def nan_spec(ctx):
+        def nan_spec(ctx) -> Float32():
             out = fp32.fresh("out", ctx)
             ctx.assume(out.is_nan.eq(ctx.true()))
             return out

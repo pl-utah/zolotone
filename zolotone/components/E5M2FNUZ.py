@@ -96,7 +96,18 @@ class DecodedE5M2FNUZ(NamedTuple):
     is_nan: Node
 
 
-def e5m2fnuz_decode_spec(x: e5m2fnuz, ctx):
+def e5m2fnuz_decode_spec(
+    x: E5M2FNUZ(),
+    ctx,
+) -> Tuple(
+    UQ(1, 0),
+    UQ(5, 0),
+    UQ(2, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+):
     decoded = x.decode()[1:]
     classification_count = len(x.classification_flags())
     fields = decoded[:-classification_count]
@@ -106,7 +117,12 @@ def e5m2fnuz_decode_spec(x: e5m2fnuz, ctx):
     )
 
 
-def e5m2fnuz_pack_spec(s, e, m, ctx):
+def e5m2fnuz_pack_spec(
+    s: UQ(1, 0),
+    e: UQ(5, 0),
+    m: UQ(2, 0),
+    ctx,
+) -> E5M2FNUZ():
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -189,7 +205,7 @@ def e5m2fnuz_decode(x: Node) -> DecodedE5M2FNUZ:
     )
 
 
-def e5m2fnuz_encodings_spec(m, e, ctx):
+def e5m2fnuz_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
     integer_m = m * ctx.two() ** ctx.real_val(E5M2FNUZ.mantissa_bits)
     overflow = e > ctx.real_val(E5M2FNUZ.max_finite_code)
     return (
@@ -216,7 +232,7 @@ def e5m2fnuz_encodings(m_rounded: Node, e_rounded: Node):
     return make_Tuple(final_m, final_e)
 
 
-def e5m2fnuz_encode_spec(s, e, m, ctx):
+def e5m2fnuz_encode_spec(s: UQ, e: Q, m: UQ, ctx) -> E5M2FNUZ:
     finite_value = (
         sign_multiplier(ctx, s)
         * m

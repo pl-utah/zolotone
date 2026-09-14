@@ -23,6 +23,10 @@ def basic_tuple_maker(*args) -> Op:
     )
 
 
-@Primitive(name="make_Tuple", spec=lambda *args, ctx: tuple(args), c_inline=True)
+def make_tuple_spec(*args: DataType, ctx) -> Tuple:
+    return tuple(args)
+
+
+@Primitive(name="make_Tuple", spec=make_tuple_spec, c_inline=True)
 def make_Tuple(*args: Node) -> Node:
     return basic_tuple_maker(*args)

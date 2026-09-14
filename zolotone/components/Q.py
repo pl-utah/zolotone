@@ -49,7 +49,7 @@ def q_alloc(int_bits: Node, frac_bits: Node) -> Op:
         name="q_alloc")
 
 
-def q_signs_xor_spec(x, y, ctx):
+def q_signs_xor_spec(x: Q, y: Q, ctx) -> UQ:
     x_sign = ctx.fresh_real("x_sign")
     y_sign = ctx.fresh_real("y_sign")
     res = ctx.fresh_real("xored_signs")
@@ -73,7 +73,11 @@ def q_signs_xor(x: Node, y: Node) -> Node:
     )
 
 
-@Primitive(name="q_lt", spec=lambda x, y, ctx: x < y)
+def q_lt_spec(x: Q, y: Q, ctx) -> Bool:
+    return x < y
+
+
+@Primitive(name="q_lt", spec=q_lt_spec)
 def q_lt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
@@ -87,7 +91,11 @@ def q_lt(x: Node, y: Node) -> Node:
         out=Bool())
 
 
-@Primitive(name="q_le", spec=lambda x, y, ctx: x <= y)
+def q_le_spec(x: Q, y: Q, ctx) -> Bool:
+    return x <= y
+
+
+@Primitive(name="q_le", spec=q_le_spec)
 def q_le(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
@@ -101,7 +109,11 @@ def q_le(x: Node, y: Node) -> Node:
         out=Bool())
 
 
-@Primitive(name="q_gt", spec=lambda x, y, ctx: x > y)
+def q_gt_spec(x: Q, y: Q, ctx) -> Bool:
+    return x > y
+
+
+@Primitive(name="q_gt", spec=q_gt_spec)
 def q_gt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
@@ -115,7 +127,11 @@ def q_gt(x: Node, y: Node) -> Node:
         out=Bool())
 
 
-@Primitive(name="q_ge", spec=lambda x, y, ctx: x >= y)
+def q_ge_spec(x: Q, y: Q, ctx) -> Bool:
+    return x >= y
+
+
+@Primitive(name="q_ge", spec=q_ge_spec)
 def q_ge(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
@@ -129,13 +145,21 @@ def q_ge(x: Node, y: Node) -> Node:
         out=Bool())
 
 
-@Primitive(name="q_eq", spec=lambda x, y, ctx: x.eq(y))
+def q_eq_spec(x: Q, y: Q, ctx) -> Bool:
+    return x.eq(y)
+
+
+@Primitive(name="q_eq", spec=q_eq_spec)
 def q_eq(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_equal(aligned_x, aligned_y, out=Bool())
 
 
-@Primitive(name="q_ne", spec=lambda x, y, ctx: x.ne(y))
+def q_ne_spec(x: Q, y: Q, ctx) -> Bool:
+    return x.ne(y)
+
+
+@Primitive(name="q_ne", spec=q_ne_spec)
 def q_ne(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_not_equal(aligned_x, aligned_y, out=Bool())
@@ -148,7 +172,10 @@ def q_aligner(x: Node,
     int_bits = int_aggr(x.dtype.int_bits, y.dtype.int_bits)
     frac_bits = frac_aggr(x.dtype.frac_bits, y.dtype.frac_bits)
 
-    @Primitive(name="q_aligner", spec=lambda x, y, ctx: (x, y))
+    def q_aligner_spec(x: Q, y: Q, ctx) -> Tuple:
+        return x, y
+
+    @Primitive(name="q_aligner", spec=q_aligner_spec)
     def impl(x: Node, y: Node) -> Node:
         def align(x):
             # Step 1. Align frac bits
@@ -174,7 +201,7 @@ def q_aligner(x: Node,
     return impl(x, y)
 
 
-def q_sign_bit_spec(x, ctx):
+def q_sign_bit_spec(x: Q, ctx) -> UQ:
     sign = ctx.fresh_real("sign")
     ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
     ctx.assume(x.eq(sign_multiplier(ctx, sign) * abs(x)))
@@ -197,7 +224,10 @@ def q_sign_extend(x: Node, n: int) -> Node:
     if n < 0:
         raise ValueError(f"n should be a non-negative integer, {n} is given")
 
-    @Primitive(name="q_sign_extend", spec=lambda x, ctx: x)
+    def q_sign_extend_spec(x: Q, ctx) -> Q:
+        return x
+
+    @Primitive(name="q_sign_extend", spec=q_sign_extend_spec)
     def impl(x: Node) -> Node:
         if n == 0:
             return x.copy()
@@ -227,7 +257,7 @@ def q_sign_extend(x: Node, n: int) -> Node:
     return impl(x)
 
 
-def q_resize_spec(x, ctx):
+def q_resize_spec(x: Q, ctx) -> Q:
     return x
 
 
@@ -258,7 +288,11 @@ def q_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
     return impl(x)
 
 
-@Primitive(name="q_neg", spec=lambda x, ctx: -x)
+def q_neg_spec(x: Q, ctx) -> Q:
+    return -x
+
+
+@Primitive(name="q_neg", spec=q_neg_spec)
 def q_neg(x: Node) -> Node:
     x_inv = basic_invert(x, x.dtype)
     x_neg = basic_add(x_inv, Const(UQ.from_int(1)), x.dtype)
@@ -269,7 +303,11 @@ def q_neg(x: Node) -> Node:
     return basic_mux_2_1(sel=x_is_min, in0=x_neg, in1=x_overflow, out=x.dtype)
 
 
-@Primitive(name="q_add", spec=lambda x, y, ctx: x + y)
+def q_add_spec(x: Q, y: Q, ctx) -> Q:
+    return x + y
+
+
+@Primitive(name="q_add", spec=q_add_spec)
 def q_add(x: Node, y: Node) -> Node:
     x_adj, y_adj = q_aligner(
         x=x,
@@ -280,7 +318,11 @@ def q_add(x: Node, y: Node) -> Node:
     return basic_add(x_adj, y_adj, x_adj.dtype)
 
 
-@Primitive(name="q_sub", spec=lambda x, y, ctx: x - y)
+def q_sub_spec(x: Q, y: Q, ctx) -> Q:
+    return x - y
+
+
+@Primitive(name="q_sub", spec=q_sub_spec)
 def q_sub(x: Node, y: Node) -> Node:
     x_adj, y_adj = q_aligner(
         x=x,
@@ -292,7 +334,11 @@ def q_sub(x: Node, y: Node) -> Node:
     return root
 
 
-@Primitive(name="q_mul", spec=lambda x, y, ctx: x * y)
+def q_mul_spec(x: Q, y: Q, ctx) -> Q:
+    return x * y
+
+
+@Primitive(name="q_mul", spec=q_mul_spec)
 def q_mul(x: Node, y: Node) -> Node:
     target_int_bits = x.dtype.int_bits + y.dtype.int_bits
     target_frac_bits = x.dtype.frac_bits + y.dtype.frac_bits
@@ -302,25 +348,37 @@ def q_mul(x: Node, y: Node) -> Node:
     return basic_mul(x=x_adj, y=y_adj, out=out)
 
 
-@Primitive(name="q_lshift", spec=lambda x, n, ctx: x * (ctx.two() ** n))
+def q_lshift_spec(x: Q, n: DataType, ctx) -> Q:
+    return x * (ctx.two() ** n)
+
+
+@Primitive(name="q_lshift", spec=q_lshift_spec)
 def q_lshift(x: Node, n: Node) -> Node:
     return basic_lshift(x=x, amount=n, out=x.dtype)
 
 
 # Assumes that x is positive
-@Primitive(name="q_to_uq", spec=lambda x, ctx: x, c_inline=True)
+def q_to_uq_spec(x: Q, ctx) -> UQ:
+    return x
+
+
+@Primitive(name="q_to_uq", spec=q_to_uq_spec, c_inline=True)
 def q_to_uq(x: Node) -> Node:
     int_bits = x.dtype.int_bits - 1
     frac_bits = x.dtype.frac_bits
     return basic_identity(x=x, out=UQ(int_bits, frac_bits))
 
 
-@Primitive(name="q_rshift", spec=lambda x, n, ctx: x * (ctx.two() ** (-n)))
+def q_rshift_spec(x: Q, n: DataType, ctx) -> Q:
+    return x * (ctx.two() ** (-n))
+
+
+@Primitive(name="q_rshift", spec=q_rshift_spec)
 def q_rshift(x: Node, n: Node) -> Node:
     return basic_rshift(x=x, amount=n, out=x.dtype)
 
 
-def q_rshift_jam_spec(x, n, ctx):
+def q_rshift_jam_spec(x: Q, n: DataType, ctx) -> Q:
     """Ideal signed scaling represented by a sign-symmetric jammed shift."""
 
     return x * (ctx.two() ** (-n))
@@ -352,7 +410,7 @@ def q_rshift_jam(x: Node, n: Node) -> Node:
     )
 
 
-def q_add_sign_spec(x, s, ctx):
+def q_add_sign_spec(x: Q, s: UQ, ctx) -> Q:
     return sign_multiplier(ctx, s) * x
 
 @Primitive(name="q_add_sign", spec=q_add_sign_spec)
@@ -365,13 +423,17 @@ def q_add_sign(x: Node, s: Node) -> Node:
     )
 
 
-@Primitive(name="q_abs", spec=lambda x, ctx: abs(x))
+def q_abs_spec(x: Q, ctx) -> Q:
+    return abs(x)
+
+
+@Primitive(name="q_abs", spec=q_abs_spec)
 def q_abs(x: Node) -> Node:
     sign_bit = q_sign_bit(x)  # UQ1.0
     return q_add_sign(x, sign_bit)
 
 
-def q_is_zero_spec(x, ctx):
+def q_is_zero_spec(x: Q, ctx) -> UQ:
     result = ctx.fresh_bool("q_is_zero")
     ctx.assume(result.eq(x.eq(ctx.zero())))
     return result

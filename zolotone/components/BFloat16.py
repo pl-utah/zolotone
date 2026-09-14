@@ -101,7 +101,19 @@ class DecodedBF16(NamedTuple):
     is_nan: Node
 
 
-def bf16_decode_spec(x: bf16, ctx):
+def bf16_decode_spec(
+    x: BFloat16(),
+    ctx,
+) -> Tuple(
+    UQ(1, 0),
+    UQ(8, 0),
+    UQ(7, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+):
     decoded = x.decode()[1:]
     classification_count = len(x.classification_flags())
     fields = decoded[:-classification_count]
@@ -111,7 +123,12 @@ def bf16_decode_spec(x: bf16, ctx):
     )
 
 
-def bf16_pack_spec(s, e, m, ctx):
+def bf16_pack_spec(
+    s: UQ(1, 0),
+    e: UQ(8, 0),
+    m: UQ(7, 0),
+    ctx,
+) -> BFloat16():
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -213,7 +230,7 @@ def bf16_decode(x: Node) -> DecodedBF16:
     )
 
 
-def bf16_encodings_spec(m, e, ctx):
+def bf16_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
     return m * ctx.two() ** ctx.real_val(BFloat16.mantissa_bits), e
 
 
@@ -237,7 +254,7 @@ def bf16_encodings(m_rounded: Node, e_rounded: Node):
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 
 
-def bf16_encode_spec(s, e, m, ctx):
+def bf16_encode_spec(s: UQ, e: Q, m: UQ, ctx) -> BFloat16:
     signed = sign_multiplier(ctx, s)
     finite_value = (
         signed

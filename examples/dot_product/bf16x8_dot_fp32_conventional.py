@@ -4,8 +4,17 @@ N = 4
 Wf = 30
 
 
-def dot_product_spec(a0, a1, a2, a3,
-                     b0, b1, b2, b3, ctx):
+def dot_product_spec(
+    a0: BFloat16(),
+    a1: BFloat16(),
+    a2: BFloat16(),
+    a3: BFloat16(),
+    b0: BFloat16(),
+    b1: BFloat16(),
+    b2: BFloat16(),
+    b3: BFloat16(),
+    ctx,
+) -> Float32():
     A = (a0, a1, a2, a3)
     B = (b0, b1, b2, b3)
 

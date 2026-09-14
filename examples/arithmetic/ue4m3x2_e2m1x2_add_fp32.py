@@ -1,7 +1,13 @@
 from zolotone import *
 
 
-def spec_ue4m3x2_e2m1x2_add_fp32(scale0, scale1, x0, x1, ctx):
+def spec_ue4m3x2_e2m1x2_add_fp32(
+    scale0: UE4M3(),
+    scale1: UE4M3(),
+    x0: E2M1(),
+    x1: E2M1(),
+    ctx,
+) -> Float32():
     nan_case = scale0.is_nan | scale1.is_nan
     term0_is_zero = scale0.is_zero | x0.is_zero
     term1_is_zero = scale1.is_zero | x1.is_zero

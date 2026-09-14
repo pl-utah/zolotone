@@ -2,7 +2,9 @@ from zolotone import *
 
 
 
-def spec_bf16_mult(x: bf16, y: bf16, ctx):
+def spec_bf16_mult(
+    x: BFloat16(), y: BFloat16(), ctx
+) -> BFloat16():
     invalid = (x.is_inf & y.is_zero) | (y.is_inf & x.is_zero)
     nan_case = x.is_nan | y.is_nan | invalid
 

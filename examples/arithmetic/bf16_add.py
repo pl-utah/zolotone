@@ -2,7 +2,9 @@ from zolotone import *
 
 
 
-def spec_bf16_add(x: bf16, y: bf16, ctx):
+def spec_bf16_add(
+    x: BFloat16(), y: BFloat16(), ctx
+) -> BFloat16():
     nan_case = (
         x.is_nan
         | y.is_nan

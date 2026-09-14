@@ -1,7 +1,7 @@
 from zolotone import *
 
 
-def spec_bf16_to_fp32(x: bf16, ctx):
+def spec_bf16_to_fp32(x: BFloat16(), ctx) -> Float32():
     return Cases(
         case(x.is_nan, fp32.nan(ctx)),
         case(x.is_ninf, fp32.ninf(ctx)),

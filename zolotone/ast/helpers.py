@@ -4,7 +4,11 @@ from .node import Node
 from .nodes import Op, Primitive
 
 
-@Primitive(name="Copy", spec=lambda x, ctx: x, c_inline=True)
+def copy_spec(x: DataType, ctx) -> DataType:
+    return x
+
+
+@Primitive(name="Copy", spec=copy_spec, c_inline=True)
 def Copy(x: Node) -> Node:
     return x
 
@@ -30,13 +34,21 @@ def _basic_get_item(x: Node, idx: int) -> Op:
     )
 
 def Tuple_get_item(x: Node, idx: int) -> Primitive:
-    @Primitive(name=f"Tuple_get_item_{idx}", spec=lambda x, ctx: x[idx], c_inline=True)
+    def get_item_spec(x: Tuple, ctx) -> DataType:
+        return x[idx]
+
+    @Primitive(name=f"Tuple_get_item_{idx}", spec=get_item_spec, c_inline=True)
     def impl(x: Node) -> Node:
         return _basic_get_item(x, idx)
     
     return impl(x)
 
-def if_then_else_spec(sel, in1, in0, ctx):
+def if_then_else_spec(
+    sel: DataType,
+    in1: DataType,
+    in0: DataType,
+    ctx,
+) -> DataType:
     branches_are_real = isinstance(in1, RealExpr) and isinstance(in0, RealExpr)
     branches_are_fp = (
         isinstance(in1, FPExpr)
