@@ -95,7 +95,7 @@ class DecodedE2M1(NamedTuple):
 
 
 def e2m1_decode_spec(
-    x: E2M1(),
+    x: E2M1,
     ctx,
 ) -> Tuple(
     UQ(1, 0),
@@ -119,7 +119,7 @@ def e2m1_pack_spec(
     e: UQ(2, 0),
     m: UQ(1, 0),
     ctx,
-) -> E2M1():
+) -> E2M1:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -185,7 +185,7 @@ def e2m1_decode(x: Node) -> DecodedE2M1:
     )
 
 
-def e2m1_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
+def e2m1_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     integer_m = m * ctx.two() ** ctx.real_val(E2M1.mantissa_bits)
     overflow = e > ctx.real_val(E2M1.max_finite_code)
     return (

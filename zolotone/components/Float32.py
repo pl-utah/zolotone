@@ -243,7 +243,7 @@ def fp32_decode(x: Node) -> DecodedFP32:
     )
 
 
-def fp32_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
+def fp32_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     return m * ctx.two() ** ctx.real_val(Float32.mantissa_bits), e
 
 

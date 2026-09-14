@@ -230,7 +230,7 @@ def bf16_decode(x: Node) -> DecodedBF16:
     )
 
 
-def bf16_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
+def bf16_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     return m * ctx.two() ** ctx.real_val(BFloat16.mantissa_bits), e
 
 

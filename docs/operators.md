@@ -23,13 +23,16 @@
 ### Specification dtype contracts
 
 Every specification passed to `Primitive` or `Composite` declares the dtypes
-of all implementation inputs and its implementation output. The `ctx`
-parameter is intentionally left unannotated because it is not an implementation
-input. Return annotations describe the implementation node's dtype, not the
-Python class of the symbolic expression returned by the specification.
+of all implementation inputs and its implementation output. Its final parameter
+is the specification context and can have any name. It may be left unannotated,
+in which case `SpecContext` is inferred, or explicitly annotated as
+`SpecContext`. It is not an implementation input. If the final parameter has
+any other annotation, the specification is rejected as missing its context.
+Return annotations describe the implementation node's dtype, not the Python
+class of the symbolic expression returned by the specification.
 
-A specification uses exactly one of two annotation modes. Exact mode uses
-descriptor instances and checks descriptor equality, including widths:
+A specification annotation can use a descriptor instance to require exact
+descriptor equality, including widths:
 
 ```python
 def fixed_spec(
@@ -40,18 +43,39 @@ def fixed_spec(
     ...
 ```
 
-Family mode uses descriptor classes and accepts any width in the declared
-families. This is appropriate when the result width depends on its inputs:
+Descriptor classes accept any width in the declared family. This is appropriate
+when the result width depends on its inputs:
 
 ```python
 def uq_add_spec(x: UQ, y: UQ, ctx) -> UQ:
     return x + y
 ```
 
-Use `DataType` in family mode for an input or output that intentionally accepts
-any descriptor family, as in a generic copy helper. Variadic annotations apply
-to every supplied argument. Exact instances and family classes cannot be mixed
-within one specification, and every non-`ctx` parameter plus the return must be
+Exact descriptors and family classes can be mixed in one specification; each
+annotation is checked independently:
+
+```python
+def mixed_spec(x: UQ, y: UQ(5, 6), ctx) -> Q:
+    ...
+```
+
+Tuple contracts must specify every item. Each item can independently be an
+exact descriptor, a descriptor family, or another populated tuple contract:
+
+```python
+def tuple_spec(
+    x: Tuple(UQ, Q(5, 6), Tuple(Bool, UQ(2, 0))),
+    ctx,
+) -> Tuple(UQ, Q):
+    ...
+```
+
+Bare `Tuple` annotations are rejected because they omit the tuple's arity and
+item contracts.
+
+Use `DataType` for an input or output that intentionally accepts any descriptor
+family, as in a generic copy helper. Variadic annotations apply to every
+supplied argument. Every implementation-input parameter plus the return must be
 annotated. Postponed and string annotations are resolved when the decorator is
 defined. Annotations constrain the implementation contract only: they never
 cast, resize, or create caller-visible variables.

@@ -205,7 +205,7 @@ def e5m2fnuz_decode(x: Node) -> DecodedE5M2FNUZ:
     )
 
 
-def e5m2fnuz_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
+def e5m2fnuz_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     integer_m = m * ctx.two() ** ctx.real_val(E5M2FNUZ.mantissa_bits)
     overflow = e > ctx.real_val(E5M2FNUZ.max_finite_code)
     return (

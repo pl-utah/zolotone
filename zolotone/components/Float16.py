@@ -282,7 +282,7 @@ def fp16_decode(x: Node) -> DecodedFP16:
     )
 
 
-def fp16_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
+def fp16_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     return m * ctx.two() ** ctx.real_val(Float16.mantissa_bits), e
 
 

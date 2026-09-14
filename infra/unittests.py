@@ -1268,6 +1268,28 @@ class TestEgglogRewriteRules(unittest.TestCase):
         self.assertEqual(report["status"], "unsat")
 
 
+class TestCppLowering(unittest.TestCase):
+    def test_jittable_entry_asserts_widened_inputs_without_masking(self):
+        bool_source = negate(Var("value", Bool())).to_cpp("check_bool")
+
+        self.assertIn("#include <cassert>", bool_source)
+        self.assertIn("assert(arg_0 >= 0 && arg_0 <= 1);", bool_source)
+        self.assertIn("return check_bool_impl(arg_0);", bool_source)
+
+    def test_nonjittable_entry_relies_on_exact_width_type(self):
+        source = negate(Var("value", Bool())).to_cpp(
+            "check_bool", jittable=False
+        )
+
+        self.assertNotIn("#include <cassert>", source)
+        self.assertNotIn("    assert(", source)
+        self.assertIn(
+            'extern "C" inline ac_uint<1> check_bool(ac_uint<1> arg_0)',
+            source,
+        )
+        self.assertIn("return check_bool_impl(arg_0);", source)
+
+
 class TestConstantFolding(unittest.TestCase):
     def assert_folded_value(self, node, descriptor_type, expected_val):
         self.assertIsNotNone(node.constant)
@@ -4886,7 +4908,7 @@ class TestE2M1Spec(unittest.TestCase):
         counts = {"norm": 0, "sub": 0, "zero": 0}
         names = tuple(counts)
 
-        def identity_spec(x: E2M1(), ctx) -> E2M1():
+        def identity_spec(x: E2M1, ctx) -> E2M1:
             return x
 
         @Composite(name="e2m1_pack_decode_roundtrip", spec=identity_spec)
@@ -5006,7 +5028,7 @@ class TestE2M1Spec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_saturating_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx) -> E2M1():
+        def spec(ctx) -> E2M1:
             return e2m1.encode(ctx.real_val(16), ctx)
 
         @Composite(name="e2m1_encode_saturation_proof", spec=spec)
@@ -8068,35 +8090,162 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         def unrelated(x: int, ctx) -> UQ:
             return x
 
-        def annotated_ctx(x: UQ, ctx: UQ) -> UQ:
+        def missing_context(x: UQ) -> UQ:
+            return x
+
+        def invalid_context_annotation(x: UQ, context: UQ) -> UQ:
             return x
 
         for name, spec, expected in (
             ("missing_input", missing_input, "parameter 'x'"),
             ("missing_return", missing_return, "return annotation"),
             ("unrelated", unrelated, "invalid annotation"),
-            ("annotated_ctx", annotated_ctx, "ctx is excluded"),
+            ("missing_context", missing_context, "missing a final SpecContext"),
+            (
+                "invalid_context_annotation",
+                invalid_context_annotation,
+                "missing a final SpecContext",
+            ),
         ):
             with self.subTest(name=name), self.assertRaisesRegex(
                 TypeError, f"{name}.*{expected}"
             ):
                 Primitive(name=name, spec=spec)
 
-    def test_declaration_rejects_mixed_exact_and_family_modes(self):
-        def mixed_input(x: UQ(2, 0), y: UQ, ctx) -> UQ:
-            return x + y
+    def test_final_context_parameter_can_have_any_name(self):
+        inferred_contexts = []
 
-        def mixed_return(x: UQ, ctx) -> UQ(2, 0):
+        def inferred_spec(x: UQ, context) -> UQ:
+            inferred_contexts.append(context)
             return x
 
+        @Primitive(name="inferred_context", spec=inferred_spec)
+        def inferred_context(x):
+            return x.copy()
+
+        inferred_node = inferred_context(Var("inferred", UQ(2, 0)))
+        inferred_ctx = SpecContext("inferred-context-name")
+        inferred_ctx.spec_of(inferred_node)
+        self.assertEqual(inferred_contexts, [inferred_ctx])
+
+        explicit_contexts = []
+
+        def explicit_spec(x: UQ, proof_context: SpecContext) -> UQ:
+            explicit_contexts.append(proof_context)
+            return x
+
+        @Primitive(name="explicit_context", spec=explicit_spec)
+        def explicit_context(x):
+            return x.copy()
+
+        explicit_node = explicit_context(Var("explicit", UQ(2, 0)))
+        explicit_ctx = SpecContext("explicit-context-name")
+        explicit_ctx.spec_of(explicit_node)
+        self.assertEqual(explicit_contexts, [explicit_ctx])
+
+    def test_mixed_exact_and_family_contracts_are_checked_per_annotation(self):
+        def mixed_spec(x: UQ, y: UQ(5, 6), ctx) -> Q:
+            return x + y
+
+        @Primitive(name="mixed_contract", spec=mixed_spec)
+        def mixed_contract(x, y):
+            del y
+            return uq_to_q(x)
+
+        node = mixed_contract(
+            Var("family", UQ(3, 2)),
+            Var("exact", UQ(5, 6)),
+        )
+        self.assertEqual(node.dtype, Q(4, 2))
+
+        with self.assertRaisesRegex(
+            TypeError, "Input 0.*mixed_contract.*expected.*UQ"
+        ):
+            mixed_contract(
+                Var("wrong_family", Q(3, 2)),
+                Var("exact", UQ(5, 6)),
+            )
+
+        with self.assertRaisesRegex(
+            TypeError, "Input 1.*mixed_contract.*expected UQ<5,6>"
+        ):
+            mixed_contract(
+                Var("family", UQ(3, 2)),
+                Var("wrong_width", UQ(5, 5)),
+            )
+
+    def test_mixed_contract_can_have_an_exact_return(self):
+        def mixed_return_spec(x: UQ, ctx) -> Q(4, 2):
+            return x
+
+        @Primitive(name="mixed_return", spec=mixed_return_spec)
+        def mixed_return(x):
+            return uq_to_q(x)
+
+        self.assertEqual(
+            mixed_return(Var("matching", UQ(3, 2))).dtype,
+            Q(4, 2),
+        )
+        with self.assertRaisesRegex(
+            TypeError, "mixed_return.*descriptor Q<3,2>.*expected Q<4,2>"
+        ):
+            mixed_return(Var("wrong_output_width", UQ(2, 2)))
+
+    def test_bare_tuple_contracts_are_rejected(self):
+        def bare_input(x: Tuple, ctx) -> UQ:
+            return x[0]
+
+        def bare_output(x: UQ, ctx) -> Tuple:
+            return (x,)
+
+        def nested_bare_tuple(x: Tuple(UQ, Tuple), ctx) -> UQ:
+            return x[0]
+
         for name, spec in (
-            ("mixed_input", mixed_input),
-            ("mixed_return", mixed_return),
+            ("bare_input", bare_input),
+            ("bare_output", bare_output),
+            ("nested_bare_tuple", nested_bare_tuple),
         ):
             with self.subTest(name=name), self.assertRaisesRegex(
-                TypeError, f"{name}.*mixes exact descriptor"
+                TypeError, f"{name}.*incomplete annotation.*bare Tuple"
             ):
-                Composite(name=name, spec=spec)
+                Primitive(name=name, spec=spec)
+
+    def test_tuple_contract_items_are_checked_recursively(self):
+        tuple_contract = Tuple(
+            UQ,
+            Q(5, 6),
+            Tuple(Bool, UQ(2, 0)),
+        )
+
+        def structured_spec(x: tuple_contract, ctx) -> tuple_contract:
+            return x
+
+        @Primitive(name="structured_tuple", spec=structured_spec)
+        def structured_tuple(x):
+            return x.copy()
+
+        matching_type = Tuple(
+            UQ(3, 2),
+            Q(5, 6),
+            Tuple(Bool(), UQ(2, 0)),
+        )
+        self.assertEqual(
+            structured_tuple(Var("matching", matching_type)).dtype,
+            matching_type,
+        )
+
+        mismatches = (
+            Tuple(Q(3, 2), Q(5, 6), Tuple(Bool(), UQ(2, 0))),
+            Tuple(UQ(3, 2), Q(5, 5), Tuple(Bool(), UQ(2, 0))),
+            Tuple(UQ(3, 2), Q(5, 6), Tuple(UQ(1, 0), UQ(2, 0))),
+            Tuple(UQ(3, 2), Q(5, 6)),
+        )
+        for index, dtype in enumerate(mismatches):
+            with self.subTest(index=index), self.assertRaisesRegex(
+                TypeError, "Input 0.*structured_tuple"
+            ):
+                structured_tuple(Var(f"mismatch_{index}", dtype))
 
     def test_exact_contract_rejects_wrong_width_and_family(self):
         def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
@@ -8173,24 +8322,23 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             output_contract(Var("x", UQ(2, 0)))
         self.assertEqual(len(implementation_calls), 1)
 
-    def test_variadic_family_contract_applies_to_every_argument(self):
-        def variadic_spec(*values: UQ, ctx) -> Tuple:
+    def test_variadic_specifications_are_rejected(self):
+        def variadic_spec(*values: UQ, ctx) -> Tuple(UQ, UQ):
             return tuple(values)
 
-        @Primitive(name="variadic_contract", spec=variadic_spec)
-        def variadic_contract(*values):
-            return make_Tuple(*values)
+        with self.assertRaisesRegex(
+            TypeError, "variadic_contract.*variadic specifications are not supported"
+        ):
+            Primitive(name="variadic_contract", spec=variadic_spec)
 
-        node = variadic_contract(
+    def test_make_tuple_generates_a_fixed_arity_specification(self):
+        node = make_Tuple(
             Var("first", UQ(2, 0)),
-            Var("second", UQ(1, 3)),
+            Var("second", Q(3, 1)),
         )
-        self.assertEqual(node.dtype, Tuple(UQ(2, 0), UQ(1, 3)))
-        with self.assertRaisesRegex(TypeError, "Input 1.*variadic_contract"):
-            variadic_contract(
-                Var("first", UQ(2, 0)),
-                Var("second", Q(2, 0)),
-            )
+
+        self.assertEqual(len(node.spec.__signature__.parameters), 3)
+        self.assertEqual(len(SpecContext("tuple").spec_of(node)), 2)
 
     def test_postponed_annotations_are_resolved(self):
         def postponed_spec(x, ctx):
@@ -8471,7 +8619,9 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertTrue(result["proved"])
 
     def test_nested_tuple_outputs_are_compared_recursively(self):
-        def identity_spec(x: Tuple, ctx) -> Tuple:
+        tuple_contract = Tuple(UQ, Tuple(Bool, UQ))
+
+        def identity_spec(x: tuple_contract, ctx) -> tuple_contract:
             del ctx
             return x
 

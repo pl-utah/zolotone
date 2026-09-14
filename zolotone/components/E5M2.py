@@ -213,7 +213,7 @@ def e5m2_decode(x: Node) -> DecodedE5M2:
     )
 
 
-def e5m2_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
+def e5m2_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     is_inf = e >= ctx.real_val(E5M2.inf_code)
     return (
         If(is_inf, ctx.zero(), m * ctx.two() ** ctx.real_val(E5M2.mantissa_bits)),

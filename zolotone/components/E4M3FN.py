@@ -212,7 +212,7 @@ def e4m3fn_decode(x: Node) -> DecodedE4M3FN:
     )
 
 
-def e4m3fn_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
+def e4m3fn_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     integer_m = m * ctx.two() ** ctx.real_val(E4M3FN.mantissa_bits)
     max_e = ctx.real_val(E4M3FN.max_finite_code)
     max_m = ctx.real_val(E4M3FN.max_finite_mantissa)

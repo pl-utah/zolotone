@@ -172,7 +172,7 @@ def q_aligner(x: Node,
     int_bits = int_aggr(x.dtype.int_bits, y.dtype.int_bits)
     frac_bits = frac_aggr(x.dtype.frac_bits, y.dtype.frac_bits)
 
-    def q_aligner_spec(x: Q, y: Q, ctx) -> Tuple:
+    def q_aligner_spec(x: Q, y: Q, ctx) -> Tuple(Q, Q):
         return x, y
 
     @Primitive(name="q_aligner", spec=q_aligner_spec)

@@ -1,5 +1,3 @@
-"""Fixed-point bounds for the reciprocal of a normalized significand."""
-
 from zolotone import *
 
 
@@ -13,10 +11,6 @@ def python_reciprocal(x, n, round_up) -> int:
     l = a // b
     u = l + 1 if r > 0 else l
     return u if round_up else l
-
-
-def reciprocal_value_spec(x: UQ, round_up: Bool, ctx) -> UQ:
-    return (ctx.one() + x) ** (-ctx.one())
 
 
 def _reciprocal_bound(x: Node, round_up: Node) -> Node:
@@ -52,18 +46,18 @@ def _reciprocal_bound(x: Node, round_up: Node) -> Node:
     )
 
 
+def reciprocal_value_spec(x: UQ(0,5), round_up: Bool, ctx) -> UQ(1,6):
+    return (ctx.one() + x) ** (-ctx.one())
+
 @Primitive(name="reciprocal", spec=reciprocal_value_spec)
 def reciprocal(x: Node, round_up: Node) -> Node:
     return _reciprocal_bound(x, round_up)
 
 
 if __name__ == "__main__":
-    n = 4
-    x = Var(name="x", dtype=UQ(0, n))
+    x = Var(name="x", dtype=UQ(0, 5))
     round_up = Var(name="round_up", dtype=Bool())
     design = reciprocal(x, round_up)
-
-    design.check_determinism()
 
     with open("examples/c_models/reciprocal.hpp", "w") as file:
         file.write(design.to_cpp())

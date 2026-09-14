@@ -46,7 +46,7 @@ class Node:
         if self in cache:
             return cache[self]
         inputs = [ctx.spec_of(arg) for arg in self.args]
-        output = self.spec(*inputs, ctx=ctx)
+        output = self.spec(*inputs, ctx)
         cache[self] = output
         return output
 

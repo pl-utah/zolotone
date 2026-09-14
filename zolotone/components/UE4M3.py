@@ -175,7 +175,7 @@ def ue4m3_decode(x: Node) -> DecodedUE4M3:
     )
 
 
-def ue4m3_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple:
+def ue4m3_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     integer_m = m * ctx.two() ** ctx.real_val(UE4M3.mantissa_bits)
     max_e = ctx.real_val(UE4M3.max_finite_code)
     max_m = ctx.real_val(UE4M3.max_finite_mantissa)

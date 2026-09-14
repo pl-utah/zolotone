@@ -34,7 +34,15 @@ def _basic_get_item(x: Node, idx: int) -> Op:
     )
 
 def Tuple_get_item(x: Node, idx: int) -> Primitive:
-    def get_item_spec(x: Tuple, ctx) -> DataType:
+    if not isinstance(x.dtype, Tuple):
+        raise TypeError(f"Expected a Tuple node, got {x.dtype}")
+    if idx >= len(x.dtype.items) or idx < 0:
+        raise IndexError(f"Index is out of range for tuple {str(x)}, given {str(idx)}")
+
+    input_type = x.dtype
+    output_type = x.dtype.items[idx]
+
+    def get_item_spec(x: input_type, ctx) -> output_type:
         return x[idx]
 
     @Primitive(name=f"Tuple_get_item_{idx}", spec=get_item_spec, c_inline=True)

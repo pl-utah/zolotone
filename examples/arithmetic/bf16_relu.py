@@ -1,7 +1,7 @@
 from zolotone import *
 
 
-def spec_bf16_relu(x: BFloat16(), ctx) -> BFloat16():
+def spec_bf16_relu(x: BFloat16, ctx) -> BFloat16:
     negative_case = x.sign.eq(ctx.one())
     nonnegative_case = x.sign.eq(ctx.zero())
 

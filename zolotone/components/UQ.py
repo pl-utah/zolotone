@@ -99,7 +99,7 @@ def uq_aligner(x: Node,
     _int_aggr = lambda arg: int_aggr(x.dtype.int_bits, y.dtype.int_bits) if int_aggr is not None else arg.dtype.int_bits
     _frac_aggr = lambda arg: frac_aggr(x.dtype.frac_bits, y.dtype.frac_bits) if frac_aggr is not None else arg.dtype.frac_bits
     
-    def uq_aligner_spec(x: UQ, y: UQ, ctx) -> Tuple:
+    def uq_aligner_spec(x: UQ, y: UQ, ctx) -> Tuple(UQ, UQ):
         return x, y
 
     @Primitive(name="uq_aligner", spec=uq_aligner_spec)
@@ -413,7 +413,7 @@ def uq_split(x: Node, idx: int) -> Node:
     hi_frac_bits = x_frac_bits - lo_frac_bits
     hi_int_bits = hi_width - hi_frac_bits
     
-    def spec(x: UQ, ctx) -> Tuple:
+    def spec(x: UQ, ctx) -> Tuple(UQ, UQ):
         lo = ctx.fresh_real("lo")
         hi = ctx.fresh_real("hi")
         

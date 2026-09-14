@@ -48,7 +48,7 @@ class _CppEmitter:
         )
         includes = ["#include <cstdint>"]
         if self.jittable:
-            includes.append("#include <array>")
+            includes.extend(["#include <array>", "#include <cassert>"])
         else:
             includes.extend([
                 "#include <tuple>",
@@ -257,16 +257,20 @@ class _CppEmitter:
         args: list[Var],
         return_type: DataType,
     ) -> str:
-        call_args = ", ".join(self._render_public_arg(arg) for arg in args)
+        call_args = ", ".join(arg.name for arg in args)
         wrapper_signature = self._signature(
             name=public_name,
             args=args,
             return_type=return_type,
         )
+        body = [
+            *self._public_width_assertions(args),
+            f"return {internal_name}({call_args});",
+        ]
         return "\n".join(
             [
                 f'extern "C" inline {wrapper_signature} {{',
-                f"    return {internal_name}({call_args});",
+                *(f"    {line}" for line in body),
                 "}",
             ]
         )
@@ -300,10 +304,15 @@ class _CppEmitter:
     def _mask_literal(self, bits: int) -> str:
         return str((1 << bits) - 1)
 
-    def _render_public_arg(self, arg: Var) -> str:
+    def _public_width_assertions(self, args: list[Var]) -> list[str]:
         if not self.jittable:
-            return arg.name
-        return f"({arg.name} & {self._mask_literal(arg.dtype.total_bits())})"
+            return []
+        return [
+            f"assert({arg.name} >= 0 && "
+            f"{arg.name} <= {self._mask_literal(arg.dtype.total_bits())});"
+            for arg in args
+            if not isinstance(arg.dtype, Tuple)
+        ]
     
     def _emit_temp(
         self,

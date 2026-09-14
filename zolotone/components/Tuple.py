@@ -1,5 +1,6 @@
 from ..types import *
 from ..ast import *
+from ..spec import SpecContext
 from ..utils import make_fixed_arguments
 
 
@@ -23,10 +24,24 @@ def basic_tuple_maker(*args) -> Op:
     )
 
 
-def make_tuple_spec(*args: DataType, ctx) -> Tuple:
-    return tuple(args)
-
-
-@Primitive(name="make_Tuple", spec=make_tuple_spec, c_inline=True)
 def make_Tuple(*args: Node) -> Node:
-    return basic_tuple_maker(*args)
+    if not all(isinstance(arg, Node) for arg in args):
+        bad_args = [type(arg).__name__ for arg in args if not isinstance(arg, Node)]
+        raise TypeError(f"make_Tuple arguments must be Node instances, got {bad_args}")
+
+    output_type = Tuple(*(arg.dtype for arg in args))
+
+    def make_tuple_spec(*values_and_ctx):
+        return tuple(values_and_ctx[:-1])
+
+    make_tuple_spec = make_fixed_arguments(
+        make_tuple_spec,
+        [arg.dtype for arg in args] + [SpecContext],
+        return_type=output_type,
+    )
+
+    @Primitive(name="make_Tuple", spec=make_tuple_spec, c_inline=True)
+    def impl(*values: Node) -> Node:
+        return basic_tuple_maker(*values)
+
+    return impl(*args)

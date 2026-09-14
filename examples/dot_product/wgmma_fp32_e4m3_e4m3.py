@@ -9,10 +9,10 @@ N = 4
 
 
 def spec_wgmma_fp32_e4m3_e4m3(
-    a0: E4M3FN(), a1: E4M3FN(), a2: E4M3FN(), a3: E4M3FN(),
-    b0: E4M3FN(), b1: E4M3FN(), b2: E4M3FN(), b3: E4M3FN(),
-    c: Float32(), ctx
-) -> Float32():
+    a0: E4M3FN, a1: E4M3FN, a2: E4M3FN, a3: E4M3FN,
+    b0: E4M3FN, b1: E4M3FN, b2: E4M3FN, b3: E4M3FN,
+    c: Float32, ctx,
+) -> Float32:
     operands = (a0, a1, a2, a3, b0, b1, b2, b3)
     any_nan = ormap(c.is_nan, *[value.is_nan for value in operands])
     finite_value = sum(

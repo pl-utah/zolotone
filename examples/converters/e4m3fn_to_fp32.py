@@ -1,7 +1,7 @@
 from zolotone import *
 
 
-def spec_e4m3fn_to_fp32(x: E4M3FN(), ctx) -> Float32():
+def spec_e4m3fn_to_fp32(x: E4M3FN, ctx) -> Float32:
     return Cases(
         case(x.is_nan, fp32.nan(ctx)),
         case(x.is_nzero, fp32.nzero(ctx)),

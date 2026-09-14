@@ -12,6 +12,15 @@ from .base import DataType, Value
 class Tuple(DataType[tuple]):
     items: tuple[DataType, ...]
 
+    def __new__(cls, *items: object):
+        if any(
+            isinstance(item, TuplePattern)
+            or (isinstance(item, type) and issubclass(item, DataType))
+            for item in items
+        ):
+            return TuplePattern(*items)
+        return super().__new__(cls)
+
     def __init__(self, *items: DataType):
         if not items:
             raise ValueError("Tuple cannot be empty")
@@ -89,6 +98,37 @@ class Tuple(DataType[tuple]):
 
     def __repr__(self) -> str:
         return f"Tuple<{', '.join(repr(item) for item in self.items)}>"
+
+    __str__ = __repr__
+
+
+@dataclass(frozen=True, init=False)
+class TuplePattern:
+    """Recursive tuple shape used only in specification dtype contracts."""
+
+    items: tuple[object, ...]
+
+    def __init__(self, *items: object):
+        if not items:
+            raise ValueError("Tuple contract cannot be empty")
+        if not all(
+            isinstance(item, (DataType, TuplePattern))
+            or (isinstance(item, type) and issubclass(item, DataType))
+            for item in items
+        ):
+            raise TypeError(
+                "Tuple contract items must be DataType descriptors, "
+                "DataType subclasses, or tuple contracts"
+            )
+        object.__setattr__(self, "items", tuple(items))
+
+    def __repr__(self) -> str:
+        def render(item: object) -> str:
+            if isinstance(item, type) and issubclass(item, DataType):
+                return item.__name__
+            return repr(item)
+
+        return f"Tuple<{', '.join(render(item) for item in self.items)}>"
 
     __str__ = __repr__
 

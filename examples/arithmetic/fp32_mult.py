@@ -1,7 +1,7 @@
 from zolotone import *
 
 
-def spec_fp32_mult(x: Float32(), y: Float32(), ctx) -> Float32():
+def spec_fp32_mult(x: Float32, y: Float32, ctx) -> Float32:
     invalid = (x.is_inf & y.is_zero) | (y.is_inf & x.is_zero)
     nan_case = x.is_nan | y.is_nan | invalid
     

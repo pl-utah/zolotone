@@ -3,6 +3,7 @@ import random
 import typing as tp
 
 from ..types import DataType, Value
+from ..types.tuple import Tuple, TuplePattern
 from ..utils import make_fixed_arguments
 from ..solver.report import (
     CheckResult,
@@ -21,8 +22,7 @@ CLowering = tp.Callable[[list[str], bool], str]
 
 class _SpecContract(tp.NamedTuple):
     signature: inspect.Signature
-    annotations: dict[str, DataType | type[DataType]]
-    exact: bool
+    annotations: dict[str, DataType | type[DataType] | TuplePattern]
     display_name: str
 
 
@@ -49,14 +49,10 @@ def _build_spec_contract(
             f"Specification {display_name} has no inspectable signature: {exc}"
         ) from exc
 
-    ctx_parameter = signature.parameters.get("ctx")
-    if (
-        ctx_parameter is not None
-        and ctx_parameter.annotation is not inspect.Parameter.empty
-    ):
+    parameters = list(signature.parameters.values())
+    if not parameters:
         raise TypeError(
-            f"Specification {display_name} annotation for 'ctx' is invalid: "
-            f"{ctx_parameter.annotation!r}; ctx is excluded from the dtype contract"
+            f"Specification {display_name} is missing a final SpecContext parameter"
         )
 
     try:
@@ -67,10 +63,33 @@ def _build_spec_contract(
             f"resolved: {getattr(spec, '__annotations__', {})!r}"
         ) from exc
 
-    contract_annotations: dict[str, DataType | type[DataType]] = {}
-    for parameter in signature.parameters.values():
-        if parameter.name == "ctx":
-            continue
+    for parameter in parameters:
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            raise TypeError(
+                f"Specification {display_name} uses variadic parameter "
+                f"{parameter.name!r}; variadic specifications are not supported"
+            )
+
+    ctx_param = parameters[-1]
+    ctx_annotation = resolved.get(ctx_param.name, ctx_param.annotation)
+    if (
+        ctx_param.kind is inspect.Parameter.KEYWORD_ONLY
+        or (
+            ctx_annotation is not inspect.Parameter.empty
+            and ctx_annotation is not SpecContext
+        )
+    ):
+        raise TypeError(
+            f"Specification {display_name} is missing a final SpecContext "
+            f"parameter; last parameter {ctx_param.name!r} has "
+            f"annotation {ctx_annotation!r}"
+        )
+
+    contract_annotations = {}
+    for parameter in parameters[:-1]:
         if parameter.annotation is inspect.Parameter.empty:
             raise TypeError(
                 f"Specification {display_name} is missing an annotation for "
@@ -87,44 +106,68 @@ def _build_spec_contract(
         "return", signature.return_annotation
     )
 
-    annotation_modes: set[str] = set()
     for annotation_name, annotation in contract_annotations.items():
-        if isinstance(annotation, DataType):
-            annotation_modes.add("exact")
-        elif isinstance(annotation, type) and issubclass(annotation, DataType):
-            annotation_modes.add("family")
-        else:
-            raise TypeError(
-                f"Specification {display_name} has invalid annotation for "
-                f"{annotation_name!r}: {annotation!r}; expected a DataType "
-                "descriptor or DataType subclass"
-            )
-
-    if len(annotation_modes) != 1:
-        rendered = ", ".join(
-            f"{annotation_name}={annotation!r}"
-            for annotation_name, annotation in contract_annotations.items()
-        )
-        raise TypeError(
-            f"Specification {display_name} mixes exact descriptor and dtype "
-            f"family annotations: {rendered}"
+        _validate_contract_annotation(
+            display_name,
+            annotation_name,
+            annotation,
         )
 
     return _SpecContract(
         signature=signature,
         annotations=contract_annotations,
-        exact=annotation_modes == {"exact"},
         display_name=display_name,
+    )
+
+
+def _validate_contract_annotation(
+    display_name: str,
+    annotation_name: str,
+    annotation: object,
+) -> None:
+    if isinstance(annotation, TuplePattern):
+        for index, item_annotation in enumerate(annotation.items):
+            _validate_contract_annotation(
+                display_name,
+                f"{annotation_name}[{index}]",
+                item_annotation,
+            )
+        return
+    if annotation is Tuple:
+        raise TypeError(
+            f"Specification {display_name} has incomplete annotation for "
+            f"{annotation_name!r}: bare Tuple does not specify its item types"
+        )
+    if isinstance(annotation, DataType):
+        return
+    if isinstance(annotation, type) and issubclass(annotation, DataType):
+        return
+    raise TypeError(
+        f"Specification {display_name} has invalid annotation for "
+        f"{annotation_name!r}: {annotation!r}; expected a DataType descriptor, "
+        "DataType subclass, or populated Tuple contract"
     )
 
 
 def _annotation_matches(
     dtype: DataType,
-    annotation: DataType | type[DataType],
-    *,
-    exact: bool,
+    annotation: DataType | type[DataType] | TuplePattern,
 ) -> bool:
-    return dtype == annotation if exact else isinstance(dtype, annotation)
+    if isinstance(annotation, TuplePattern):
+        return (
+            isinstance(dtype, Tuple)
+            and len(dtype.items) == len(annotation.items)
+            and all(
+                _annotation_matches(item_dtype, item_annotation)
+                for item_dtype, item_annotation in zip(
+                    dtype.items,
+                    annotation.items,
+                )
+            )
+        )
+    if isinstance(annotation, DataType):
+        return dtype == annotation
+    return isinstance(dtype, annotation)
 
 
 def _validate_spec_inputs(
@@ -140,26 +183,18 @@ def _validate_spec_inputs(
 
     marker = object()
     try:
-        bound = contract.signature.bind(*([marker] * len(args)), ctx=marker)
+        bound = contract.signature.bind(*([marker] * (len(args) + 1)))
     except TypeError as exc:
         raise TypeError(
             f"Arguments do not match specification {contract.display_name}: {exc}"
         ) from exc
 
     arg_index = 0
-    for parameter in contract.signature.parameters.values():
-        if parameter.name == "ctx":
-            continue
+    for parameter in list(contract.signature.parameters.values())[:-1]:
         annotation = contract.annotations[parameter.name]
-        supplied = bound.arguments.get(parameter.name, ())
-        count = (
-            len(supplied)
-            if parameter.kind is inspect.Parameter.VAR_POSITIONAL
-            else int(parameter.name in bound.arguments)
-        )
-        for _ in range(count):
+        if parameter.name in bound.arguments:
             dtype = args[arg_index].dtype
-            if not _annotation_matches(dtype, annotation, exact=contract.exact):
+            if not _annotation_matches(dtype, annotation):
                 raise TypeError(
                     f"Input {arg_index} to specification {contract.display_name} "
                     f"has descriptor {dtype!r}; expected {annotation!r}"
@@ -174,7 +209,7 @@ def _validate_spec_output(contract: _SpecContract, inner_tree: Node) -> None:
             f"{type(inner_tree).__name__}, expected Node"
         )
     annotation = contract.annotations["return"]
-    if not _annotation_matches(inner_tree.dtype, annotation, exact=contract.exact):
+    if not _annotation_matches(inner_tree.dtype, annotation):
         raise TypeError(
             f"Output from specification {contract.display_name} has descriptor "
             f"{inner_tree.dtype!r}; expected {annotation!r}"
@@ -281,7 +316,7 @@ def _check_determinism(
 
     def collect_spec(ctx):
         encoded_inputs = [special_encoding(value, ctx) for value in inputs]
-        return node.spec(*encoded_inputs, ctx=ctx)
+        return node.spec(*encoded_inputs, ctx)
 
     first_spec = _Spec("first_spec", collect_spec, partition_cases=True)
     second_spec = _Spec("second_spec", collect_spec)
@@ -397,7 +432,7 @@ class composite(Node):
                 special_encoding(value, ctx)
                 for value in inputs
             ]
-            return self.spec(*encoded_inputs, ctx=ctx)
+            return self.spec(*encoded_inputs, ctx)
 
         result = check_equivalence(
             _Spec("inner_spec", collect_inner),

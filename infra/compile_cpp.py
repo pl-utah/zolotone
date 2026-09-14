@@ -54,14 +54,8 @@ def _ctypes_abi_type(type_: DataType):
     return ctypes.c_uint64
 
 
-def _arg_mask(type_: DataType) -> str:
-    return str((1 << type_.total_bits()) - 1)
-
-
 def _wrapper_arg_expr(arg, idx: int, *, jittable: bool) -> str:
     expr = f"arg_{idx}"
-    if jittable:
-        expr = f"static_cast<{_cpp_abi_type(arg.dtype)}>({expr} & {_arg_mask(arg.dtype)})"
     lowered_type = _lowered_cpp_type(arg.dtype, jittable=jittable)
     return f"static_cast<{lowered_type}>({expr})"
 
