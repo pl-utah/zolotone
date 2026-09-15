@@ -4,13 +4,20 @@ from .node import Node
 from .nodes import Op, Primitive
 
 
-def copy_spec(x: DataType, ctx) -> DataType:
-    return x
-
-
-@Primitive(name="Copy", spec=copy_spec, c_inline=True)
 def Copy(x: Node) -> Node:
-    return x
+    if not isinstance(x, Node):
+        raise TypeError(f"Copy argument must be a Node, got {type(x).__name__}")
+
+    dtype = x.dtype
+
+    def copy_spec(x: dtype, ctx) -> dtype:
+        return x
+
+    @Primitive(name="Copy", spec=copy_spec, c_inline=True)
+    def impl(x: Node) -> Node:
+        return x
+
+    return impl(x)
 
 
 def _basic_get_item(x: Node, idx: int) -> Op:
@@ -51,12 +58,7 @@ def Tuple_get_item(x: Node, idx: int) -> Primitive:
     
     return impl(x)
 
-def if_then_else_spec(
-    sel: DataType,
-    in1: DataType,
-    in0: DataType,
-    ctx,
-) -> DataType:
+def _if_then_else_spec(sel, in1, in0, ctx):
     branches_are_real = isinstance(in1, RealExpr) and isinstance(in0, RealExpr)
     branches_are_fp = (
         isinstance(in1, FPExpr)
@@ -84,8 +86,33 @@ def if_then_else_spec(
         )
     return If(condition, in1, in0)
 
-@Primitive(name="if_then_else", spec=if_then_else_spec, c_inline=True)
 def if_then_else(sel: Node, in1: Node, in0: Node) -> Node:
-    from ..components.basics import basic_mux_2_1
-    assert in1.dtype == in0.dtype, "Non-deterministic type"
-    return basic_mux_2_1(sel=sel, in0=in0, in1=in1, out=in0.dtype)
+    args = (sel, in1, in0)
+    if not all(isinstance(arg, Node) for arg in args):
+        bad_args = [type(arg).__name__ for arg in args if not isinstance(arg, Node)]
+        raise TypeError(
+            f"if_then_else arguments must be Node instances, got {bad_args}"
+        )
+    if in1.dtype != in0.dtype:
+        raise TypeError(
+            "if_then_else branches must have matching descriptors, "
+            f"got {in1.dtype} and {in0.dtype}"
+        )
+
+    selector_type = sel.dtype
+    branch_type = in0.dtype
+
+    def spec(
+        sel: selector_type,
+        in1: branch_type,
+        in0: branch_type,
+        ctx,
+    ) -> branch_type:
+        return _if_then_else_spec(sel, in1, in0, ctx)
+
+    @Primitive(name="if_then_else", spec=spec, c_inline=True)
+    def impl(sel: Node, in1: Node, in0: Node) -> Node:
+        from ..components.basics import basic_mux_2_1
+        return basic_mux_2_1(sel=sel, in0=in0, in1=in1, out=branch_type)
+
+    return impl(sel, in1, in0)

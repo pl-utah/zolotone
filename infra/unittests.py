@@ -8192,6 +8192,33 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             mixed_return(Var("wrong_output_width", UQ(2, 2)))
 
+    def test_generic_helpers_derive_exact_contracts(self):
+        dtype = UQ(3, 2)
+        value = Var("value", dtype)
+
+        copied = Copy(value)
+        self.assertEqual(copied.spec.__annotations__["x"], dtype)
+        self.assertEqual(copied.spec.__annotations__["return"], dtype)
+
+        selected = if_then_else(Var("selector", Bool()), value, value.copy())
+        self.assertEqual(selected.spec.__annotations__["sel"], Bool())
+        self.assertEqual(selected.spec.__annotations__["in1"], dtype)
+        self.assertEqual(selected.spec.__annotations__["in0"], dtype)
+        self.assertEqual(selected.spec.__annotations__["return"], dtype)
+
+        tuple_node = make_Tuple(value, Var("signed", Q(4, 1)))
+        tuple_item = tuple_node[1]
+        self.assertEqual(tuple_item.spec.__annotations__["x"], tuple_node.dtype)
+        self.assertEqual(tuple_item.spec.__annotations__["return"], Q(4, 1))
+
+    def test_if_then_else_rejects_different_branch_descriptors(self):
+        with self.assertRaisesRegex(TypeError, "branches must have matching"):
+            if_then_else(
+                Var("selector", Bool()),
+                Var("narrow", UQ(3, 2)),
+                Var("wide", UQ(4, 2)),
+            )
+
     def test_bare_tuple_contracts_are_rejected(self):
         def bare_input(x: Tuple, ctx) -> UQ:
             return x[0]
