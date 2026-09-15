@@ -198,7 +198,7 @@ To inspect and verify the example designs directly:
 ```
 
 Each command builds the typed implementation model, prints its structure,
-checks it against the golden specification, and emits a C++ header.
+checks it against the golden specification, and emits a C++ source file.
 
 ## Docker design reports
 
@@ -267,8 +267,8 @@ operand scaling, or an optional accumulator enable.
 
 Run any model module directly—for example,
 `python -m examples.dot_product.wgmma_fp32_e4m3_e4m3`—to check it and emit its JIT and
-non-JIT headers under `examples/c_models/`. Generated headers are ignored by
-Git.
+non-JIT source files under `examples/c_models/`. Generated C++ source files are
+ignored by Git.
 
 ## Rival3 bridge
 

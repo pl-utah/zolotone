@@ -70,11 +70,11 @@ def compile_(node: Node, jittable: bool):
 
     tempdir = tempfile.TemporaryDirectory()
     temp_path = Path(tempdir.name)
-    header_path = temp_path / "lowered.hpp"
+    source_path = temp_path / "lowered.cpp"
     wrapper_path = temp_path / "wrapper.cpp"
     library_path = temp_path / "lowered.so"
 
-    header_path.write_text(source, encoding="utf-8")
+    source_path.write_text(source, encoding="utf-8")
     arg_decls = [
         f"{_cpp_abi_type(arg.dtype)} arg_{idx}"
         for idx, arg in enumerate(node.inner_args)
@@ -89,10 +89,10 @@ def compile_(node: Node, jittable: bool):
         "\n".join(
             [
                 "#include <cstdint>",
-                '#include "lowered.hpp"',
+                '#include "lowered.cpp"',
                 "",
                 f'extern "C" {return_type} {function_name}_entry({", ".join(arg_decls)}) {{',
-                f"    return static_cast<{return_type}>({function_name}({call_args}));",
+                f"    return static_cast<{return_type}>(Zolotone::{function_name}({call_args}));",
                 "}",
                 "",
             ]

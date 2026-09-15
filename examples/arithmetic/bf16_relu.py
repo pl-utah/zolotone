@@ -34,8 +34,8 @@ if __name__ == "__main__":
     relu.check_determinism()
     relu.check_spec()
 
-    with open("examples/c_models/bf16_relu_jit.hpp", "w") as file:
+    with open("examples/c_models/bf16_relu_jit.cpp", "w") as file:
         file.write(relu.to_cpp(jittable=True))
 
-    with open("examples/c_models/bf16_relu_no_jit.hpp", "w") as file:
+    with open("examples/c_models/bf16_relu_no_jit.cpp", "w") as file:
         file.write(relu.to_cpp(jittable=False))

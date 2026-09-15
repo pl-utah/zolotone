@@ -220,7 +220,7 @@ if __name__ == "__main__":
     output_directory = Path(__file__).resolve().parents[1] / "c_models"
     output_directory.mkdir(exist_ok=True)
     for jittable, suffix in ((True, "jit"), (False, "no_jit")):
-        (output_directory / f"wgmma_fp32_e5m2_e4m3_{suffix}.hpp").write_text(
+        (output_directory / f"wgmma_fp32_e5m2_e4m3_{suffix}.cpp").write_text(
             design.to_cpp(jittable=jittable), encoding="utf-8"
         )
 

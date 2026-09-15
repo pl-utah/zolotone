@@ -55,7 +55,6 @@ class _CppEmitter:
                 "#include <ac_int.h>",
             ])
         parts = [
-            "#pragma once",
             *includes,
             "",
         ]
@@ -65,7 +64,17 @@ class _CppEmitter:
                 "using ac_uint = ac_int<W, false>;",
                 "",
             ])
-        parts.extend(self._functions)
+        parts.extend([
+            "class Zolotone",
+            "{",
+            "public:",
+            *(
+                f"    {line}" if line else ""
+                for function in self._functions
+                for line in function.splitlines()
+            ),
+            "};",
+        ])
         return "\n".join(parts)
 
     def emit_function(self, root: Node, function_name: str) -> str:
@@ -269,7 +278,7 @@ class _CppEmitter:
         ]
         return "\n".join(
             [
-                f'extern "C" inline {wrapper_signature} {{',
+                f"static inline {wrapper_signature} {{",
                 *(f"    {line}" for line in body),
                 "}",
             ]

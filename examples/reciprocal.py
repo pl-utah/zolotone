@@ -59,7 +59,7 @@ if __name__ == "__main__":
     round_up = Var(name="round_up", dtype=Bool())
     design = reciprocal(x, round_up)
 
-    with open("examples/c_models/reciprocal.hpp", "w") as file:
+    with open("examples/c_models/reciprocal.cpp", "w") as file:
         file.write(design.to_cpp())
 
 

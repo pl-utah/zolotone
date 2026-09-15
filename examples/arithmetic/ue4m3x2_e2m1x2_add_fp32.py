@@ -130,13 +130,13 @@ if __name__ == "__main__":
     design.check_spec()
     
     with open(
-        "examples/c_models/ue4m3x2_e2m1x2_add_fp32_jit.hpp",
+        "examples/c_models/ue4m3x2_e2m1x2_add_fp32_jit.cpp",
         "w",
     ) as file:
         file.write(design.to_cpp(jittable=True))
     
     with open(
-        "examples/c_models/ue4m3x2_e2m1x2_add_fp32_no_jit.hpp",
+        "examples/c_models/ue4m3x2_e2m1x2_add_fp32_no_jit.cpp",
         "w",
     ) as file:
         file.write(design.to_cpp(jittable=False))

@@ -37,7 +37,7 @@ Special values follow these rules:
   [CUDA E2M1 conversion behavior](https://docs.nvidia.com/cuda/archive/12.8.0/cuda-math-api/cuda_math_api/group__CUDA__MATH__FP4__MISC.html).
 
 Running any module checks determinism and its specification, then emits JIT and
-non-JIT C++ headers under `examples/c_models/`:
+non-JIT C++ source files under `examples/c_models/`:
 
 ```sh
 python -m examples.converters.e5m2_to_fp32

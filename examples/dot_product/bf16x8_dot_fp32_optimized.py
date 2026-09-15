@@ -247,5 +247,5 @@ if __name__ == '__main__':
     design.print_tree(depth=1)
     report = design.check_spec()
     pprint(report)
-    with open("examples/c_models/bf16x8_dot_fp32_optimized.hpp", "w") as file:
+    with open("examples/c_models/bf16x8_dot_fp32_optimized.cpp", "w") as file:
         file.write(design.to_cpp())

@@ -3,7 +3,7 @@
 This directory is generated from `examples/arithmetic/fp32_add.py`.
 
 Files:
-- `fp32_adder_dut.hpp`: lowered C++ version of the current AST design
+- `fp32_adder_dut.cpp`: lowered C++ version of the current AST design
 - `fp32_adder_ref.hpp`: bit-level FP32 golden reference
 - `fp32_adder_dut_dpi.cpp`: DPI wrapper around the lowered C++ DUT model
 - `fp32_adder_ref_dpi.cpp`: DPI wrapper around the golden reference
