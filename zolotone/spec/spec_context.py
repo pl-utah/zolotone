@@ -249,8 +249,7 @@ class SpecContext:
             return assume, BoolLit(True)
         return None
     
-    def simplify(self) -> "SpecContext":
-        """Apply context learning and ordinary constant folding to a fixpoint."""
+    def _simplify_with_convergence(self) -> tuple["SpecContext", bool]:
         simplified = self.copy()
         learned_fact_count = sum(
             1
@@ -258,6 +257,7 @@ class SpecContext:
             for _ in _assumption_conjuncts(assume)
         )
         max_iterations = learned_fact_count + len(simplified.checks) + 1
+        converged = False
         for _ in range(max_iterations):
             anchored_literals = simplified._learned_literals_with_anchors()
             literal_replacements = {
@@ -294,6 +294,7 @@ class SpecContext:
                 for check in simplified.checks
             ]
             if new_assumes == simplified.assumes and new_checks == simplified.checks:
+                converged = True
                 break
             simplified.assumes = new_assumes
             simplified.checks = new_checks
@@ -308,7 +309,11 @@ class SpecContext:
             for check in simplified.checks
             if not identical_nodes(check, BoolLit(True))
         ]
-        return simplified
+        return simplified, converged
+
+    def simplify(self) -> "SpecContext":
+        """Apply context learning and ordinary constant folding to a fixpoint."""
+        return self._simplify_with_convergence()[0]
     
     def spec_of(self, node: Node):
         if not self._spec_cache_valid:
@@ -444,14 +449,16 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
             break
         seen_states.add(current_state)
 
-        simplified = current.simplify()
+        simplified, regular_converged = current._simplify_with_convergence()
         regular_state = _context_expression_state(simplified)
         rewritten = rival_trim_context(simplified)
         rewritten_state = _context_expression_state(rewritten)
         current = rewritten
         # Ordinary simplification already reached its own fixpoint. If Rival
         # then made no change, another identical combined pass cannot help.
-        if rewritten_state == regular_state or rewritten_state == current_state:
+        if (
+            regular_converged and rewritten_state == regular_state
+        ) or rewritten_state == current_state:
             break
     else:
         warnings.warn(f"Simplification did not saturate after {max_passes} passes for {ctx.name!r}", RuntimeWarning)

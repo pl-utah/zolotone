@@ -7207,7 +7207,7 @@ class TestPartialCasesVerification(unittest.TestCase):
         self.assertIs(ctx.case_partitions[0].value, output)
         self.assertEqual(ctx.copy().case_partitions, ctx.case_partitions)
 
-    def test_second_cases_is_rejected(self):
+    def test_multiple_cases_are_recorded(self):
         nested_ctx = SpecContext("nested-cases")
         first = nested_ctx.bool("first")
         second = nested_ctx.bool("second")
@@ -7216,12 +7216,13 @@ class TestPartialCasesVerification(unittest.TestCase):
             case(~first, nested_ctx.real_val(2)),
             ctx=nested_ctx,
         )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            Cases(
-                case(second, inner),
-                case(~second, nested_ctx.real_val(3)),
-                ctx=nested_ctx,
-            )
+        outer = Cases(
+            case(second, inner),
+            case(~second, nested_ctx.real_val(3)),
+            ctx=nested_ctx,
+        )
+        self.assertEqual(len(nested_ctx.case_partitions), 2)
+        self.assertIs(nested_ctx.case_partitions[-1].value, outer)
 
         independent_ctx = SpecContext("independent-cases")
         selector = independent_ctx.bool("selector")
@@ -7230,12 +7231,12 @@ class TestPartialCasesVerification(unittest.TestCase):
             case(~selector, independent_ctx.real_val(2)),
             ctx=independent_ctx,
         )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            Cases(
-                case(selector, independent_ctx.real_val(3)),
-                case(~selector, independent_ctx.real_val(4)),
-                ctx=independent_ctx,
-            )
+        Cases(
+            case(selector, independent_ctx.real_val(3)),
+            case(~selector, independent_ctx.real_val(4)),
+            ctx=independent_ctx,
+        )
+        self.assertEqual(len(independent_ctx.case_partitions), 2)
 
     def test_fp32_add_unknown_nan_path_splits_condition_flags_one_hot(self):
         base_ctx = SpecContext("partial-fp32-add")
@@ -7448,7 +7449,7 @@ class TestStdoutVerificationObserver(unittest.TestCase):
             ],
         )
         for rewrite_step in schedule[1:6:2]:
-            self.assertEqual(rewrite_step["iterations"], 6)
+            self.assertEqual(rewrite_step["iterations"], 7)
             self.assertEqual(
                 rewrite_step["scheduler"],
                 {"match_limit": 500_000, "ban_length": 1},
@@ -8679,19 +8680,21 @@ class TestSpecificationDeterminism(unittest.TestCase):
 
 
 class TestSolverApis(unittest.TestCase):
-    def test_fp32_multiplier_check_spec_rejects_multiple_cases(self):
+    def test_fp32_multiplier_inner_tree_collects_multiple_cases(self):
         multiplier = fp32_mult(
             Var(name="a", dtype=Float32()),
             Var(name="b", dtype=Float32()),
         )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            multiplier.check_spec(schedule=[{"tool": "simplify"}])
+        ctx = multiplier.ctx.copy()
+
+        result = ctx.spec_of(multiplier.inner_tree)
+
+        self.assertIsInstance(result, fp32)
+        self.assertGreater(len(ctx.case_partitions), 1)
 
     def _assert_dot_product_check_spec_with_two_zero_inputs(
         self,
         design_fn,
-        *,
-        expect_egglog,
     ):
         zero = BFloat16().Zero()
         one = BFloat16().from_fields(sign=0, exponent=127, mantissa=0)
@@ -8835,40 +8838,30 @@ class TestSolverApis(unittest.TestCase):
             ),
             proof_trace,
         )
-        if expect_egglog:
-            self.assertTrue(
-                any(
-                    report["tool"] == "egglog-rewrite"
-                    and report["checks_after"] < report["checks_before"]
-                    for report in proof_trace
-                ),
-                proof_trace,
-            )
 
-    def test_conventional_check_spec_rejects_multiple_cases(self):
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            self._assert_dot_product_check_spec_with_two_zero_inputs(
-                bf16x8_dot_fp32_conventional,
-                expect_egglog=False,
-            )
+    def test_conventional_check_spec_handles_multiple_cases(self):
+        self._assert_dot_product_check_spec_with_two_zero_inputs(
+            bf16x8_dot_fp32_conventional,
+        )
 
-    def test_optimized_check_spec_rejects_multiple_cases(self):
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            self._assert_dot_product_check_spec_with_two_zero_inputs(
-                bf16x8_dot_fp32_optimized,
-                expect_egglog=True,
-            )
+    def test_optimized_check_spec_handles_multiple_cases(self):
+        self._assert_dot_product_check_spec_with_two_zero_inputs(
+            bf16x8_dot_fp32_optimized,
+        )
 
-    def test_fp32_adder_inner_tree_rejects_multiple_cases(self):
+    def test_fp32_adder_inner_tree_collects_multiple_cases(self):
         adder = fp32_add(
             Var(name="a", dtype=Float32()),
             Var(name="b", dtype=Float32()),
         )
         ctx = adder.ctx.copy()
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            ctx.spec_of(adder.inner_tree)
 
-    def test_collecting_fp32_adder_inner_spec_rejects_multiple_cases(self):
+        result = ctx.spec_of(adder.inner_tree)
+
+        self.assertIsInstance(result, fp32)
+        self.assertGreater(len(ctx.case_partitions), 1)
+
+    def test_collecting_fp32_adder_inner_spec_keeps_multiple_cases(self):
         adder = fp32_add(
             Var(name="a", dtype=Float32()),
             Var(name="b", dtype=Float32()),
@@ -8882,16 +8875,21 @@ class TestSolverApis(unittest.TestCase):
 
         base_ctx = adder.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in adder.inner_args]
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            ast_case_split._collect_classified_spec(
-                ast_nodes._Spec(
-                    "inner_spec",
-                    lambda ctx: ctx.spec_of(adder.inner_tree),
-                ),
-                base_ctx=base_ctx,
-                inputs=inputs,
-                case_labels=labels,
-            )
+        ctx = ast_case_split._collect_classified_spec(
+            ast_nodes._Spec(
+                "inner_spec",
+                lambda ctx: ctx.spec_of(adder.inner_tree),
+            ),
+            base_ctx=base_ctx,
+            inputs=inputs,
+            case_labels=labels,
+        )
+
+        self.assertEqual(
+            ctx.name,
+            "fp32_add[arg0=inf,arg1=inf,inner_spec=norm]",
+        )
+        self.assertGreater(len(ctx.case_partitions), 1)
 
     def test_fp32_adder_inf_inf_cannot_have_normal_outer_spec(self):
         adder = fp32_add(
@@ -8996,33 +8994,6 @@ class TestSolverApis(unittest.TestCase):
             )
 
         self.assertIn("Unknown schedule tool rival_feasibility_check", str(raised.exception))
-
-    def test_fp32_adder_norm_sub_check_rejects_multiple_cases(self):
-        adder = fp32_add(
-            Var(name="a", dtype=Float32()),
-            Var(name="b", dtype=Float32()),
-        )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            adder.check_spec(
-                schedule=[{"tool": "simplify"}],
-            )
-
-    def test_fp32_adder_norm_check_rejects_multiple_cases(self):
-        adder = fp32_add(
-            Var(name="a", dtype=Float32()),
-            Var(name="b", dtype=Float32()),
-        )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            adder.check_spec(
-                schedule=[
-                    {"tool": "simplify"},
-                    {
-                        "tool": "egglog-rewrite",
-                        "iterations": 6,
-                        "scheduler": {"match_limit": 500_000, "ban_length": 1},
-                    },
-                ]
-            )
 
     def test_z3_check_eq_returns_single_report(self):
         ctx = SpecContext("z3-api")

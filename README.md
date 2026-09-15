@@ -128,9 +128,10 @@ and return `{"proved": bool, "proof_traces": [...]}`.
 When a specification directly returns `Cases`, verification splits each
 ordered branch by its output classification. If one of those partitions
 remains `unknown`, only input classification predicates referenced by that
-branch guard are split into true/false refinements. Multiple `Cases`
-expressions in one specification are not yet supported; other specifications use
-exhaustive input and output classification splitting.
+branch guard are split into true/false refinements. Specifications may collect
+multiple `Cases` expressions; case-driven verification uses a partition that
+directly produces an output and otherwise falls back to exhaustive input and
+output classification splitting.
 
 Classification cases run concurrently by default. Pass `max_workers=1` to
 `check_equivalence()`, `check_spec()`, or `check_determinism()` for serial
