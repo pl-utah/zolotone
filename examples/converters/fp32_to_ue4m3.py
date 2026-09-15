@@ -1,7 +1,7 @@
 from zolotone import *
 
 
-def spec_fp32_to_ue4m3(x: fp32, ctx):
+def spec_fp32_to_ue4m3(x: Float32, ctx) -> UE4M3:
     return Cases(
         case(x.is_nan, ue4m3.nan(ctx)),
         case(x.is_inf, ue4m3.encode(ctx.real_val(448), ctx)),

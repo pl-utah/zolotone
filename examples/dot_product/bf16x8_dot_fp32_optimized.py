@@ -7,7 +7,7 @@ N = 4
 Wf = 30
 
 
-def spec_est_global_shift(E_max, E_p, ctx):
+def spec_est_global_shift(E_max: UQ, E_p: UQ, ctx) -> UQ:
     return (E_max - E_p) * (ctx.two() ** ctx.real_val(s))
 
 @Primitive(name="_est_global_shift", spec=spec_est_global_shift)
@@ -19,7 +19,7 @@ def _est_global_shift(E_max: Node, E_p: Node) -> Node:
     )
 
 
-def spec_est_local_shift(E_trail, ctx):
+def spec_est_local_shift(E_trail: UQ, ctx) -> UQ:
     two = ctx.two()
     one = ctx.one()
     return (two ** ctx.real_val(s)) - one - E_trail
@@ -29,7 +29,7 @@ def _est_local_shift(E_trail: Node) -> Node:
     return basic_invert(x=E_trail, out=E_trail.dtype)
 
 
-def spec_prepend_ones(x, ctx):
+def spec_prepend_ones(x: UQ, ctx) -> UQ:
     two = ctx.two()
     one = ctx.one()
     real_s = ctx.real_val(s)
@@ -44,8 +44,11 @@ def _prepend_ones(x: Node) -> Node:
     )
 
 
-def dot_product_spec(a0, a1, a2, a3,
-                     b0, b1, b2, b3, ctx):
+def dot_product_spec(
+    a0: BFloat16, a1: BFloat16, a2: BFloat16, a3: BFloat16,
+    b0: BFloat16, b1: BFloat16, b2: BFloat16, b3: BFloat16,
+    ctx,
+) -> Float32:
     A = (a0, a1, a2, a3)
     B = (b0, b1, b2, b3)
 

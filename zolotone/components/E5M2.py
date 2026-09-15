@@ -97,7 +97,19 @@ class DecodedE5M2(NamedTuple):
     is_nan: Node
 
 
-def e5m2_decode_spec(x: e5m2, ctx):
+def e5m2_decode_spec(
+    x: E5M2,
+    ctx,
+) -> Tuple(
+    UQ(1, 0),
+    UQ(5, 0),
+    UQ(2, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+):
     decoded = x.decode()[1:]
     classification_count = len(x.classification_flags())
     fields = decoded[:-classification_count]
@@ -107,7 +119,12 @@ def e5m2_decode_spec(x: e5m2, ctx):
     )
 
 
-def e5m2_pack_spec(s, e, m, ctx):
+def e5m2_pack_spec(
+    s: UQ(1, 0),
+    e: UQ(5, 0),
+    m: UQ(2, 0),
+    ctx,
+) -> E5M2:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -196,7 +213,7 @@ def e5m2_decode(x: Node) -> DecodedE5M2:
     )
 
 
-def e5m2_encodings_spec(m, e, ctx):
+def e5m2_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     is_inf = e >= ctx.real_val(E5M2.inf_code)
     return (
         If(is_inf, ctx.zero(), m * ctx.two() ** ctx.real_val(E5M2.mantissa_bits)),
@@ -220,7 +237,7 @@ def e5m2_encodings(m_rounded: Node, e_rounded: Node):
     return make_Tuple(uq_fraction_to_integer(final_m), final_e)
 
 
-def e5m2_encode_spec(s, e, m, ctx):
+def e5m2_encode_spec(s: UQ, e: Q, m: UQ, ctx) -> E5M2:
     finite_value = (
         sign_multiplier(ctx, s)
         * m

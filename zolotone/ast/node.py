@@ -37,7 +37,12 @@ class Node:
         def compute(inputs: list[Value]) -> Value:
             self._dynamic_typecheck(inputs)
             raw_output = impl(*(value.raw for value in inputs))
-            return Value(self.dtype, raw_output)
+            try:
+                return Value(self.dtype, raw_output)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"Output from {self.name} is not valid for {self.dtype}: {exc}"
+                ) from exc
 
         self.impl = compute
         self._static_typecheck()
@@ -46,7 +51,7 @@ class Node:
         if self in cache:
             return cache[self]
         inputs = [ctx.spec_of(arg) for arg in self.args]
-        output = self.spec(*inputs, ctx=ctx)
+        output = self.spec(*inputs, ctx)
         cache[self] = output
         return output
 

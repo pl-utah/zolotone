@@ -1,7 +1,7 @@
 from zolotone import *
 
 
-def spec_e2m1_to_fp32(x: e2m1, ctx):
+def spec_e2m1_to_fp32(x: E2M1, ctx) -> Float32:
     return Cases(
         case(x.is_nzero, fp32.nzero(ctx)),
         case(x.is_finite, fp32.encode(x.value, ctx)),

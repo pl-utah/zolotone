@@ -94,7 +94,17 @@ class DecodedE2M1(NamedTuple):
     is_zero: Node
 
 
-def e2m1_decode_spec(x: e2m1, ctx):
+def e2m1_decode_spec(
+    x: E2M1,
+    ctx,
+) -> Tuple(
+    UQ(1, 0),
+    UQ(2, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+):
     decoded = x.decode()[1:]
     classification_count = len(x.classification_flags())
     fields = decoded[:-classification_count]
@@ -104,7 +114,12 @@ def e2m1_decode_spec(x: e2m1, ctx):
     )
 
 
-def e2m1_pack_spec(s, e, m, ctx):
+def e2m1_pack_spec(
+    s: UQ(1, 0),
+    e: UQ(2, 0),
+    m: UQ(1, 0),
+    ctx,
+) -> E2M1:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -170,7 +185,7 @@ def e2m1_decode(x: Node) -> DecodedE2M1:
     )
 
 
-def e2m1_encodings_spec(m, e, ctx):
+def e2m1_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     integer_m = m * ctx.two() ** ctx.real_val(E2M1.mantissa_bits)
     overflow = e > ctx.real_val(E2M1.max_finite_code)
     return (
@@ -197,7 +212,7 @@ def e2m1_encodings(m_rounded: Node, e_rounded: Node):
     return make_Tuple(final_m, final_e)
 
 
-def e2m1_encode_spec(s, e, m, ctx):
+def e2m1_encode_spec(s: UQ, e: Q, m: UQ, ctx) -> E2M1:
     finite_value = (
         sign_multiplier(ctx, s)
         * m

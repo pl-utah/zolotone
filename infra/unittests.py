@@ -1268,6 +1268,28 @@ class TestEgglogRewriteRules(unittest.TestCase):
         self.assertEqual(report["status"], "unsat")
 
 
+class TestCppLowering(unittest.TestCase):
+    def test_jittable_entry_asserts_widened_inputs_without_masking(self):
+        bool_source = negate(Var("value", Bool())).to_cpp("check_bool")
+
+        self.assertIn("#include <cassert>", bool_source)
+        self.assertIn("assert(arg_0 >= 0 && arg_0 <= 1);", bool_source)
+        self.assertIn("return check_bool_impl(arg_0);", bool_source)
+
+    def test_nonjittable_entry_relies_on_exact_width_type(self):
+        source = negate(Var("value", Bool())).to_cpp(
+            "check_bool", jittable=False
+        )
+
+        self.assertNotIn("#include <cassert>", source)
+        self.assertNotIn("    assert(", source)
+        self.assertIn(
+            'extern "C" inline ac_uint<1> check_bool(ac_uint<1> arg_0)',
+            source,
+        )
+        self.assertIn("return check_bool_impl(arg_0);", source)
+
+
 class TestConstantFolding(unittest.TestCase):
     def assert_folded_value(self, node, descriptor_type, expected_val):
         self.assertIsNotNone(node.constant)
@@ -4005,7 +4027,7 @@ class TestFloat16Spec(unittest.TestCase):
                 self.assertIs(decoded.is_nan, decoded[7])
 
     def test_fp16_pack_round_trips_in_python_and_cpp(self):
-        def identity_spec(x, ctx):
+        def identity_spec(x: Float16(), ctx) -> Float16():
             del ctx
             return x
 
@@ -4094,7 +4116,10 @@ class TestE4M3FNSpec(unittest.TestCase):
         self.assertEqual(counts, {"norm": 238, "sub": 14, "zero": 2, "nan": 2})
 
     def test_pack_decode_round_trip_in_python_and_jit_cpp(self):
-        @Composite(name="e4m3fn_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: E4M3FN(), ctx) -> E4M3FN():
+            return x
+
+        @Composite(name="e4m3fn_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = e4m3fn_decode(x)
             return e4m3fn_pack(decoded.sign, decoded.exponent, decoded.mantissa)
@@ -4234,7 +4259,7 @@ class TestE4M3FNSpec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_saturating_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx):
+        def spec(ctx) -> E4M3FN():
             return e4m3fn.encode(ctx.two() ** ctx.real_val(13), ctx)
 
         @Composite(name="e4m3fn_encode_saturation_proof", spec=spec)
@@ -4280,7 +4305,10 @@ class TestUE4M3Spec(unittest.TestCase):
                     UE4M3().from_fields(*fields)
 
     def test_exhaustive_decode_classification_values_and_pack_round_trip(self):
-        @Composite(name="ue4m3_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: UE4M3(), ctx) -> UE4M3():
+            return x
+
+        @Composite(name="ue4m3_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = ue4m3_decode(x)
             return ue4m3_pack(decoded.exponent, decoded.mantissa)
@@ -4523,7 +4551,10 @@ class TestE5M2Spec(unittest.TestCase):
         counts = {"norm": 0, "sub": 0, "zero": 0, "inf": 0, "nan": 0}
         names = tuple(counts)
 
-        @Composite(name="e5m2_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: E5M2(), ctx) -> E5M2():
+            return x
+
+        @Composite(name="e5m2_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = e5m2_decode(x)
             return e5m2_pack(decoded.sign, decoded.exponent, decoded.mantissa)
@@ -4645,7 +4676,7 @@ class TestE5M2Spec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_overflow_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx):
+        def spec(ctx) -> E5M2():
             return e5m2.encode(ctx.two() ** ctx.real_val(24), ctx)
 
         @Composite(name="e5m2_encode_overflow_proof", spec=spec)
@@ -4702,7 +4733,10 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         counts = {"norm": 0, "sub": 0, "zero": 0, "nan": 0}
         names = tuple(counts)
 
-        @Composite(name="e5m2fnuz_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: E5M2FNUZ(), ctx) -> E5M2FNUZ():
+            return x
+
+        @Composite(name="e5m2fnuz_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = e5m2fnuz_decode(x)
             return e5m2fnuz_pack(decoded.sign, decoded.exponent, decoded.mantissa)
@@ -4825,7 +4859,7 @@ class TestE5M2FNUZSpec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_saturating_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx):
+        def spec(ctx) -> E5M2FNUZ():
             return e5m2fnuz.encode(ctx.two() ** ctx.real_val(24), ctx)
 
         @Composite(name="e5m2fnuz_encode_saturation_proof", spec=spec)
@@ -4874,7 +4908,10 @@ class TestE2M1Spec(unittest.TestCase):
         counts = {"norm": 0, "sub": 0, "zero": 0}
         names = tuple(counts)
 
-        @Composite(name="e2m1_pack_decode_roundtrip", spec=lambda x, ctx: x)
+        def identity_spec(x: E2M1, ctx) -> E2M1:
+            return x
+
+        @Composite(name="e2m1_pack_decode_roundtrip", spec=identity_spec)
         def roundtrip(x):
             decoded = e2m1_decode(x)
             return e2m1_pack(decoded.sign, decoded.exponent, decoded.mantissa)
@@ -4991,7 +5028,7 @@ class TestE2M1Spec(unittest.TestCase):
             tempdir.cleanup()
 
     def test_saturating_encoder_determinism_and_specification_proofs(self):
-        def spec(ctx):
+        def spec(ctx) -> E2M1:
             return e2m1.encode(ctx.real_val(16), ctx)
 
         @Composite(name="e2m1_encode_saturation_proof", spec=spec)
@@ -7170,7 +7207,7 @@ class TestPartialCasesVerification(unittest.TestCase):
         self.assertIs(ctx.case_partitions[0].value, output)
         self.assertEqual(ctx.copy().case_partitions, ctx.case_partitions)
 
-    def test_second_cases_is_rejected(self):
+    def test_multiple_cases_are_recorded(self):
         nested_ctx = SpecContext("nested-cases")
         first = nested_ctx.bool("first")
         second = nested_ctx.bool("second")
@@ -7179,12 +7216,13 @@ class TestPartialCasesVerification(unittest.TestCase):
             case(~first, nested_ctx.real_val(2)),
             ctx=nested_ctx,
         )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            Cases(
-                case(second, inner),
-                case(~second, nested_ctx.real_val(3)),
-                ctx=nested_ctx,
-            )
+        outer = Cases(
+            case(second, inner),
+            case(~second, nested_ctx.real_val(3)),
+            ctx=nested_ctx,
+        )
+        self.assertEqual(len(nested_ctx.case_partitions), 2)
+        self.assertIs(nested_ctx.case_partitions[-1].value, outer)
 
         independent_ctx = SpecContext("independent-cases")
         selector = independent_ctx.bool("selector")
@@ -7193,12 +7231,12 @@ class TestPartialCasesVerification(unittest.TestCase):
             case(~selector, independent_ctx.real_val(2)),
             ctx=independent_ctx,
         )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            Cases(
-                case(selector, independent_ctx.real_val(3)),
-                case(~selector, independent_ctx.real_val(4)),
-                ctx=independent_ctx,
-            )
+        Cases(
+            case(selector, independent_ctx.real_val(3)),
+            case(~selector, independent_ctx.real_val(4)),
+            ctx=independent_ctx,
+        )
+        self.assertEqual(len(independent_ctx.case_partitions), 2)
 
     def test_fp32_add_unknown_nan_path_splits_condition_flags_one_hot(self):
         base_ctx = SpecContext("partial-fp32-add")
@@ -7411,7 +7449,7 @@ class TestStdoutVerificationObserver(unittest.TestCase):
             ],
         )
         for rewrite_step in schedule[1:6:2]:
-            self.assertEqual(rewrite_step["iterations"], 6)
+            self.assertEqual(rewrite_step["iterations"], 7)
             self.assertEqual(
                 rewrite_step["scheduler"],
                 {"match_limit": 500_000, "ban_length": 1},
@@ -8017,9 +8055,357 @@ class TestParallelClassificationVerification(unittest.TestCase):
             )
 
 
+class TestSpecificationDTypeContracts(unittest.TestCase):
+    def test_complete_exact_and_family_contracts_are_accepted(self):
+        def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        @Primitive(name="exact_contract", spec=exact_spec)
+        def exact_contract(x):
+            return x.copy()
+
+        exact_node = exact_contract(Var("exact", UQ(2, 0)))
+        self.assertEqual(exact_node.dtype, UQ(2, 0))
+
+        def family_spec(x: UQ, ctx) -> UQ:
+            return x
+
+        @Composite(name="family_contract", spec=family_spec)
+        def family_contract(x):
+            return x.copy()
+
+        for dtype in (UQ(1, 0), UQ(3, 7)):
+            with self.subTest(dtype=dtype):
+                self.assertEqual(
+                    family_contract(Var("family", dtype)).dtype,
+                    dtype,
+                )
+
+    def test_declaration_rejects_incomplete_and_invalid_annotations(self):
+        def missing_input(x, ctx) -> UQ:
+            return x
+
+        def missing_return(x: UQ, ctx):
+            return x
+
+        def unrelated(x: int, ctx) -> UQ:
+            return x
+
+        def missing_context(x: UQ) -> UQ:
+            return x
+
+        def invalid_context_annotation(x: UQ, context: UQ) -> UQ:
+            return x
+
+        for name, spec, expected in (
+            ("missing_input", missing_input, "parameter 'x'"),
+            ("missing_return", missing_return, "return annotation"),
+            ("unrelated", unrelated, "invalid annotation"),
+            ("missing_context", missing_context, "missing a final SpecContext"),
+            (
+                "invalid_context_annotation",
+                invalid_context_annotation,
+                "missing a final SpecContext",
+            ),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                TypeError, f"{name}.*{expected}"
+            ):
+                Primitive(name=name, spec=spec)
+
+    def test_final_context_parameter_can_have_any_name(self):
+        inferred_contexts = []
+
+        def inferred_spec(x: UQ, context) -> UQ:
+            inferred_contexts.append(context)
+            return x
+
+        @Primitive(name="inferred_context", spec=inferred_spec)
+        def inferred_context(x):
+            return x.copy()
+
+        inferred_node = inferred_context(Var("inferred", UQ(2, 0)))
+        inferred_ctx = SpecContext("inferred-context-name")
+        inferred_ctx.spec_of(inferred_node)
+        self.assertEqual(inferred_contexts, [inferred_ctx])
+
+        explicit_contexts = []
+
+        def explicit_spec(x: UQ, proof_context: SpecContext) -> UQ:
+            explicit_contexts.append(proof_context)
+            return x
+
+        @Primitive(name="explicit_context", spec=explicit_spec)
+        def explicit_context(x):
+            return x.copy()
+
+        explicit_node = explicit_context(Var("explicit", UQ(2, 0)))
+        explicit_ctx = SpecContext("explicit-context-name")
+        explicit_ctx.spec_of(explicit_node)
+        self.assertEqual(explicit_contexts, [explicit_ctx])
+
+    def test_mixed_exact_and_family_contracts_are_checked_per_annotation(self):
+        def mixed_spec(x: UQ, y: UQ(5, 6), ctx) -> Q:
+            return x + y
+
+        @Primitive(name="mixed_contract", spec=mixed_spec)
+        def mixed_contract(x, y):
+            del y
+            return uq_to_q(x)
+
+        node = mixed_contract(
+            Var("family", UQ(3, 2)),
+            Var("exact", UQ(5, 6)),
+        )
+        self.assertEqual(node.dtype, Q(4, 2))
+
+        with self.assertRaisesRegex(
+            TypeError, "Input 0.*mixed_contract.*expected.*UQ"
+        ):
+            mixed_contract(
+                Var("wrong_family", Q(3, 2)),
+                Var("exact", UQ(5, 6)),
+            )
+
+        with self.assertRaisesRegex(
+            TypeError, "Input 1.*mixed_contract.*expected UQ<5,6>"
+        ):
+            mixed_contract(
+                Var("family", UQ(3, 2)),
+                Var("wrong_width", UQ(5, 5)),
+            )
+
+    def test_mixed_contract_can_have_an_exact_return(self):
+        def mixed_return_spec(x: UQ, ctx) -> Q(4, 2):
+            return x
+
+        @Primitive(name="mixed_return", spec=mixed_return_spec)
+        def mixed_return(x):
+            return uq_to_q(x)
+
+        self.assertEqual(
+            mixed_return(Var("matching", UQ(3, 2))).dtype,
+            Q(4, 2),
+        )
+        with self.assertRaisesRegex(
+            TypeError, "mixed_return.*descriptor Q<3,2>.*expected Q<4,2>"
+        ):
+            mixed_return(Var("wrong_output_width", UQ(2, 2)))
+
+    def test_generic_helpers_derive_exact_contracts(self):
+        dtype = UQ(3, 2)
+        value = Var("value", dtype)
+
+        copied = Copy(value)
+        self.assertEqual(copied.spec.__annotations__["x"], dtype)
+        self.assertEqual(copied.spec.__annotations__["return"], dtype)
+
+        selected = if_then_else(Var("selector", Bool()), value, value.copy())
+        self.assertEqual(selected.spec.__annotations__["sel"], Bool())
+        self.assertEqual(selected.spec.__annotations__["in1"], dtype)
+        self.assertEqual(selected.spec.__annotations__["in0"], dtype)
+        self.assertEqual(selected.spec.__annotations__["return"], dtype)
+
+        tuple_node = make_Tuple(value, Var("signed", Q(4, 1)))
+        tuple_item = tuple_node[1]
+        self.assertEqual(tuple_item.spec.__annotations__["x"], tuple_node.dtype)
+        self.assertEqual(tuple_item.spec.__annotations__["return"], Q(4, 1))
+
+    def test_if_then_else_rejects_different_branch_descriptors(self):
+        with self.assertRaisesRegex(TypeError, "branches must have matching"):
+            if_then_else(
+                Var("selector", Bool()),
+                Var("narrow", UQ(3, 2)),
+                Var("wide", UQ(4, 2)),
+            )
+
+    def test_bare_tuple_contracts_are_rejected(self):
+        def bare_input(x: Tuple, ctx) -> UQ:
+            return x[0]
+
+        def bare_output(x: UQ, ctx) -> Tuple:
+            return (x,)
+
+        def nested_bare_tuple(x: Tuple(UQ, Tuple), ctx) -> UQ:
+            return x[0]
+
+        for name, spec in (
+            ("bare_input", bare_input),
+            ("bare_output", bare_output),
+            ("nested_bare_tuple", nested_bare_tuple),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                TypeError, f"{name}.*incomplete annotation.*bare Tuple"
+            ):
+                Primitive(name=name, spec=spec)
+
+    def test_tuple_contract_items_are_checked_recursively(self):
+        tuple_contract = Tuple(
+            UQ,
+            Q(5, 6),
+            Tuple(Bool, UQ(2, 0)),
+        )
+
+        def structured_spec(x: tuple_contract, ctx) -> tuple_contract:
+            return x
+
+        @Primitive(name="structured_tuple", spec=structured_spec)
+        def structured_tuple(x):
+            return x.copy()
+
+        matching_type = Tuple(
+            UQ(3, 2),
+            Q(5, 6),
+            Tuple(Bool(), UQ(2, 0)),
+        )
+        self.assertEqual(
+            structured_tuple(Var("matching", matching_type)).dtype,
+            matching_type,
+        )
+
+        mismatches = (
+            Tuple(Q(3, 2), Q(5, 6), Tuple(Bool(), UQ(2, 0))),
+            Tuple(UQ(3, 2), Q(5, 5), Tuple(Bool(), UQ(2, 0))),
+            Tuple(UQ(3, 2), Q(5, 6), Tuple(UQ(1, 0), UQ(2, 0))),
+            Tuple(UQ(3, 2), Q(5, 6)),
+        )
+        for index, dtype in enumerate(mismatches):
+            with self.subTest(index=index), self.assertRaisesRegex(
+                TypeError, "Input 0.*structured_tuple"
+            ):
+                structured_tuple(Var(f"mismatch_{index}", dtype))
+
+    def test_exact_contract_rejects_wrong_width_and_family(self):
+        def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        @Primitive(name="exact_inputs", spec=exact_spec)
+        def exact_inputs(x):
+            return x.copy()
+
+        for dtype in (UQ(3, 0), Q(2, 0)):
+            with self.subTest(dtype=dtype), self.assertRaisesRegex(
+                TypeError, "exact_inputs.*expected UQ<2,0>"
+            ):
+                exact_inputs(Var("x", dtype))
+
+    def test_family_contract_accepts_widths_and_rejects_other_families(self):
+        def family_spec(x: UQ, ctx) -> UQ:
+            return x
+
+        @Primitive(name="family_inputs", spec=family_spec)
+        def family_inputs(x):
+            return x.copy()
+
+        self.assertEqual(
+            family_inputs(Var("narrow", UQ(1, 0))).dtype,
+            UQ(1, 0),
+        )
+        self.assertEqual(
+            family_inputs(Var("wide", UQ(7, 5))).dtype,
+            UQ(7, 5),
+        )
+        with self.assertRaisesRegex(TypeError, "family_inputs.*expected.*UQ"):
+            family_inputs(Var("signed", Q(7, 5)))
+
+        def any_dtype_spec(x: DataType, ctx) -> DataType:
+            return x
+
+        @Primitive(name="any_dtype", spec=any_dtype_spec)
+        def any_dtype(x):
+            return x.copy()
+
+        for dtype in (UQ(2, 0), Q(3, 1), Float32()):
+            with self.subTest(any_dtype=dtype):
+                self.assertEqual(any_dtype(Var("any", dtype)).dtype, dtype)
+
+    def test_input_contract_is_checked_before_inner_var_allocation(self):
+        def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        @Primitive(name="preallocation_check", spec=exact_spec)
+        def preallocation_check(x):
+            return x.copy()
+
+        wrong_input = Var("wrong", UQ(3, 0))
+        with patch.object(ast_nodes, "Var", wraps=Var) as inner_var:
+            with self.assertRaisesRegex(TypeError, "preallocation_check"):
+                preallocation_check(wrong_input)
+        inner_var.assert_not_called()
+
+    def test_output_contract_is_checked_during_tree_construction(self):
+        implementation_calls = []
+
+        def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        @Primitive(name="output_contract", spec=exact_spec)
+        def output_contract(x):
+            implementation_calls.append(x)
+            return Const(UQ(3, 0).from_bits(0))
+
+        with self.assertRaisesRegex(
+            TypeError, "output_contract.*descriptor UQ<3,0>.*expected UQ<2,0>"
+        ):
+            output_contract(Var("x", UQ(2, 0)))
+        self.assertEqual(len(implementation_calls), 1)
+
+    def test_variadic_specifications_are_rejected(self):
+        def variadic_spec(*values: UQ, ctx) -> Tuple(UQ, UQ):
+            return tuple(values)
+
+        with self.assertRaisesRegex(
+            TypeError, "variadic_contract.*variadic specifications are not supported"
+        ):
+            Primitive(name="variadic_contract", spec=variadic_spec)
+
+    def test_default_specification_parameters_are_rejected(self):
+        sentinel = object()
+
+        def default_input(x: UQ = sentinel, ctx=sentinel) -> UQ:
+            return x
+
+        def default_context(x: UQ, ctx=sentinel) -> UQ:
+            return x
+
+        for name, spec, parameter in (
+            ("default_input", default_input, "x"),
+            ("default_context", default_context, "ctx"),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                TypeError,
+                f"{name}.*parameter {parameter!r}.*default value",
+            ):
+                Primitive(name=name, spec=spec)
+
+    def test_make_tuple_generates_a_fixed_arity_specification(self):
+        node = make_Tuple(
+            Var("first", UQ(2, 0)),
+            Var("second", Q(3, 1)),
+        )
+
+        self.assertEqual(len(node.spec.__signature__.parameters), 3)
+        self.assertEqual(len(SpecContext("tuple").spec_of(node)), 2)
+
+    def test_postponed_annotations_are_resolved(self):
+        def postponed_spec(x, ctx):
+            return x
+
+        postponed_spec.__annotations__ = {"x": "UQ", "return": "UQ"}
+
+        @Primitive(name="postponed_contract", spec=postponed_spec)
+        def postponed_contract(x):
+            return x.copy()
+
+        self.assertEqual(
+            postponed_contract(Var("x", UQ(4, 2))).dtype,
+            UQ(4, 2),
+        )
+
+
 class TestSpecificationDeterminism(unittest.TestCase):
     def test_check_spec_rejects_non_exhaustive_cases_before_equivalence(self):
-        def malformed_spec(x, ctx):
+        def malformed_spec(x: UQ, ctx) -> UQ:
             return Cases(
                 case(BoolLit(False), x),
                 ctx=ctx,
@@ -8036,7 +8422,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
     def test_deterministic_primitive_uses_same_inputs_for_both_spec_runs(self):
         seen_inputs = []
 
-        def deterministic_spec(x, ctx):
+        def deterministic_spec(x: UQ, ctx) -> UQ:
             seen_inputs.append(x)
             out = ctx.fresh_real("out")
             ctx.assume(out.eq(x + ctx.one()))
@@ -8063,7 +8449,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
     def test_fp_inputs_get_independent_special_encoding_per_spec_run(self):
         seen_inputs = []
 
-        def identity_spec(x, ctx):
+        def identity_spec(x: Float32(), ctx) -> Float32():
             del ctx
             seen_inputs.append(x)
             return x
@@ -8091,7 +8477,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         inner_inputs = []
         outer_inputs = []
 
-        def inner_spec(x, ctx):
+        def inner_spec(x: Float32(), ctx) -> Float32():
             del ctx
             inner_inputs.append(x)
             return x
@@ -8100,7 +8486,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         def inner_fp_identity(x):
             return x.copy()
 
-        def outer_spec(x, ctx):
+        def outer_spec(x: Float32(), ctx) -> Float32():
             del ctx
             outer_inputs.append(x)
             return x
@@ -8126,7 +8512,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertNotEqual(inner.value.on_false, outer.value.on_false)
 
     def test_underconstrained_primitive_is_not_deterministic(self):
-        def nondeterministic_spec(_x, ctx):
+        def nondeterministic_spec(_x: UQ, ctx) -> UQ:
             out = ctx.fresh_real("out")
             zero = ctx.zero()
             one = ctx.one()
@@ -8261,7 +8647,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertFalse(result["proved"])
 
     def test_composite_determinism_ignores_inner_proof_context(self):
-        def identity_spec(x, ctx):
+        def identity_spec(x: UQ, ctx) -> UQ:
             del ctx
             return x
 
@@ -8280,7 +8666,9 @@ class TestSpecificationDeterminism(unittest.TestCase):
         self.assertTrue(result["proved"])
 
     def test_nested_tuple_outputs_are_compared_recursively(self):
-        def identity_spec(x, ctx):
+        tuple_contract = Tuple(UQ, Tuple(Bool, UQ))
+
+        def identity_spec(x: tuple_contract, ctx) -> tuple_contract:
             del ctx
             return x
 
@@ -8305,7 +8693,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
     def test_output_shape_mismatch_raises_type_error(self):
         call_count = 0
 
-        def unstable_shape_spec(x, ctx):
+        def unstable_shape_spec(x: UQ, ctx) -> UQ:
             del ctx
             nonlocal call_count
             call_count += 1
@@ -8320,7 +8708,7 @@ class TestSpecificationDeterminism(unittest.TestCase):
             node.check_determinism(schedule=[{"tool": "simplify"}])
 
     def test_unobservable_nan_fields_do_not_make_spec_nondeterministic(self):
-        def nan_spec(ctx):
+        def nan_spec(ctx) -> Float32():
             out = fp32.fresh("out", ctx)
             ctx.assume(out.is_nan.eq(ctx.true()))
             return out
@@ -8338,19 +8726,21 @@ class TestSpecificationDeterminism(unittest.TestCase):
 
 
 class TestSolverApis(unittest.TestCase):
-    def test_fp32_multiplier_check_spec_rejects_multiple_cases(self):
+    def test_fp32_multiplier_inner_tree_collects_multiple_cases(self):
         multiplier = fp32_mult(
             Var(name="a", dtype=Float32()),
             Var(name="b", dtype=Float32()),
         )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            multiplier.check_spec(schedule=[{"tool": "simplify"}])
+        ctx = multiplier.ctx.copy()
+
+        result = ctx.spec_of(multiplier.inner_tree)
+
+        self.assertIsInstance(result, fp32)
+        self.assertGreater(len(ctx.case_partitions), 1)
 
     def _assert_dot_product_check_spec_with_two_zero_inputs(
         self,
         design_fn,
-        *,
-        expect_egglog,
     ):
         zero = BFloat16().Zero()
         one = BFloat16().from_fields(sign=0, exponent=127, mantissa=0)
@@ -8494,40 +8884,30 @@ class TestSolverApis(unittest.TestCase):
             ),
             proof_trace,
         )
-        if expect_egglog:
-            self.assertTrue(
-                any(
-                    report["tool"] == "egglog-rewrite"
-                    and report["checks_after"] < report["checks_before"]
-                    for report in proof_trace
-                ),
-                proof_trace,
-            )
 
-    def test_conventional_check_spec_rejects_multiple_cases(self):
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            self._assert_dot_product_check_spec_with_two_zero_inputs(
-                bf16x8_dot_fp32_conventional,
-                expect_egglog=False,
-            )
+    def test_conventional_check_spec_handles_multiple_cases(self):
+        self._assert_dot_product_check_spec_with_two_zero_inputs(
+            bf16x8_dot_fp32_conventional,
+        )
 
-    def test_optimized_check_spec_rejects_multiple_cases(self):
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            self._assert_dot_product_check_spec_with_two_zero_inputs(
-                bf16x8_dot_fp32_optimized,
-                expect_egglog=True,
-            )
+    def test_optimized_check_spec_handles_multiple_cases(self):
+        self._assert_dot_product_check_spec_with_two_zero_inputs(
+            bf16x8_dot_fp32_optimized,
+        )
 
-    def test_fp32_adder_inner_tree_rejects_multiple_cases(self):
+    def test_fp32_adder_inner_tree_collects_multiple_cases(self):
         adder = fp32_add(
             Var(name="a", dtype=Float32()),
             Var(name="b", dtype=Float32()),
         )
         ctx = adder.ctx.copy()
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            ctx.spec_of(adder.inner_tree)
 
-    def test_collecting_fp32_adder_inner_spec_rejects_multiple_cases(self):
+        result = ctx.spec_of(adder.inner_tree)
+
+        self.assertIsInstance(result, fp32)
+        self.assertGreater(len(ctx.case_partitions), 1)
+
+    def test_collecting_fp32_adder_inner_spec_keeps_multiple_cases(self):
         adder = fp32_add(
             Var(name="a", dtype=Float32()),
             Var(name="b", dtype=Float32()),
@@ -8541,16 +8921,21 @@ class TestSolverApis(unittest.TestCase):
 
         base_ctx = adder.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in adder.inner_args]
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            ast_case_split._collect_classified_spec(
-                ast_nodes._Spec(
-                    "inner_spec",
-                    lambda ctx: ctx.spec_of(adder.inner_tree),
-                ),
-                base_ctx=base_ctx,
-                inputs=inputs,
-                case_labels=labels,
-            )
+        ctx = ast_case_split._collect_classified_spec(
+            ast_nodes._Spec(
+                "inner_spec",
+                lambda ctx: ctx.spec_of(adder.inner_tree),
+            ),
+            base_ctx=base_ctx,
+            inputs=inputs,
+            case_labels=labels,
+        )
+
+        self.assertEqual(
+            ctx.name,
+            "fp32_add[arg0=inf,arg1=inf,inner_spec=norm]",
+        )
+        self.assertGreater(len(ctx.case_partitions), 1)
 
     def test_fp32_adder_inf_inf_cannot_have_normal_outer_spec(self):
         adder = fp32_add(
@@ -8656,33 +9041,6 @@ class TestSolverApis(unittest.TestCase):
 
         self.assertIn("Unknown schedule tool rival_feasibility_check", str(raised.exception))
 
-    def test_fp32_adder_norm_sub_check_rejects_multiple_cases(self):
-        adder = fp32_add(
-            Var(name="a", dtype=Float32()),
-            Var(name="b", dtype=Float32()),
-        )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            adder.check_spec(
-                schedule=[{"tool": "simplify"}],
-            )
-
-    def test_fp32_adder_norm_check_rejects_multiple_cases(self):
-        adder = fp32_add(
-            Var(name="a", dtype=Float32()),
-            Var(name="b", dtype=Float32()),
-        )
-        with self.assertRaisesRegex(NotImplementedError, "Multiple Cases"):
-            adder.check_spec(
-                schedule=[
-                    {"tool": "simplify"},
-                    {
-                        "tool": "egglog-rewrite",
-                        "iterations": 6,
-                        "scheduler": {"match_limit": 500_000, "ban_length": 1},
-                    },
-                ]
-            )
-
     def test_z3_check_eq_returns_single_report(self):
         ctx = SpecContext("z3-api")
         ctx.check(RealLit(1).eq(RealLit(1)))
@@ -8705,6 +9063,20 @@ class TestSolverApis(unittest.TestCase):
 
 
 class TestSignSpecs(unittest.TestCase):
+    def test_bit_operators_require_exact_one_bit_uq_descriptors(self):
+        bit = Var("bit", UQ(1, 0))
+
+        for operation in (bit_and, bit_or, bit_xor):
+            with self.subTest(operation=operation.__name__):
+                self.assertEqual(operation(bit, bit).dtype, UQ(1, 0))
+        self.assertEqual(bit_neg(bit).dtype, UQ(1, 0))
+
+        for dtype in (Bool(), Q(1, 0), UQ(0, 1)):
+            with self.subTest(dtype=dtype), self.assertRaisesRegex(
+                TypeError, "expected UQ<1,0>"
+            ):
+                bit_and(Var("invalid", dtype), bit)
+
     def test_bit_operator_specs_use_one_canonical_conditional_form(self):
         ctx = SpecContext("bit-operator-canonical")
         x = ctx.real("x")

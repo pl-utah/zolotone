@@ -70,7 +70,17 @@ class DecodedUE4M3(NamedTuple):
     is_nan: Node
 
 
-def ue4m3_decode_spec(x: ue4m3, ctx):
+def ue4m3_decode_spec(
+    x: UE4M3,
+    ctx,
+) -> Tuple(
+    UQ(4, 0),
+    UQ(3, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+    UQ(1, 0),
+):
     decoded = x.decode()[1:]
     classification_count = len(x.classification_flags())
     fields = decoded[:-classification_count]
@@ -80,7 +90,11 @@ def ue4m3_decode_spec(x: ue4m3, ctx):
     )
 
 
-def ue4m3_pack_spec(e, m, ctx):
+def ue4m3_pack_spec(
+    e: UQ(4, 0),
+    m: UQ(3, 0),
+    ctx,
+) -> UE4M3:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
@@ -161,7 +175,7 @@ def ue4m3_decode(x: Node) -> DecodedUE4M3:
     )
 
 
-def ue4m3_encodings_spec(m, e, ctx):
+def ue4m3_encodings_spec(m: UQ, e: UQ, ctx) -> Tuple(UQ, UQ):
     integer_m = m * ctx.two() ** ctx.real_val(UE4M3.mantissa_bits)
     max_e = ctx.real_val(UE4M3.max_finite_code)
     max_m = ctx.real_val(UE4M3.max_finite_mantissa)
@@ -205,7 +219,7 @@ def ue4m3_encodings(m_rounded: Node, e_rounded: Node):
     return make_Tuple(final_m, final_e)
 
 
-def ue4m3_encode_spec(e, m, ctx):
+def ue4m3_encode_spec(e: Q, m: UQ, ctx) -> UE4M3:
     finite_value = m * ctx.two() ** (e - ctx.real_val(UE4M3.exponent_bias))
     return ue4m3.encode(finite_value, ctx)
 

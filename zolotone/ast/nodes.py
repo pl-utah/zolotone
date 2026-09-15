@@ -1,7 +1,9 @@
+import inspect
 import random
 import typing as tp
 
 from ..types import DataType, Value
+from ..types.tuple import Tuple, TuplePattern
 from ..utils import make_fixed_arguments
 from ..solver.report import (
     CheckResult,
@@ -16,6 +18,207 @@ from ..spec import SpecContext, special_encoding
 
 
 CLowering = tp.Callable[[list[str], bool], str]
+
+
+class _SpecContract(tp.NamedTuple):
+    signature: inspect.Signature
+    annotations: dict[str, DataType | type[DataType] | TuplePattern]
+    display_name: str
+
+
+def _spec_display_name(name: str, spec: tp.Callable[..., tp.Any]) -> str:
+    function_name = getattr(
+        spec,
+        "__qualname__",
+        getattr(spec, "__name__", repr(spec)),
+    )
+    return f"{name!r} ({function_name})"
+
+
+def _build_spec_contract(
+    name: str,
+    spec: tp.Callable[..., tp.Any],
+) -> _SpecContract:
+    """Resolve and validate a Primitive/Composite dtype contract."""
+
+    display_name = _spec_display_name(name, spec)
+    try:
+        signature = inspect.signature(spec)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"Specification {display_name} has no inspectable signature: {exc}"
+        ) from exc
+
+    parameters = list(signature.parameters.values())
+    if not parameters:
+        raise TypeError(
+            f"Specification {display_name} is missing a final SpecContext parameter"
+        )
+
+    try:
+        resolved = tp.get_type_hints(spec)
+    except Exception as exc:
+        raise TypeError(
+            f"Specification {display_name} has an annotation that could not be "
+            f"resolved: {getattr(spec, '__annotations__', {})!r}"
+        ) from exc
+
+    for parameter in parameters:
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            raise TypeError(
+                f"Specification {display_name} uses variadic parameter "
+                f"{parameter.name!r}; variadic specifications are not supported"
+            )
+        if parameter.default is not inspect.Parameter.empty:
+            raise TypeError(
+                f"Specification {display_name} parameter {parameter.name!r} "
+                "has a default value; default parameters are not supported"
+            )
+
+    ctx_param = parameters[-1]
+    ctx_annotation = resolved.get(ctx_param.name, ctx_param.annotation)
+    if (
+        ctx_param.kind is inspect.Parameter.KEYWORD_ONLY
+        or (
+            ctx_annotation is not inspect.Parameter.empty
+            and ctx_annotation is not SpecContext
+        )
+    ):
+        raise TypeError(
+            f"Specification {display_name} is missing a final SpecContext "
+            f"parameter; last parameter {ctx_param.name!r} has "
+            f"annotation {ctx_annotation!r}"
+        )
+
+    contract_annotations = {}
+    for parameter in parameters[:-1]:
+        if parameter.annotation is inspect.Parameter.empty:
+            raise TypeError(
+                f"Specification {display_name} is missing an annotation for "
+                f"parameter {parameter.name!r}"
+            )
+        annotation = resolved.get(parameter.name, parameter.annotation)
+        contract_annotations[parameter.name] = annotation
+
+    if signature.return_annotation is inspect.Signature.empty:
+        raise TypeError(
+            f"Specification {display_name} is missing a return annotation"
+        )
+    contract_annotations["return"] = resolved.get(
+        "return", signature.return_annotation
+    )
+
+    for annotation_name, annotation in contract_annotations.items():
+        _validate_contract_annotation(
+            display_name,
+            annotation_name,
+            annotation,
+        )
+
+    return _SpecContract(
+        signature=signature,
+        annotations=contract_annotations,
+        display_name=display_name,
+    )
+
+
+def _validate_contract_annotation(
+    display_name: str,
+    annotation_name: str,
+    annotation: object,
+) -> None:
+    if isinstance(annotation, TuplePattern):
+        for index, item_annotation in enumerate(annotation.items):
+            _validate_contract_annotation(
+                display_name,
+                f"{annotation_name}[{index}]",
+                item_annotation,
+            )
+        return
+    if annotation is Tuple:
+        raise TypeError(
+            f"Specification {display_name} has incomplete annotation for "
+            f"{annotation_name!r}: bare Tuple does not specify its item types"
+        )
+    if isinstance(annotation, DataType):
+        return
+    if isinstance(annotation, type) and issubclass(annotation, DataType):
+        return
+    raise TypeError(
+        f"Specification {display_name} has invalid annotation for "
+        f"{annotation_name!r}: {annotation!r}; expected a DataType descriptor, "
+        "DataType subclass, or populated Tuple contract"
+    )
+
+
+def _annotation_matches(
+    dtype: DataType,
+    annotation: DataType | type[DataType] | TuplePattern,
+) -> bool:
+    if isinstance(annotation, TuplePattern):
+        return (
+            isinstance(dtype, Tuple)
+            and len(dtype.items) == len(annotation.items)
+            and all(
+                _annotation_matches(item_dtype, item_annotation)
+                for item_dtype, item_annotation in zip(
+                    dtype.items,
+                    annotation.items,
+                )
+            )
+        )
+    if isinstance(annotation, DataType):
+        return dtype == annotation
+    return isinstance(dtype, annotation)
+
+
+def _validate_spec_inputs(
+    contract: _SpecContract,
+    args: tuple[Node, ...],
+) -> None:
+    if not all(isinstance(arg, Node) for arg in args):
+        bad_args = [type(arg).__name__ for arg in args if not isinstance(arg, Node)]
+        raise TypeError(
+            f"Arguments to specification {contract.display_name} must be Node "
+            f"instances, got {bad_args}"
+        )
+
+    marker = object()
+    try:
+        bound = contract.signature.bind(*([marker] * (len(args) + 1)))
+    except TypeError as exc:
+        raise TypeError(
+            f"Arguments do not match specification {contract.display_name}: {exc}"
+        ) from exc
+
+    arg_index = 0
+    for parameter in list(contract.signature.parameters.values())[:-1]:
+        annotation = contract.annotations[parameter.name]
+        if parameter.name in bound.arguments:
+            dtype = args[arg_index].dtype
+            if not _annotation_matches(dtype, annotation):
+                raise TypeError(
+                    f"Input {arg_index} to specification {contract.display_name} "
+                    f"has descriptor {dtype!r}; expected {annotation!r}"
+                )
+            arg_index += 1
+
+
+def _validate_spec_output(contract: _SpecContract, inner_tree: Node) -> None:
+    if not isinstance(inner_tree, Node):
+        raise TypeError(
+            f"Implementation for specification {contract.display_name} returned "
+            f"{type(inner_tree).__name__}, expected Node"
+        )
+    annotation = contract.annotations["return"]
+    if not _annotation_matches(inner_tree.dtype, annotation):
+        raise TypeError(
+            f"Output from specification {contract.display_name} has descriptor "
+            f"{inner_tree.dtype!r}; expected {annotation!r}"
+        )
 
 
 class _Spec(tp.NamedTuple):
@@ -118,7 +321,7 @@ def _check_determinism(
 
     def collect_spec(ctx):
         encoded_inputs = [special_encoding(value, ctx) for value in inputs]
-        return node.spec(*encoded_inputs, ctx=ctx)
+        return node.spec(*encoded_inputs, ctx)
 
     first_spec = _Spec("first_spec", collect_spec, partition_cases=True)
     second_spec = _Spec("second_spec", collect_spec)
@@ -144,10 +347,13 @@ def Composite(
     c_inline: bool = False,
     c_lowering: tp.Optional[CLowering] = None,
 ):
+    contract = _build_spec_contract(name, spec)
+
     def wrapper1(impl: tp.Callable[..., Node]):
         def wrapper2(*args):
             return composite(
                 spec=spec,
+                spec_contract=contract,
                 impl=impl,
                 args=args,
                 name=name,
@@ -161,6 +367,7 @@ class composite(Node):
     def __init__(
         self,
         spec: tp.Callable[..., tp.Any],
+        spec_contract: _SpecContract,
         impl: tp.Callable[..., Node],
         args: list[Node],
         name: str,
@@ -170,6 +377,7 @@ class composite(Node):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
         self.ctx = SpecContext(name)
+        _validate_spec_inputs(spec_contract, args)
         self.inner_args = [
             Var(name=f"arg_{i}", dtype=x.dtype, constant=x.constant)
             for i, x in enumerate(args)
@@ -178,6 +386,8 @@ class composite(Node):
         recorder = SpecRecorder(self.ctx)
         with record_specs(recorder):
             self.inner_tree = impl(*self.inner_args)
+
+        _validate_spec_output(spec_contract, self.inner_tree)
         
         self._validate_components(name)
         
@@ -227,7 +437,7 @@ class composite(Node):
                 special_encoding(value, ctx)
                 for value in inputs
             ]
-            return self.spec(*encoded_inputs, ctx=ctx)
+            return self.spec(*encoded_inputs, ctx)
 
         result = check_equivalence(
             _Spec("inner_spec", collect_inner),
@@ -322,10 +532,13 @@ def Primitive(
     c_inline: bool = False,
     c_lowering: tp.Optional[CLowering] = None,
 ):
+    contract = _build_spec_contract(name, spec)
+
     def wrapper1(impl: tp.Callable[..., Node]):
         def wrapper2(*args):
             return primitive(
                 spec=spec,
+                spec_contract=contract,
                 impl=impl,
                 args=args,
                 name=name,
@@ -339,6 +552,7 @@ class primitive(Node):
     def __init__(
         self,
         spec: tp.Callable[..., tp.Any],
+        spec_contract: _SpecContract,
         impl: tp.Callable[..., Node],
         args: list[Node],
         name: str,
@@ -347,12 +561,15 @@ class primitive(Node):
     ):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
+        _validate_spec_inputs(spec_contract, args)
         self.inner_args = [
             Var(name=f"arg_{i}", dtype=x.dtype, constant=x.constant)
             for i, x in enumerate(args)
         ]
         
         self.inner_tree = impl(*self.inner_args)
+
+        _validate_spec_output(spec_contract, self.inner_tree)
         
         def impl_(*args):
             for var, arg in zip(self.inner_args, args):
