@@ -72,6 +72,11 @@ def _build_spec_contract(
                 f"Specification {display_name} uses variadic parameter "
                 f"{parameter.name!r}; variadic specifications are not supported"
             )
+        if parameter.default is not inspect.Parameter.empty:
+            raise TypeError(
+                f"Specification {display_name} parameter {parameter.name!r} "
+                "has a default value; default parameters are not supported"
+            )
 
     ctx_param = parameters[-1]
     ctx_annotation = resolved.get(ctx_param.name, ctx_param.annotation)

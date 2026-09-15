@@ -74,11 +74,12 @@ Bare `Tuple` annotations are rejected because they omit the tuple's arity and
 item contracts.
 
 Use `DataType` for an input or output that intentionally accepts any descriptor
-family, as in a generic copy helper. Variadic annotations apply to every
-supplied argument. Every implementation-input parameter plus the return must be
-annotated. Postponed and string annotations are resolved when the decorator is
-defined. Annotations constrain the implementation contract only: they never
-cast, resize, or create caller-visible variables.
+family, as in a generic copy helper. Specifications have fixed arity: variadic
+and default-valued parameters are rejected. Every implementation-input
+parameter plus the return must be annotated. Postponed and string annotations
+are resolved when the decorator is defined. Annotations constrain the
+implementation contract only: they never cast, resize, or create caller-visible
+variables.
 
 ### Public API
 

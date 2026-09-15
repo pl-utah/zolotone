@@ -8332,6 +8332,25 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             Primitive(name="variadic_contract", spec=variadic_spec)
 
+    def test_default_specification_parameters_are_rejected(self):
+        sentinel = object()
+
+        def default_input(x: UQ = sentinel, ctx=sentinel) -> UQ:
+            return x
+
+        def default_context(x: UQ, ctx=sentinel) -> UQ:
+            return x
+
+        for name, spec, parameter in (
+            ("default_input", default_input, "x"),
+            ("default_context", default_context, "ctx"),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                TypeError,
+                f"{name}.*parameter {parameter!r}.*default value",
+            ):
+                Primitive(name=name, spec=spec)
+
     def test_make_tuple_generates_a_fixed_arity_specification(self):
         node = make_Tuple(
             Var("first", UQ(2, 0)),
