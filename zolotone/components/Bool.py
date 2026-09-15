@@ -4,7 +4,7 @@ from ..ast import *
 from ..egglog import *
 from ..spec import *
 
-def negate_spec(x: Bool(), ctx) -> Bool():
+def negate_spec(x: Bool, ctx) -> Bool:
     return ~x
 
 

@@ -9063,6 +9063,20 @@ class TestSolverApis(unittest.TestCase):
 
 
 class TestSignSpecs(unittest.TestCase):
+    def test_bit_operators_require_exact_one_bit_uq_descriptors(self):
+        bit = Var("bit", UQ(1, 0))
+
+        for operation in (bit_and, bit_or, bit_xor):
+            with self.subTest(operation=operation.__name__):
+                self.assertEqual(operation(bit, bit).dtype, UQ(1, 0))
+        self.assertEqual(bit_neg(bit).dtype, UQ(1, 0))
+
+        for dtype in (Bool(), Q(1, 0), UQ(0, 1)):
+            with self.subTest(dtype=dtype), self.assertRaisesRegex(
+                TypeError, "expected UQ<1,0>"
+            ):
+                bit_and(Var("invalid", dtype), bit)
+
     def test_bit_operator_specs_use_one_canonical_conditional_form(self):
         ctx = SpecContext("bit-operator-canonical")
         x = ctx.real("x")

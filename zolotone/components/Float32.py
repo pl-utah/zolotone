@@ -102,7 +102,7 @@ class DecodedFP32(NamedTuple):
 
 
 def fp32_decode_spec(
-    x: Float32(),
+    x: Float32,
     ctx,
 ) -> Tuple(
     UQ(1, 0),
@@ -128,7 +128,7 @@ def fp32_pack_spec(
     e: UQ(8, 0),
     m: UQ(23, 0),
     ctx,
-) -> Float32():
+) -> Float32:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()

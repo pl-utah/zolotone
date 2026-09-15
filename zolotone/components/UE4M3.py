@@ -71,7 +71,7 @@ class DecodedUE4M3(NamedTuple):
 
 
 def ue4m3_decode_spec(
-    x: UE4M3(),
+    x: UE4M3,
     ctx,
 ) -> Tuple(
     UQ(4, 0),
@@ -94,7 +94,7 @@ def ue4m3_pack_spec(
     e: UQ(4, 0),
     m: UQ(3, 0),
     ctx,
-) -> UE4M3():
+) -> UE4M3:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()

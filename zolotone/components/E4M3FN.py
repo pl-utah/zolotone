@@ -96,7 +96,7 @@ class DecodedE4M3FN(NamedTuple):
 
 
 def e4m3fn_decode_spec(
-    x: E4M3FN(),
+    x: E4M3FN,
     ctx,
 ) -> Tuple(
     UQ(1, 0),
@@ -121,7 +121,7 @@ def e4m3fn_pack_spec(
     e: UQ(4, 0),
     m: UQ(3, 0),
     ctx,
-) -> E4M3FN():
+) -> E4M3FN:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()

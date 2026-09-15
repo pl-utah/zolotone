@@ -98,7 +98,7 @@ class DecodedE5M2(NamedTuple):
 
 
 def e5m2_decode_spec(
-    x: E5M2(),
+    x: E5M2,
     ctx,
 ) -> Tuple(
     UQ(1, 0),
@@ -124,7 +124,7 @@ def e5m2_pack_spec(
     e: UQ(5, 0),
     m: UQ(2, 0),
     ctx,
-) -> E5M2():
+) -> E5M2:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()

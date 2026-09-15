@@ -116,7 +116,7 @@ class DecodedFP16(NamedTuple):
 
 
 def fp16_decode_spec(
-    x: Float16(),
+    x: Float16,
     ctx,
 ) -> Tuple(
     UQ(1, 0),
@@ -142,7 +142,7 @@ def fp16_pack_spec(
     e: UQ(5, 0),
     m: UQ(10, 0),
     ctx,
-) -> Float16():
+) -> Float16:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()

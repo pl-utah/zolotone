@@ -102,7 +102,7 @@ class DecodedBF16(NamedTuple):
 
 
 def bf16_decode_spec(
-    x: BFloat16(),
+    x: BFloat16,
     ctx,
 ) -> Tuple(
     UQ(1, 0),
@@ -128,7 +128,7 @@ def bf16_pack_spec(
     e: UQ(8, 0),
     m: UQ(7, 0),
     ctx,
-) -> BFloat16():
+) -> BFloat16:
     zero = ctx.zero()
     one = ctx.one()
     two = ctx.two()
