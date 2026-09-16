@@ -1737,6 +1737,13 @@ class TestConstantFolding(unittest.TestCase):
 
 
 class TestBasicOperators(unittest.TestCase):
+    def test_lossless_component_whitelist_is_conservative(self):
+        from zolotone.components import LOSSLESS_COMPONENTS
+
+        self.assertIn(uq_add, LOSSLESS_COMPONENTS)
+        self.assertIn(uq_mul, LOSSLESS_COMPONENTS)
+        self.assertNotIn(uq_resize, LOSSLESS_COMPONENTS)
+
     def test_output_dtype_is_metadata_not_a_graph_input(self):
         x = Var("x", dtype=UQ(3, 0))
         y = Var("y", dtype=UQ(3, 0))
@@ -8064,6 +8071,52 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
 
 class TestSpecificationDTypeContracts(unittest.TestCase):
+    def test_autogenerate_accepts_exact_input_contract(self):
+        captured = {}
+
+        def spec(x: UQ(3, 2), ctx) -> UQ:
+            captured["x"] = x
+            captured["ctx"] = ctx
+            return x
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = Autogenerate(name="generated_identity", spec=spec)
+
+        self.assertIsNone(result)
+        self.assertIn("generated_identity", output.getvalue())
+        self.assertIsInstance(captured["x"], RealExpr)
+        self.assertIsInstance(captured["ctx"], SpecContext)
+
+    def test_autogenerate_rejects_non_exact_input_contract(self):
+        def spec(x: UQ, ctx) -> UQ:
+            return x
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "input parameter 'x' must have an exact DataType descriptor",
+        ):
+            Autogenerate(name="generic_identity", spec=spec)
+
+    def test_get_spec_ast_returns_original_input_types(self):
+        from zolotone.ast.autogen import get_spec_ast
+
+        def spec(x: UQ(2, 3), y: Q(4, 1), ctx) -> Q:
+            del ctx
+            return x + y
+
+        contract = ast_nodes._build_spec_contract("typed_add", spec)
+        spec_ast, spec_input_types = get_spec_ast(spec, contract)
+
+        self.assertIsInstance(spec_ast, Add)
+        self.assertEqual(
+            spec_input_types,
+            {
+                spec_ast.lhs: UQ(2, 3),
+                spec_ast.rhs: Q(4, 1),
+            },
+        )
+
     def test_complete_exact_and_family_contracts_are_accepted(self):
         def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
             return x

@@ -359,6 +359,7 @@ def q_lshift(x: Node, n: Node) -> Node:
 
 # Assumes that x is positive
 def q_to_uq_spec(x: Q, ctx) -> UQ:
+    ctx.check(x >= ctx.zero())
     return x
 
 
