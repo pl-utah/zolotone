@@ -32,8 +32,9 @@ class _CppEmitter:
         self._functions: list[str] = []
 
     def emit_cpp(self, root: Node, function_name: str) -> str:
-        public_name = self._make_name(function_name)
-        internal_name = self._make_name(f"{public_name}_impl")
+        # public_name = self._make_name(function_name)
+        public_name = self._make_name("zolotone")
+        internal_name = self._make_name(function_name)
         self.emit_function(root=root, function_name=internal_name)
         self._functions.append(
             self._render_public_wrapper(
