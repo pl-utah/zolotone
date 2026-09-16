@@ -12,3 +12,4 @@ ac_types/
 *.hpp
 target/
 crates/*/target/
+examples/c_models/
