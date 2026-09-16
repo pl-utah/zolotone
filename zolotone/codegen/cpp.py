@@ -15,7 +15,6 @@ class CppLoweringError(RuntimeError):
 @dataclass(frozen=True)
 class _CppValue:
     expr: str
-    tuple_items: tuple["_CppValue", ...] | None = None
 
 
 # Helper object for lowering one function at a time
@@ -33,8 +32,6 @@ class _CppEmitter:
         self._functions: list[str] = []
 
     def emit_cpp(self, root: Node, function_name: str) -> str:
-        if isinstance(root.dtype, Tuple):
-            raise CppLoweringError("Tuple-typed entry points are not supported in C++ lowering")
         public_name = self._make_name(function_name)
         internal_name = self._make_name(f"{public_name}_impl")
         self.emit_function(root=root, function_name=internal_name)
@@ -121,10 +118,7 @@ class _CppEmitter:
         return "\n".join([signature + f" {{  // {root.name}", indented_body, "}"])
 
     def _should_inline(self, node: Node) -> bool:
-        return isinstance(node, (primitive, composite)) and (
-            node.c_inline
-            or isinstance(node.dtype, Tuple)  # FOR NOW. SOME TROUBLES WIT JIT AND ARRAYS - JUST INLINE EVERY TUPLE
-        )
+        return isinstance(node, (primitive, composite)) and node.c_inline
 
     def _lower(
         self,
@@ -195,16 +189,7 @@ class _CppEmitter:
         raise CppLoweringError(f"Unsupported node type: {type(node).__name__}")
 
     def _lower_const(self, value: Value) -> _CppValue:
-        tuple_items = None
-        if isinstance(value.dtype, Tuple):
-            tuple_items = tuple(
-                self._lower_const(Value(item_type, item_raw))
-                for item_raw, item_type in zip(value.raw, value.dtype.items)
-            )
-        return _CppValue(
-            expr=self._const_expr(value),
-            tuple_items=tuple_items,
-        )
+        return _CppValue(expr=self._const_expr(value))
 
     def _const_expr(self, value: Value) -> str:
         if isinstance(value.dtype, Tuple):
@@ -234,22 +219,8 @@ class _CppEmitter:
 
         lowered_args = [self._lower(arg, env, ctx) for arg in node.args]
 
-        # Skipping tuple creation
-        if node.name.startswith("_basic_get_item_"):
-            source = lowered_args[0]
-            if source.tuple_items is not None:
-                idx = int(node.name.rsplit("_", 1)[1])
-                return source.tuple_items[idx]
-
         lowered_arg_exprs = [arg.expr for arg in lowered_args]
         expr = self._cast(node.dtype, node.c_lowering(lowered_arg_exprs, self.jittable))
-
-        # Skipping tuple creation
-        if node.name.startswith("basic_tuple_maker_"):
-            return _CppValue(
-                expr=expr,
-                tuple_items=tuple(lowered_args),
-            )
 
         return self._emit_temp(node.dtype, expr, node.name, ctx)
     
