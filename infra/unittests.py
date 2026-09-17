@@ -8151,16 +8151,16 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertIsInstance(generated.inner_tree, Var)
         self.assertEqual(generated.dtype, UQ(2, 0))
 
-    def test_autogenerate_converter_cycle_reaches_fixpoint(self):
+    def test_autogenerate_uses_contracted_widening_factory(self):
         def spec(x: UQ(2, 0), ctx) -> Q(4, 0):
             del ctx
             return x
 
-        with self.assertRaisesRegex(
-            TypeError,
-            "search reached a fixpoint",
-        ):
-            Autogenerate("generated_unreachable_width", spec)
+        generated = Autogenerate("generated_widened_conversion", spec)
+
+        self.assertEqual(generated.dtype, Q(4, 0))
+        self.assertEqual(generated.inner_tree.name, "uq_to_q")
+        self.assertEqual(generated.inner_tree.args[0].name, "uq_zero_extend")
 
     def test_autogenerate_matches_registered_non_arithmetic_components(self):
         def negate_spec(x: Q(3, 0), ctx) -> Q:
@@ -8182,13 +8182,15 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(compared.inner_tree.name, "uq_lt")
         self.assertEqual(zero.inner_tree.name, "uq_is_zero")
 
-    def test_autogenerate_unsupported_spec_reaches_fixpoint(self):
+    def test_autogenerate_unsupported_spec_reaches_search_limit(self):
+        from zolotone.ast import autogen as ast_autogen
+
         def spec(x: UQ(2, 0), ctx) -> UQ:
             return x ** ctx.two()
 
-        with self.assertRaisesRegex(
+        with patch.object(ast_autogen, "MAX_SEARCH_DEPTH", 2), self.assertRaisesRegex(
             TypeError,
-            "Cannot lower specification.*search reached a fixpoint",
+            "search reached the maximum depth of 2",
         ):
             Autogenerate("generated_pow", spec)
 

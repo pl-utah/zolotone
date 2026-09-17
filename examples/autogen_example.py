@@ -25,10 +25,10 @@ def spec5(x: UQ(2,0), ctx) -> UQ:
 def spec6(x: Q(2,0), ctx) -> Q(4,0):
     return x + ctx.one()
 
-def spec7(x: Q(3,0), y: Bool) -> Q(3,0):
+def spec7(x: Q(3,0), y: Bool(), ctx) -> Q(3,0):
     return If(y.eq(ctx.false()), x, ctx.one())
 
-def spec8(x: Q(3,0)) -> Q:
+def spec8(x: Q(3,0), ctx) -> Q:
     return x + ctx.real_val(2.5)
 
 Autogenerate(name="spec1", spec=spec1).print_tree(depth=1)
@@ -43,7 +43,12 @@ except TypeError:
     pass
 Autogenerate(name="spec5", spec=spec5).print_tree(depth=1)
 Autogenerate(name="spec6", spec=spec6).print_tree(depth=1)
-Autogenerate(name="spec7", spec=spec7).print_tree(depth=1)
-Autogenerate(name="spec8", spec=spec8).print_tree(depth=1)
-
+try:
+    Autogenerate(name="spec7", spec=spec7)
+except TypeError:
+    pass
+try:
+    Autogenerate(name="spec8", spec=spec8)
+except TypeError:
+    pass
 

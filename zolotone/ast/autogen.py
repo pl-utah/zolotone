@@ -21,6 +21,9 @@ class _Candidate(tp.NamedTuple):
     depth: int
 
 
+MAX_SEARCH_DEPTH = 30
+
+
 def reject_untyped_inputs(contract: _SpecContract):
     input_parameters = list(contract.signature.parameters.values())[:-1]
     for parameter in input_parameters:
@@ -164,6 +167,7 @@ def search_lower_spec_to_impl(
                 )
                 for parameter in component_parameters
             ]
+            component_name = component_contract.display_name
             if any(not pool for pool in input_pools):
                 continue
 
@@ -176,7 +180,7 @@ def search_lower_spec_to_impl(
                 try:
                     node = component(*(argument.node for argument in arguments))
                     component_ctx = SpecContext(
-                        f"autogen candidate {component_contract.display_name}"
+                        f"autogen candidate {component_name}"
                     )
                     candidate_spec = node.spec(
                         *(argument.spec for argument in arguments),
@@ -211,6 +215,12 @@ def search_lower_spec_to_impl(
                 f"Cannot lower specification {spec_ast!r} to "
                 f"{return_annotation!r}; search reached a fixpoint after "
                 f"depth {depth} with {len(states)} candidate states"
+            )
+        if depth == MAX_SEARCH_DEPTH:
+            raise TypeError(
+                f"Cannot lower specification {spec_ast!r} to "
+                f"{return_annotation!r}; search reached the maximum depth "
+                f"of {MAX_SEARCH_DEPTH} with {len(states)} candidate states"
             )
 
         candidates.extend(generated)

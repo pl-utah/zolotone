@@ -364,6 +364,7 @@ def Composite(
         return wrapper2
     return wrapper1
 
+
 class composite(Node):
     def __init__(
         self,
