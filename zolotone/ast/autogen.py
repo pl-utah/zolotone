@@ -5,7 +5,6 @@ from ..spec.spec_ast import (
     BoolExpr,
     BoolLit,
     BoolVar,
-    If,
     RealLit,
     RealExpr,
     RealVar,
@@ -13,6 +12,7 @@ from ..spec.spec_ast import (
     children,
 )
 from ..spec.spec_context import SpecContext
+from ..solver import check_equivalence
 from ..types import Bool, DataType, Q, UQ
 from .node import Node
 from .nodes import (
@@ -132,37 +132,55 @@ def check_spec_feasibility(
             ctx.assume(spec_input <= ctx.real_val(max_bound))
 
     return_annotation = contract.annotations["return"]
-    if return_annotation is not UQ and not isinstance(return_annotation, (Q, UQ)):
-        print("feasibility output format is not supported:", return_annotation)
+    # Output checks
+    if return_annotation is Bool or isinstance(return_annotation, Bool):
+        if not isinstance(spec_ast, BoolExpr):
+            raise TypeError(
+                f"Specification returning {return_annotation!r} must produce "
+                f"a Boolean expression, got {type(spec_ast).__name__}"
+            )
+        # At this point there is nothing to check
         return
-    if isinstance(spec_ast, BoolExpr):
-        result_value = If(spec_ast, ctx.one(), ctx.zero())
-    elif isinstance(spec_ast, RealExpr):
-        result_value = spec_ast
-    else:
-        raise TypeError(
-            f"Specification returning {return_annotation!r} must produce "
-            f"a real or Boolean expression, got {type(spec_ast).__name__}"
-        )
 
-    # TODO: tuples at input/output?
-    if return_annotation is UQ:
-        result_fits = result_value >= ctx.zero()
+    elif return_annotation in (Q, UQ) or isinstance(return_annotation, (Q, UQ)):
+        if not isinstance(spec_ast, RealExpr):
+            raise TypeError(
+                f"Specification returning {return_annotation!r} must produce "
+                f"a real expression, got {type(spec_ast).__name__}"
+            )
+        # If output is just Q - there is nothing to check for feasibility really
+        if return_annotation is Q:
+            return
+        # If output is UQ - we can check that output is non-negative
+        if return_annotation is UQ:
+            result_fits = spec_ast >= ctx.zero()
+        # If it is UQ/Q with bit-widths - we can check that range covers all outputs
+        else:
+            min_bound, max_bound = _fixed_point_real_bounds(return_annotation)
+            result_fits = (spec_ast >= ctx.real_val(min_bound)) & (
+                spec_ast <= ctx.real_val(max_bound)
+            )
     else:
-        min_bound, max_bound = _fixed_point_real_bounds(return_annotation)
-        result_fits = (result_value >= ctx.real_val(min_bound)) & (
-            result_value <= ctx.real_val(max_bound)
+        raise NotImplementedError(
+            "Not supporting",
+            return_annotation,
+            "output format for feasibility check",
         )
-
-    from ..rival import rival_trim_context
 
     ctx.check(result_fits)
     range_ctx = ctx.copy(checks=[result_fits])
-    # TODO: It is okay for now
-    if rival_trim_context(range_ctx).checks:
+    status, _proof_trace = check_equivalence(
+        range_ctx,
+        schedule=[
+            {"tool": "simplify"},
+            {"tool": "z3", "timeout_ms": 10_000},
+        ],
+    )
+    if status != "unsat":
         raise TypeError(
             f"Specification result range does not fit {return_annotation!r}"
         )
+    return
 
 
 def search_lower_spec_to_impl(

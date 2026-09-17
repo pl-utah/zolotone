@@ -8173,7 +8173,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             del ctx
             return x < y
 
-        def zero_spec(x: UQ(2, 0), ctx) -> UQ:
+        def zero_spec(x: UQ(2, 0), ctx) -> Bool():
             return x.eq(ctx.zero())
 
         def bool_equal_spec(x: Bool(), y: Bool(), ctx) -> Bool:
@@ -8187,8 +8187,24 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertEqual(negated.inner_tree.name, "q_neg")
         self.assertEqual(compared.inner_tree.name, "uq_lt")
-        self.assertEqual(zero.inner_tree.name, "uq_is_zero")
+        self.assertEqual(zero.inner_tree.name, "uq_eq")
         self.assertEqual(bool_equal.inner_tree.name, "bool_eq")
+
+    def test_autogenerate_rejects_return_expression_category_mismatch(self):
+        def numeric_annotation(x: UQ(2, 0), ctx) -> UQ:
+            return x.eq(ctx.zero())
+
+        def boolean_annotation(x: UQ(2, 0), ctx) -> Bool():
+            del ctx
+            return x
+
+        with self.assertRaisesRegex(TypeError, "must produce a real expression"):
+            Autogenerate("numeric_annotation", numeric_annotation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "must produce a Boolean expression",
+        ):
+            Autogenerate("boolean_annotation", boolean_annotation)
 
     def test_autogenerate_lowers_conditionals(self):
         def choose_spec(
@@ -8234,6 +8250,16 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             "result range does not fit",
         ):
             Autogenerate("generated_generic_unsigned", spec)
+
+    def test_autogenerate_uses_relational_assumption_for_result_range(self):
+        def spec(x: UQ(3, 0), y: UQ(1, 0), ctx) -> UQ:
+            ctx.assume(x - y >= ctx.zero())
+            return x - y
+
+        generated = Autogenerate("generated_assumed_subtraction", spec)
+
+        self.assertEqual(generated.inner_tree.name, "uq_sub")
+        self.assertEqual(generated.dtype, UQ(4, 0))
 
     def test_autogenerate_unsupported_spec_reaches_search_limit(self):
         from zolotone.ast import autogen as ast_autogen
