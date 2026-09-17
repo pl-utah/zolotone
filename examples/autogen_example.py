@@ -29,7 +29,15 @@ def spec7(x: Q(3,0), y: Bool(), ctx) -> Q(3,0):
     return If(y.eq(ctx.false()), x, ctx.one())
 
 def spec8(x: Q(3,0), ctx) -> Q:
+    y = ctx.fresh_real('x')
+    return x + ctx.real_val(2) + y
+
+def spec9(x: Q(3,0), ctx) -> Q:
     return x + ctx.real_val(2.5)
+
+# conditional selection
+def spec10(sel: Bool(), in1: UQ(2,0), in0: UQ(2,0), ctx) -> UQ(2,0):
+    return If(sel, in1, in0)
 
 Autogenerate(name="spec1", spec=spec1).print_tree(depth=1)
 Autogenerate(name="spec2", spec=spec2).print_tree(depth=1)
@@ -43,12 +51,13 @@ except TypeError:
     pass
 Autogenerate(name="spec5", spec=spec5).print_tree(depth=1)
 Autogenerate(name="spec6", spec=spec6).print_tree(depth=1)
+Autogenerate(name="spec7", spec=spec7).print_tree(depth=1)
 try:
-    Autogenerate(name="spec7", spec=spec7)
+    Autogenerate(name="spec8", spec=spec8).print_tree(depth=1)
 except TypeError:
     pass
 try:
-    Autogenerate(name="spec8", spec=spec8)
+    Autogenerate(name="spec9", spec=spec9).print_tree(depth=1)
 except TypeError:
     pass
-
+Autogenerate(name="spec10", spec=spec10).print_tree(depth=1)

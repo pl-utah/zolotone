@@ -1740,6 +1740,7 @@ class TestBasicOperators(unittest.TestCase):
     def test_lossless_component_whitelist_is_conservative(self):
         from zolotone.components import LOSSLESS_COMPONENTS
 
+        self.assertIn(bool_eq, LOSSLESS_COMPONENTS)
         self.assertIn(uq_add, LOSSLESS_COMPONENTS)
         self.assertIn(uq_mul, LOSSLESS_COMPONENTS)
         self.assertIn(q_to_uq, LOSSLESS_COMPONENTS)
@@ -8160,7 +8161,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertEqual(generated.dtype, Q(4, 0))
         self.assertEqual(generated.inner_tree.name, "uq_to_q")
-        self.assertEqual(generated.inner_tree.args[0].name, "uq_zero_extend")
+        widened = generated.inner_tree.args[0]
+        self.assertEqual(widened.name, "_uq_zero_extend")
+        self.assertEqual(widened.inner_tree.name, "uq_zero_extend")
 
     def test_autogenerate_matches_registered_non_arithmetic_components(self):
         def negate_spec(x: Q(3, 0), ctx) -> Q:
@@ -8174,13 +8177,43 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         def zero_spec(x: UQ(2, 0), ctx) -> UQ:
             return x.eq(ctx.zero())
 
+        def bool_equal_spec(x: Bool(), y: Bool(), ctx) -> Bool:
+            del ctx
+            return x.eq(y)
+
         negated = Autogenerate("generated_negate", negate_spec)
         compared = Autogenerate("generated_less", less_spec)
         zero = Autogenerate("generated_zero", zero_spec)
+        bool_equal = Autogenerate("generated_bool_equal", bool_equal_spec)
 
         self.assertEqual(negated.inner_tree.name, "q_neg")
         self.assertEqual(compared.inner_tree.name, "uq_lt")
         self.assertEqual(zero.inner_tree.name, "uq_is_zero")
+        self.assertEqual(bool_equal.inner_tree.name, "bool_eq")
+
+    def test_autogenerate_lowers_conditionals(self):
+        def choose_spec(
+            sel: Bool(),
+            in1: UQ(2, 0),
+            in0: UQ(2, 0),
+            ctx,
+        ) -> UQ(2, 0):
+            del ctx
+            return If(sel, in1, in0)
+
+        chosen = Autogenerate("generated_choose", choose_spec)
+
+        self.assertEqual(chosen.inner_tree.name, "_if_then_else")
+
+    def test_autogenerate_lowers_boolean_literals(self):
+        def spec(ctx) -> Bool():
+            return ctx.true()
+
+        generated = Autogenerate("generated_true", spec)
+
+        self.assertIsInstance(generated.inner_tree, Const)
+        self.assertEqual(generated.inner_tree.dtype, Bool())
+        self.assertTrue(generated.inner_tree.value.to_python())
 
     def test_autogenerate_unsupported_spec_reaches_search_limit(self):
         from zolotone.ast import autogen as ast_autogen

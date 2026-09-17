@@ -1,9 +1,16 @@
 import itertools
 import typing as tp
 
-from ..spec.spec_ast import RealLit, SpecNode, children
+from ..spec.spec_ast import (
+    BoolLit,
+    BoolVar,
+    RealLit,
+    RealVar,
+    SpecNode,
+    children,
+)
 from ..spec.spec_context import SpecContext
-from ..types import DataType, UQ, Q
+from ..types import Bool, DataType, Q, UQ
 from .node import Node
 from .nodes import (
     Composite,
@@ -115,25 +122,40 @@ def search_lower_spec_to_impl(
     states = {(candidate.spec, candidate.node.dtype) for candidate in candidates}
 
     for expr in subexpressions:
-        if not isinstance(expr, RealLit):
+        if isinstance(expr, RealLit):
+            try:
+                literal = _Candidate(
+                    node=Const(UQ.from_int(expr.value)),
+                    spec=expr,
+                    depth=0,
+                )
+            # value is negative
+            except ValueError:
+                literal = _Candidate(
+                    node=Const(Q.from_int(expr.value)),
+                    spec=expr,
+                    depth=0,
+                )
+            # it is not an integer
+            except TypeError:
+                raise TypeError("Cannot currently lower floats into a fixed point")
+            state = (literal.spec, literal.node.dtype)
+        elif isinstance(expr, BoolLit):
+            literal = _Candidate(
+                node=Const(Bool().from_bits(int(expr.value))),
+                spec=expr,
+                depth=0,
+            )
+            state = (literal.spec, literal.node.dtype)
+        elif isinstance(expr, (BoolVar, RealVar)):
+            if expr not in spec_input_nodes:
+                raise TypeError(
+                    f"Undeclared variable in specification: {expr}"
+                )
             continue
-        try:
-            literal = _Candidate(
-                node=Const(UQ.from_int(expr.value)),
-                spec=expr,
-                depth=0,
-            )
-        # value is negative
-        except ValueError:
-            literal = _Candidate(
-                node=Const(Q.from_int(expr.value)),
-                spec=expr,
-                depth=0,
-            )
-        # it is not an integer
-        except TypeError:
-            raise TypeError(f"Cannot currently lower floats into a fixed point")
-        state = (literal.spec, literal.node.dtype)
+        else:
+            continue
+
         if state not in states:
             states.add(state)
             candidates.append(literal)
