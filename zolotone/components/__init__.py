@@ -8,6 +8,7 @@ from .UE4M3 import *
 from .E5M2 import *
 from .E5M2FNUZ import *
 from .E2M1 import *
+from .Q import q_to_uq
 from .UQ import uq_add, uq_mul
 
 

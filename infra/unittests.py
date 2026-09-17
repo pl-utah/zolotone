@@ -1742,6 +1742,7 @@ class TestBasicOperators(unittest.TestCase):
 
         self.assertIn(uq_add, LOSSLESS_COMPONENTS)
         self.assertIn(uq_mul, LOSSLESS_COMPONENTS)
+        self.assertIn(q_to_uq, LOSSLESS_COMPONENTS)
         self.assertNotIn(uq_resize, LOSSLESS_COMPONENTS)
 
     def test_output_dtype_is_metadata_not_a_graph_input(self):
@@ -8079,12 +8080,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             captured["ctx"] = ctx
             return x
 
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            result = Autogenerate(name="generated_identity", spec=spec)
+        result = Autogenerate(name="generated_identity", spec=spec)
 
-        self.assertIsNone(result)
-        self.assertIn("generated_identity", output.getvalue())
+        self.assertEqual(result.dtype, UQ(3, 2))
         self.assertIsInstance(captured["x"], RealExpr)
         self.assertIsInstance(captured["ctx"], SpecContext)
 
@@ -8106,16 +8104,93 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x + y
 
         contract = ast_nodes._build_spec_contract("typed_add", spec)
-        spec_ast, spec_input_types = get_spec_ast(spec, contract)
+        spec_ast, spec_inputs = get_spec_ast(spec, contract)
 
         self.assertIsInstance(spec_ast, Add)
-        self.assertEqual(
-            spec_input_types,
-            {
-                spec_ast.lhs: UQ(2, 3),
-                spec_ast.rhs: Q(4, 1),
-            },
-        )
+        self.assertEqual(spec_inputs, (spec_ast.lhs, spec_ast.rhs))
+
+    def test_autogenerate_searches_through_converters(self):
+        def mixed_add_spec(x: UQ(2, 0), y: Q(3, 0), ctx) -> Q:
+            del ctx
+            return x + y
+
+        def signed_sum_spec(x: UQ(2, 0), y: UQ(3, 0), ctx) -> Q:
+            del ctx
+            return x + y
+
+        mixed_add = Autogenerate("generated_mixed_add", mixed_add_spec)
+        signed_sum = Autogenerate("generated_signed_sum", signed_sum_spec)
+
+        self.assertEqual(mixed_add.inner_tree.name, "q_add")
+        self.assertEqual(mixed_add.inner_tree.args[0].name, "uq_to_q")
+        self.assertEqual(mixed_add.dtype, Q(4, 0))
+
+        self.assertEqual(signed_sum.inner_tree.name, "uq_to_q")
+        self.assertEqual(signed_sum.inner_tree.args[0].name, "uq_add")
+        self.assertEqual(signed_sum.dtype, Q(5, 0))
+
+    def test_autogenerate_preserves_q_to_uq_check(self):
+        def spec(x: Q(3, 0), ctx) -> UQ(2, 0):
+            del ctx
+            return x
+
+        generated = Autogenerate("generated_q_to_uq", spec)
+
+        self.assertEqual(generated.inner_tree.name, "q_to_uq")
+        check_ctx = SpecContext("generated-q-to-uq-check")
+        check_ctx.spec_of(generated.inner_tree)
+        self.assertEqual(len(check_ctx.checks), 1)
+
+    def test_autogenerate_prefers_depth_zero_identity(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            del ctx
+            return x
+
+        generated = Autogenerate("generated_identity", spec)
+
+        self.assertIsInstance(generated.inner_tree, Var)
+        self.assertEqual(generated.dtype, UQ(2, 0))
+
+    def test_autogenerate_converter_cycle_reaches_fixpoint(self):
+        def spec(x: UQ(2, 0), ctx) -> Q(4, 0):
+            del ctx
+            return x
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "search reached a fixpoint",
+        ):
+            Autogenerate("generated_unreachable_width", spec)
+
+    def test_autogenerate_matches_registered_non_arithmetic_components(self):
+        def negate_spec(x: Q(3, 0), ctx) -> Q:
+            del ctx
+            return -x
+
+        def less_spec(x: UQ(2, 0), y: UQ(3, 0), ctx) -> Bool:
+            del ctx
+            return x < y
+
+        def zero_spec(x: UQ(2, 0), ctx) -> UQ:
+            return x.eq(ctx.zero())
+
+        negated = Autogenerate("generated_negate", negate_spec)
+        compared = Autogenerate("generated_less", less_spec)
+        zero = Autogenerate("generated_zero", zero_spec)
+
+        self.assertEqual(negated.inner_tree.name, "q_neg")
+        self.assertEqual(compared.inner_tree.name, "uq_lt")
+        self.assertEqual(zero.inner_tree.name, "uq_is_zero")
+
+    def test_autogenerate_unsupported_spec_reaches_fixpoint(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            return x ** ctx.two()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "Cannot lower specification.*search reached a fixpoint",
+        ):
+            Autogenerate("generated_pow", spec)
 
     def test_complete_exact_and_family_contracts_are_accepted(self):
         def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
