@@ -2,9 +2,12 @@ import itertools
 import typing as tp
 
 from ..spec.spec_ast import (
+    BoolExpr,
     BoolLit,
     BoolVar,
+    If,
     RealLit,
+    RealExpr,
     RealVar,
     SpecNode,
     children,
@@ -43,11 +46,10 @@ def reject_untyped_inputs(contract: _SpecContract):
             )
 
 
-# TODO: inputs of contract have already their own ranges - asserts essentially
 def get_spec_ast(
     spec: tp.Callable[..., tp.Any],
     contract: _SpecContract,
-) -> tuple[SpecNode, tuple[tp.Any, ...]]:
+) -> tuple[SpecNode, tuple[tp.Any, ...], SpecContext]:
     ctx = SpecContext(contract.display_name)
     input_parameters = list(contract.signature.parameters.values())[:-1]
     spec_inputs = []
@@ -60,7 +62,7 @@ def get_spec_ast(
         spec_inputs.append(spec_input)
 
     spec_ast = spec(*spec_inputs, ctx)
-    return spec_ast, tuple(spec_inputs)
+    return spec_ast, tuple(spec_inputs), ctx
 
 
 def _spec_subexpressions(root: SpecNode) -> tuple[SpecNode, ...]:
@@ -104,6 +106,63 @@ def _matches_result(
         candidate.spec.identical(spec_ast)
         and _annotation_matches(candidate.node.dtype, return_annotation)
     )
+
+
+def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[float, float]:
+    quantum = 2.0 ** -dtype.frac_bits
+    if isinstance(dtype, UQ):
+        return 0.0, (2.0 ** dtype.int_bits) - quantum
+    magnitude = 2.0 ** (dtype.int_bits - 1)
+    return -magnitude, magnitude - quantum
+
+
+def check_spec_feasibility(
+    spec_ast: SpecNode,
+    spec_inputs: tuple[tp.Any, ...],
+    contract: _SpecContract,
+    ctx: SpecContext,
+) -> None:
+    # Input ranges
+    input_parameters = list(contract.signature.parameters.values())[:-1]
+    for spec_input, parameter in zip(spec_inputs, input_parameters, strict=True):
+        dtype = contract.annotations[parameter.name]
+        if isinstance(dtype, (Q, UQ)):
+            min_bound, max_bound = _fixed_point_real_bounds(dtype)
+            ctx.assume(spec_input >= ctx.real_val(min_bound))
+            ctx.assume(spec_input <= ctx.real_val(max_bound))
+
+    return_annotation = contract.annotations["return"]
+    if return_annotation is not UQ and not isinstance(return_annotation, (Q, UQ)):
+        print("feasibility output format is not supported:", return_annotation)
+        return
+    if isinstance(spec_ast, BoolExpr):
+        result_value = If(spec_ast, ctx.one(), ctx.zero())
+    elif isinstance(spec_ast, RealExpr):
+        result_value = spec_ast
+    else:
+        raise TypeError(
+            f"Specification returning {return_annotation!r} must produce "
+            f"a real or Boolean expression, got {type(spec_ast).__name__}"
+        )
+
+    # TODO: tuples at input/output?
+    if return_annotation is UQ:
+        result_fits = result_value >= ctx.zero()
+    else:
+        min_bound, max_bound = _fixed_point_real_bounds(return_annotation)
+        result_fits = (result_value >= ctx.real_val(min_bound)) & (
+            result_value <= ctx.real_val(max_bound)
+        )
+
+    from ..rival import rival_trim_context
+
+    ctx.check(result_fits)
+    range_ctx = ctx.copy(checks=[result_fits])
+    # TODO: It is okay for now
+    if rival_trim_context(range_ctx).checks:
+        raise TypeError(
+            f"Specification result range does not fit {return_annotation!r}"
+        )
 
 
 def search_lower_spec_to_impl(
@@ -282,7 +341,13 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     contract = _build_spec_contract(name, spec)
     reject_untyped_inputs(contract)
 
-    spec_ast, spec_inputs = get_spec_ast(spec, contract)
+    spec_ast, spec_inputs, spec_ctx = get_spec_ast(spec, contract)
+    check_spec_feasibility(
+        spec_ast,
+        spec_inputs,
+        contract,
+        spec_ctx,
+    )
     lowered_composite = lower_spec_to_impl(
         name,
         spec,

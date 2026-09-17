@@ -60,7 +60,6 @@ LOSSLESS_COMPONENTS = (
     uq_max,
     uq_min,
     uq_to_q,
-    q_to_uq,
     uq_is_zero,
     _uq_zero_extend,
 
@@ -76,6 +75,7 @@ LOSSLESS_COMPONENTS = (
     q_mul,
     q_abs,
     _q_sign_extend,
+    #q_to_uq, # Can be lossy
 
     _if_then_else,
 )

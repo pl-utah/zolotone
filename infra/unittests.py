@@ -1743,7 +1743,7 @@ class TestBasicOperators(unittest.TestCase):
         self.assertIn(bool_eq, LOSSLESS_COMPONENTS)
         self.assertIn(uq_add, LOSSLESS_COMPONENTS)
         self.assertIn(uq_mul, LOSSLESS_COMPONENTS)
-        self.assertIn(q_to_uq, LOSSLESS_COMPONENTS)
+        self.assertNotIn(q_to_uq, LOSSLESS_COMPONENTS)
         self.assertNotIn(uq_resize, LOSSLESS_COMPONENTS)
 
     def test_output_dtype_is_metadata_not_a_graph_input(self):
@@ -8105,7 +8105,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x + y
 
         contract = ast_nodes._build_spec_contract("typed_add", spec)
-        spec_ast, spec_inputs = get_spec_ast(spec, contract)
+        spec_ast, spec_inputs, _spec_ctx = get_spec_ast(spec, contract)
 
         self.assertIsInstance(spec_ast, Add)
         self.assertEqual(spec_inputs, (spec_ast.lhs, spec_ast.rhs))
@@ -8130,17 +8130,16 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(signed_sum.inner_tree.args[0].name, "uq_add")
         self.assertEqual(signed_sum.dtype, Q(5, 0))
 
-    def test_autogenerate_preserves_q_to_uq_check(self):
+    def test_autogenerate_rejects_signed_range_for_unsigned_result(self):
         def spec(x: Q(3, 0), ctx) -> UQ(2, 0):
             del ctx
             return x
 
-        generated = Autogenerate("generated_q_to_uq", spec)
-
-        self.assertEqual(generated.inner_tree.name, "q_to_uq")
-        check_ctx = SpecContext("generated-q-to-uq-check")
-        check_ctx.spec_of(generated.inner_tree)
-        self.assertEqual(len(check_ctx.checks), 1)
+        with self.assertRaisesRegex(
+            TypeError,
+            "result range does not fit UQ<2,0>",
+        ):
+            Autogenerate("generated_q_to_uq", spec)
 
     def test_autogenerate_prefers_depth_zero_identity(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
@@ -8214,6 +8213,27 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertIsInstance(generated.inner_tree, Const)
         self.assertEqual(generated.inner_tree.dtype, Bool())
         self.assertTrue(generated.inner_tree.value.to_python())
+
+    def test_autogenerate_rejects_result_range_that_does_not_fit(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x + ctx.one()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "result range does not fit UQ<2,0>",
+        ):
+            Autogenerate("generated_overflowing_add", spec)
+
+    def test_autogenerate_checks_generic_unsigned_result_is_nonnegative(self):
+        def spec(x: Q(3, 0), ctx) -> UQ:
+            del ctx
+            return x
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "result range does not fit",
+        ):
+            Autogenerate("generated_generic_unsigned", spec)
 
     def test_autogenerate_unsupported_spec_reaches_search_limit(self):
         from zolotone.ast import autogen as ast_autogen
