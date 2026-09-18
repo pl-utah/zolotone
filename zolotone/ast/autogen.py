@@ -32,6 +32,11 @@ class _Candidate(tp.NamedTuple):
 
 
 MAX_SEARCH_DEPTH = 30
+MAX_SUGGESTED_WIDENING_BITS = 32
+FEASIBILITY_SCHEDULE = [
+    {"tool": "simplify"},
+    {"tool": "z3", "timeout_ms": 10_000},
+]
 
 
 def reject_untyped_inputs(contract: _SpecContract):
@@ -116,6 +121,82 @@ def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[float, float]:
     return -magnitude, magnitude - quantum
 
 
+def _fixed_point_result_fits(
+    spec_ast: RealExpr,
+    dtype: Q | UQ,
+    ctx: SpecContext,
+) -> BoolExpr:
+    min_bound, max_bound = _fixed_point_real_bounds(dtype)
+    return (spec_ast >= ctx.real_val(min_bound)) & (
+        spec_ast <= ctx.real_val(max_bound)
+    )
+
+
+def _prove_result_fits(ctx: SpecContext, result_fits: BoolExpr) -> bool:
+    range_ctx = ctx.copy(checks=[result_fits])
+    status, _proof_trace = check_equivalence(
+        range_ctx,
+        schedule=FEASIBILITY_SCHEDULE,
+    )
+    return status == "unsat"
+
+
+def poor_output_range_debugging(
+    spec_ast: RealExpr,
+    return_annotation: object,
+    ctx: SpecContext,
+) -> object | None:
+    # TODO: provide a counterexample
+    if return_annotation is UQ:
+        return Q
+    if not isinstance(return_annotation, (Q, UQ)):
+        return None
+
+    dtype_type = type(return_annotation)
+    def candidate(int_bits: int) -> Q | UQ:
+        return dtype_type(int_bits, return_annotation.frac_bits)
+
+    # As few integer bits as possible
+    min_int_bits = max(0, 1 - return_annotation.frac_bits)
+    max_int_bits = return_annotation.int_bits + MAX_SUGGESTED_WIDENING_BITS
+    widest = candidate(max_int_bits)
+
+    if not _prove_result_fits(ctx, _fixed_point_result_fits(spec_ast, widest, ctx)):
+        # If the result cannot be stored even with a wider UQ output format - try Q
+        if isinstance(return_annotation, UQ):
+            signed = Q(
+                max(0, 1 - return_annotation.frac_bits),
+                return_annotation.frac_bits,
+            )
+            return poor_output_range_debugging(spec_ast, signed, ctx)
+        return None
+
+    low = min_int_bits
+    high = max_int_bits
+    while low < high:
+        middle = (low + high) // 2
+        middle_dtype = candidate(middle)
+        if _prove_result_fits(
+            ctx,
+            _fixed_point_result_fits(spec_ast, middle_dtype, ctx),
+        ):
+            high = middle
+        else:
+            low = middle + 1
+    return candidate(low)
+
+
+def _format_output_annotation(annotation: object) -> str:
+    if annotation in (Q, UQ):
+        return annotation.__name__
+    if isinstance(annotation, (Q, UQ)):
+        return (
+            f"{type(annotation).__name__}"
+            f"({annotation.int_bits}, {annotation.frac_bits})"
+        )
+    return repr(annotation)
+
+
 def check_spec_feasibility(
     spec_ast: SpecNode,
     spec_inputs: tuple[tp.Any, ...],
@@ -156,31 +237,30 @@ def check_spec_feasibility(
             result_fits = spec_ast >= ctx.zero()
         # If it is UQ/Q with bit-widths - we can check that range covers all outputs
         else:
-            min_bound, max_bound = _fixed_point_real_bounds(return_annotation)
-            result_fits = (spec_ast >= ctx.real_val(min_bound)) & (
-                spec_ast <= ctx.real_val(max_bound)
+            result_fits = _fixed_point_result_fits(
+                spec_ast,
+                return_annotation,
+                ctx,
             )
+        if not _prove_result_fits(ctx, result_fits):
+            suggestion = poor_output_range_debugging(
+                spec_ast,
+                return_annotation,
+                ctx,
+            )
+            message = f"Specification result range does not fit {return_annotation!r}"
+            if suggestion is not None:
+                message += f"; try {_format_output_annotation(suggestion)} as the output format instead"
+            else:
+                message += "; could not find a fixed-point format that would fit the range"
+            raise TypeError(message)
+        return
     else:
         raise NotImplementedError(
             "Not supporting",
             return_annotation,
             "output format for feasibility check",
         )
-
-    ctx.check(result_fits)
-    range_ctx = ctx.copy(checks=[result_fits])
-    status, _proof_trace = check_equivalence(
-        range_ctx,
-        schedule=[
-            {"tool": "simplify"},
-            {"tool": "z3", "timeout_ms": 10_000},
-        ],
-    )
-    if status != "unsat":
-        raise TypeError(
-            f"Specification result range does not fit {return_annotation!r}"
-        )
-    return
 
 
 def search_lower_spec_to_impl(

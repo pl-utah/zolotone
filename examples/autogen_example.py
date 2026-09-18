@@ -16,7 +16,7 @@ def Test(expect=None):
                     f"{spec.__name__}: expected {expect.__name__}, got "
                     f"{type(error).__name__}: {error}"
                 ) from error
-            print(f"{spec.__name__}: passed (raised {expect.__name__})")
+            print(f"{spec.__name__}: passed (raised {str(error)})")
             return spec
 
         if expect is not None:

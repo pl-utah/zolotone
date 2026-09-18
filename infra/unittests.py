@@ -2116,6 +2116,12 @@ class TestDataTypeValues(unittest.TestCase):
         self.assertEqual(value.to_bitstring(), "11111")
         self.assertEqual(value.to_python(), -0.125)
 
+    def test_q_allows_zero_integer_bits(self):
+        dtype = Q(0, 1)
+
+        self.assertEqual(dtype.from_bits(0).to_python(), 0.0)
+        self.assertEqual(dtype.from_bits(1).to_python(), -0.5)
+
     def test_from_int_infers_zero_fraction_descriptor(self):
         self.assertEqual(UQ.from_int(3), UQ(2, 0).from_bits(3))
         self.assertEqual(Q.from_int(-3), Q(3, 0).from_bits(5))
@@ -8137,7 +8143,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with self.assertRaisesRegex(
             TypeError,
-            "result range does not fit UQ<2,0>",
+            r"result range does not fit UQ<2,0>.*try Q\(3, 0\)",
         ):
             Autogenerate("generated_q_to_uq", spec)
 
@@ -8236,9 +8242,19 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with self.assertRaisesRegex(
             TypeError,
-            "result range does not fit UQ<2,0>",
+            r"result range does not fit UQ<2,0>; try UQ\(3, 0\)",
         ):
             Autogenerate("generated_overflowing_add", spec)
+
+    def test_autogenerate_suggests_zero_integer_bit_signed_output(self):
+        def spec(ctx) -> UQ(10, 1):
+            return ctx.real_val(-0.5)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            r"try Q\(0, 1\)",
+        ):
+            Autogenerate("generated_negative_fraction", spec)
 
     def test_autogenerate_checks_generic_unsigned_result_is_nonnegative(self):
         def spec(x: Q(3, 0), ctx) -> UQ:
@@ -8247,7 +8263,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with self.assertRaisesRegex(
             TypeError,
-            "result range does not fit",
+            "result range does not fit.*try Q as the output format",
         ):
             Autogenerate("generated_generic_unsigned", spec)
 
