@@ -86,7 +86,7 @@ def spec6(x: Q(2, 0), ctx) -> Q(4, 0):
 
 
 @Test()
-def spec7(x: Q(3, 0), y: Bool(), ctx) -> Q(3, 0):
+def spec7(x: Q(3, 0), y: Bool(), ctx) -> Q(3,0):
     return If(y.eq(ctx.false()), x, ctx.one())
 
 

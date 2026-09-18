@@ -42,9 +42,11 @@ from zolotone.rival import (
     RivalAnalysis,
     RivalRectLimitExceeded,
     build_machine,
+    build_range_machine,
     collect_free_vars,
     get_rival_rects,
     rival_feasibility_check,
+    rival_range_analysis,
     rival_trim_context,
     to_rival_ir,
 )
@@ -6507,6 +6509,58 @@ class TestRivalTranslation(unittest.TestCase):
             ["x", "y"],
         )
 
+    def test_build_range_machine_keeps_numeric_expression(self):
+        x = RealVar("x")
+        raw_machine = object()
+        native = Mock()
+        native.build_machine.return_value = raw_machine
+
+        with patch("zolotone.rival._load_native_module", return_value=native):
+            machine = build_range_machine(x + RealLit(1), ["x"])
+
+        self.assertIs(machine._raw_machine, raw_machine)
+        native.build_machine.assert_called_once_with(
+            [
+                {
+                    "op": "add",
+                    "lhs": {"op": "var", "name": "x"},
+                    "rhs": {"op": "real_lit", "num": "1", "den": "1"},
+                }
+            ],
+            ["x"],
+        )
+
+    def test_rival_range_analysis_unions_rectangle_outputs(self):
+        ctx = SpecContext("rival-output-range")
+        x = ctx.real("x")
+        machine = Mock()
+        machine.apply_range.side_effect = [
+            (-2.0, 1.0),
+            (0.5, 4.0),
+        ]
+
+        with (
+            patch(
+                "zolotone.rival.get_rival_rects",
+                return_value=[[(0.0, 1.0)], [(2.0, 3.0)]],
+            ),
+            patch("zolotone.rival.build_range_machine", return_value=machine),
+        ):
+            bounds = rival_range_analysis(x + ctx.one(), ctx)
+
+        self.assertEqual(bounds, (-2.0, 4.0))
+
+    def test_rival_range_analysis_returns_numeric_output_interval(self):
+        ctx = SpecContext("rival-native-output-range")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        ctx.assume(x >= ctx.zero())
+        ctx.assume(x <= ctx.real_val(3))
+        ctx.assume(y >= ctx.real_val(-4))
+        ctx.assume(y <= ctx.real_val(3))
+
+        self.assertEqual(rival_range_analysis(x + y, ctx), (-4.0, 6.0))
+
     def test_rival_rects_default_to_unbounded(self):
         ctx = SpecContext("rival-rects-default")
 
@@ -8240,19 +8294,55 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
             return x + ctx.one()
 
-        with self.assertRaisesRegex(
-            TypeError,
-            r"result range does not fit UQ<2,0>; try UQ\(3, 0\)",
+        with (
+            patch(
+                "zolotone.ast.autogen.rival_range_analysis",
+                return_value=(1.0, 4.0),
+            ),
+            self.assertRaisesRegex(
+                TypeError,
+                r"result range does not fit UQ<2,0>; try UQ\(3, 0\)",
+            ),
         ):
             Autogenerate("generated_overflowing_add", spec)
+
+    def test_range_analysis_suggestion_matches_solver_search(self):
+        from zolotone.ast.autogen import (
+            output_format_suggestion_with_range_analysis,
+            output_format_suggestion_with_search,
+        )
+
+        ctx = SpecContext("compare-output-format-suggestions")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.zero())
+        ctx.assume(x <= ctx.real_val(3))
+        spec_ast = x + ctx.one()
+        return_annotation = UQ(2, 0)
+
+        search_suggestion = output_format_suggestion_with_search(
+            spec_ast,
+            return_annotation,
+            ctx,
+        )
+        range_suggestion = output_format_suggestion_with_range_analysis(
+            spec_ast,
+            return_annotation,
+            ctx,
+        )
+
+        self.assertEqual(range_suggestion, search_suggestion)
+        self.assertEqual(range_suggestion, UQ(3, 0))
 
     def test_autogenerate_suggests_zero_integer_bit_signed_output(self):
         def spec(ctx) -> UQ(10, 1):
             return ctx.real_val(-0.5)
 
-        with self.assertRaisesRegex(
-            TypeError,
-            r"try Q\(0, 1\)",
+        with (
+            patch(
+                "zolotone.ast.autogen.rival_range_analysis",
+                return_value=(-0.5, -0.5),
+            ),
+            self.assertRaisesRegex(TypeError, r"try Q\(0, 1\)"),
         ):
             Autogenerate("generated_negative_fraction", spec)
 

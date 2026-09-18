@@ -1,4 +1,5 @@
 import itertools
+import math
 import typing as tp
 
 from ..spec.spec_ast import (
@@ -12,6 +13,7 @@ from ..spec.spec_ast import (
     children,
 )
 from ..spec.spec_context import SpecContext
+from ..rival import rival_range_analysis
 from ..solver import check_equivalence
 from ..types import Bool, DataType, Q, UQ
 from .node import Node
@@ -32,7 +34,6 @@ class _Candidate(tp.NamedTuple):
 
 
 MAX_SEARCH_DEPTH = 30
-MAX_SUGGESTED_WIDENING_BITS = 32
 FEASIBILITY_SCHEDULE = [
     {"tool": "simplify"},
     {"tool": "z3", "timeout_ms": 10_000},
@@ -134,41 +135,31 @@ def _fixed_point_result_fits(
 
 def _prove_result_fits(ctx: SpecContext, result_fits: BoolExpr) -> bool:
     range_ctx = ctx.copy(checks=[result_fits])
-    status, _proof_trace = check_equivalence(
-        range_ctx,
-        schedule=FEASIBILITY_SCHEDULE,
-    )
+    status, _proof_trace = check_equivalence(range_ctx, schedule=FEASIBILITY_SCHEDULE)
     return status == "unsat"
 
 
-def poor_output_range_debugging(
+# TODO: this method is mostly for checking range analysis now, to be deleted later
+def output_format_suggestion_with_search(
     spec_ast: RealExpr,
-    return_annotation: object,
+    return_annotation: Q | UQ,
     ctx: SpecContext,
-) -> object | None:
-    # TODO: provide a counterexample
-    if return_annotation is UQ:
-        return Q
-    if not isinstance(return_annotation, (Q, UQ)):
-        return None
-
+) -> Q | UQ | None:
     dtype_type = type(return_annotation)
+
     def candidate(int_bits: int) -> Q | UQ:
         return dtype_type(int_bits, return_annotation.frac_bits)
 
     # As few integer bits as possible
     min_int_bits = max(0, 1 - return_annotation.frac_bits)
-    max_int_bits = return_annotation.int_bits + MAX_SUGGESTED_WIDENING_BITS
+    max_int_bits = return_annotation.int_bits + 32
     widest = candidate(max_int_bits)
 
     if not _prove_result_fits(ctx, _fixed_point_result_fits(spec_ast, widest, ctx)):
         # If the result cannot be stored even with a wider UQ output format - try Q
         if isinstance(return_annotation, UQ):
-            signed = Q(
-                max(0, 1 - return_annotation.frac_bits),
-                return_annotation.frac_bits,
-            )
-            return poor_output_range_debugging(spec_ast, signed, ctx)
+            signed = Q(max(0, 1 - return_annotation.frac_bits), return_annotation.frac_bits)
+            return output_format_debugging(spec_ast, signed, ctx)
         return None
 
     low = min_int_bits
@@ -176,24 +167,81 @@ def poor_output_range_debugging(
     while low < high:
         middle = (low + high) // 2
         middle_dtype = candidate(middle)
-        if _prove_result_fits(
-            ctx,
-            _fixed_point_result_fits(spec_ast, middle_dtype, ctx),
-        ):
+        if _prove_result_fits(ctx, _fixed_point_result_fits(spec_ast, middle_dtype, ctx)):
             high = middle
         else:
             low = middle + 1
     return candidate(low)
+
+def output_format_suggestion_with_range_analysis(
+    spec_ast: RealExpr,
+    return_annotation: Q | UQ,
+    ctx: SpecContext,
+) -> Q | UQ:
+    output_range = rival_range_analysis(spec_ast, ctx)
+    if output_range is None:
+        raise RuntimeError("Could not obtain output range for:", str(spec_ast))
+
+    lower, upper = output_range
+    if not math.isfinite(lower) or not math.isfinite(upper):
+        raise RuntimeError(
+            "Could not obtain finite output range, got:",
+            output_range,
+            "for",
+            spec_ast,
+        )
+
+    frac_bits = return_annotation.frac_bits
+    scale = 1 << frac_bits
+    unsigned = _prove_result_fits(ctx, spec_ast >= ctx.zero())
+    # It should be an unsigned fixed-point
+    if unsigned:
+        required_raw = max(0, math.ceil(upper * scale))
+        total_bits = max(1, frac_bits, required_raw.bit_length())
+        int_bits = total_bits - frac_bits
+        return UQ(int_bits, frac_bits)
+    # It clearly should be a signed fixed-point
+    else:
+        lower_raw = math.floor(lower * scale)
+        upper_raw = math.ceil(upper * scale)
+        required_magnitude = max(1, -lower_raw, upper_raw + 1)
+        magnitude_bits = (required_magnitude - 1).bit_length()
+        total_bits = max(1, frac_bits, magnitude_bits + 1)
+        int_bits = total_bits - frac_bits
+        return Q(int_bits, frac_bits)
+
+
+def output_format_debugging(
+    spec_ast: RealExpr,
+    return_annotation: object,
+    ctx: SpecContext,
+) -> object | None:
+    # TODO: provide a counterexample
+    if return_annotation is UQ:
+        if not _prove_result_fits(ctx, spec_ast >= ctx.zero()):
+            return Q
+        return UQ
+    elif return_annotation is Q:
+        if _prove_result_fits(ctx, spec_ast >= ctx.zero()):
+            return UQ
+        return Q
+    elif isinstance(return_annotation, (Q, UQ)):
+        dtype1 = output_format_suggestion_with_range_analysis(spec_ast, return_annotation, ctx)
+        dtype2 = output_format_suggestion_with_search(spec_ast, return_annotation, ctx)
+        if not dtype1 == dtype2:
+            raise AssertionError("derived dtypes are not equal! ranges: " + str(dtype1) + ", search: " + str(dtype2))
+        if not _prove_result_fits(ctx, _fixed_point_result_fits(spec_ast, dtype1, ctx)):
+            raise AssertionError("That's a crime, derived dtype does not fit the result")
+        return dtype1
+    else:
+        raise NotImplementedError("Output range debugging is not implemented for", return_annotation)
 
 
 def _format_output_annotation(annotation: object) -> str:
     if annotation in (Q, UQ):
         return annotation.__name__
     if isinstance(annotation, (Q, UQ)):
-        return (
-            f"{type(annotation).__name__}"
-            f"({annotation.int_bits}, {annotation.frac_bits})"
-        )
+        return f"{type(annotation).__name__}({annotation.int_bits}, {annotation.frac_bits})"
     return repr(annotation)
 
 
@@ -208,9 +256,7 @@ def check_spec_feasibility(
     for spec_input, parameter in zip(spec_inputs, input_parameters, strict=True):
         dtype = contract.annotations[parameter.name]
         if isinstance(dtype, (Q, UQ)):
-            min_bound, max_bound = _fixed_point_real_bounds(dtype)
-            ctx.assume(spec_input >= ctx.real_val(min_bound))
-            ctx.assume(spec_input <= ctx.real_val(max_bound))
+            ctx.assume(_fixed_point_result_fits(spec_input, dtype, ctx))
 
     return_annotation = contract.annotations["return"]
     # Output checks
@@ -242,8 +288,9 @@ def check_spec_feasibility(
                 return_annotation,
                 ctx,
             )
+        
         if not _prove_result_fits(ctx, result_fits):
-            suggestion = poor_output_range_debugging(
+            suggestion = output_format_debugging(
                 spec_ast,
                 return_annotation,
                 ctx,
