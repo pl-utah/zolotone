@@ -251,6 +251,8 @@ Only the `Any` operands become inputs to the resulting graph node.
 | Name | Kind | Type | Purpose/Notes |
 | --- | --- | --- | --- |
 | `add_implicit_bit` | Primitive | `UQ<0,F> -> UQ<1,F>` | Prefix the implicit leading significand bit. |
+| `bool_to_uq` | Primitive | `Bool<1> -> UQ<1,0>` | Convert a Boolean to its lossless one-bit unsigned encoding. |
+| `uq_to_bool` | Primitive | `UQ<1,0> -> Bool<1>` | Convert a one-bit unsigned value to a Boolean. |
 | `bit_and`, `bit_or`, `bit_xor`, `bit_neg` | Primitive | single-bit inputs -> `UQ<1,0>` | Boolean operations represented as one-bit implementation nodes. |
 
 ## Rounding routines (`zolotone/components/rounding_routines.py`)

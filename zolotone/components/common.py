@@ -5,6 +5,25 @@ from ..spec import *
 from ..types import *
 from .basics import *
 
+
+def bool_to_uq_spec(x: Bool(), ctx) -> UQ(1, 0):
+    return If(x, ctx.one(), ctx.zero())
+
+
+@Primitive(name="bool_to_uq", spec=bool_to_uq_spec, c_inline=True)
+def bool_to_uq(x: Node) -> Node:
+    return basic_identity(x=x, out=UQ(1, 0))
+
+
+def uq_to_bool_spec(x: UQ(1, 0), ctx) -> Bool():
+    return x.eq(ctx.one())
+
+
+@Primitive(name="uq_to_bool", spec=uq_to_bool_spec, c_inline=True)
+def uq_to_bool(x: Node) -> Node:
+    return basic_identity(x=x, out=Bool())
+
+
 def add_implicit_bit(x: Node) -> Primitive:
     assert x.dtype.int_bits == 0
     frac_bits = x.dtype.frac_bits

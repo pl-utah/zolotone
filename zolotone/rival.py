@@ -16,6 +16,7 @@ __all__ = [
     "DEFAULT_MAX_RECTS",
     "MAX_RECTS_ENV",
     "RivalRectLimitExceeded",
+    "rival_range_analysis",
     "rival_feasibility_check",
     "rival_trim_context",
 ]
@@ -111,6 +112,13 @@ class RivalMachine:
             hints=next_hints,
         )
 
+    def apply_range(
+        self,
+        rect: Sequence[tuple[float, float]],
+    ) -> tuple[float, float]:
+        bounds = self._raw_machine.apply_range(rect)
+        return float(bounds[0]), float(bounds[1])
+
 
 def build_machine(
     exprs: Sequence[SpecNode],
@@ -124,6 +132,17 @@ def build_machine(
         _append_assert(_and_exprs(to_rival_ir(expr) for expr in expr_list))
     ]
     raw_machine = native.build_machine(translated_exprs, var_list)
+    return RivalMachine(raw_machine)
+
+
+def build_range_machine(
+    expr: RealExpr,
+    free_vars: Sequence[str],
+) -> RivalMachine:
+    var_list = _validate_free_vars(free_vars)
+    _validate_referenced_vars([expr], var_list)
+    native = _load_native_module()
+    raw_machine = native.build_machine([to_rival_ir(expr)], var_list)
     return RivalMachine(raw_machine)
 
 
@@ -177,6 +196,46 @@ def get_rival_rects(
         resolved_max_rects,
     )
     return rects
+
+
+def rival_range_analysis(
+    expr: RealExpr,
+    ctx: "SpecContext",
+    max_rects: int | None = None,
+) -> tuple[float, float] | None:
+    if not isinstance(expr, RealExpr):
+        raise TypeError(
+            f"rival_range_analysis expects RealExpr, got {type(expr).__name__}"
+        )
+
+    all_exprs = ctx.assumes + [expr]
+    free_vars = collect_free_vars(all_exprs)
+    bool_var_names = _collect_bool_var_names(all_exprs)
+    try:
+        rects = get_rival_rects(
+            ctx.assumes,
+            free_vars,
+            bool_var_names,
+            max_rects=max_rects,
+        )
+    except RivalRectLimitExceeded:
+        return None
+    if not rects:
+        return None
+
+    machine = build_range_machine(expr, free_vars)
+    lower = math.inf
+    upper = -math.inf
+    for rect in rects:
+        rect_lower, rect_upper = machine.apply_range(rect)
+        if math.isnan(rect_lower) or math.isnan(rect_upper):
+            return None
+        lower = min(lower, rect_lower)
+        upper = max(upper, rect_upper)
+
+    if lower > upper:
+        return None
+    return lower, upper
 
 
 def _get_rival_rects_and_contributors(

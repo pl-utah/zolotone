@@ -42,9 +42,11 @@ from zolotone.rival import (
     RivalAnalysis,
     RivalRectLimitExceeded,
     build_machine,
+    build_range_machine,
     collect_free_vars,
     get_rival_rects,
     rival_feasibility_check,
+    rival_range_analysis,
     rival_trim_context,
     to_rival_ir,
 )
@@ -1737,6 +1739,17 @@ class TestConstantFolding(unittest.TestCase):
 
 
 class TestBasicOperators(unittest.TestCase):
+    def test_lossless_component_whitelist_is_conservative(self):
+        from zolotone.components import LOSSLESS_COMPONENTS
+
+        self.assertIn(bool_eq, LOSSLESS_COMPONENTS)
+        self.assertIn(bool_to_uq, LOSSLESS_COMPONENTS)
+        self.assertIn(uq_to_bool, LOSSLESS_COMPONENTS)
+        self.assertIn(uq_add, LOSSLESS_COMPONENTS)
+        self.assertIn(uq_mul, LOSSLESS_COMPONENTS)
+        self.assertNotIn(q_to_uq, LOSSLESS_COMPONENTS)
+        self.assertNotIn(uq_resize, LOSSLESS_COMPONENTS)
+
     def test_output_dtype_is_metadata_not_a_graph_input(self):
         x = Var("x", dtype=UQ(3, 0))
         y = Var("y", dtype=UQ(3, 0))
@@ -2106,6 +2119,12 @@ class TestDataTypeValues(unittest.TestCase):
 
         self.assertEqual(value.to_bitstring(), "11111")
         self.assertEqual(value.to_python(), -0.125)
+
+    def test_q_allows_zero_integer_bits(self):
+        dtype = Q(0, 1)
+
+        self.assertEqual(dtype.from_bits(0).to_python(), 0.0)
+        self.assertEqual(dtype.from_bits(1).to_python(), -0.5)
 
     def test_from_int_infers_zero_fraction_descriptor(self):
         self.assertEqual(UQ.from_int(3), UQ(2, 0).from_bits(3))
@@ -6492,6 +6511,58 @@ class TestRivalTranslation(unittest.TestCase):
             ["x", "y"],
         )
 
+    def test_build_range_machine_keeps_numeric_expression(self):
+        x = RealVar("x")
+        raw_machine = object()
+        native = Mock()
+        native.build_machine.return_value = raw_machine
+
+        with patch("zolotone.rival._load_native_module", return_value=native):
+            machine = build_range_machine(x + RealLit(1), ["x"])
+
+        self.assertIs(machine._raw_machine, raw_machine)
+        native.build_machine.assert_called_once_with(
+            [
+                {
+                    "op": "add",
+                    "lhs": {"op": "var", "name": "x"},
+                    "rhs": {"op": "real_lit", "num": "1", "den": "1"},
+                }
+            ],
+            ["x"],
+        )
+
+    def test_rival_range_analysis_unions_rectangle_outputs(self):
+        ctx = SpecContext("rival-output-range")
+        x = ctx.real("x")
+        machine = Mock()
+        machine.apply_range.side_effect = [
+            (-2.0, 1.0),
+            (0.5, 4.0),
+        ]
+
+        with (
+            patch(
+                "zolotone.rival.get_rival_rects",
+                return_value=[[(0.0, 1.0)], [(2.0, 3.0)]],
+            ),
+            patch("zolotone.rival.build_range_machine", return_value=machine),
+        ):
+            bounds = rival_range_analysis(x + ctx.one(), ctx)
+
+        self.assertEqual(bounds, (-2.0, 4.0))
+
+    def test_rival_range_analysis_returns_numeric_output_interval(self):
+        ctx = SpecContext("rival-native-output-range")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        ctx.assume(x >= ctx.zero())
+        ctx.assume(x <= ctx.real_val(3))
+        ctx.assume(y >= ctx.real_val(-4))
+        ctx.assume(y <= ctx.real_val(3))
+
+        self.assertEqual(rival_range_analysis(x + y, ctx), (-4.0, 6.0))
+
     def test_rival_rects_default_to_unbounded(self):
         ctx = SpecContext("rival-rects-default")
 
@@ -8064,6 +8135,306 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
 
 class TestSpecificationDTypeContracts(unittest.TestCase):
+    def test_autogenerate_accepts_exact_input_contract(self):
+        captured = {}
+
+        def spec(x: UQ(3, 2), ctx) -> UQ:
+            captured["x"] = x
+            captured["ctx"] = ctx
+            return x
+
+        result = Autogenerate(name="generated_identity", spec=spec)
+
+        self.assertEqual(result.dtype, UQ(3, 2))
+        self.assertIsInstance(captured["x"], RealExpr)
+        self.assertIsInstance(captured["ctx"], SpecContext)
+
+    def test_autogenerate_rejects_non_exact_input_contract(self):
+        def spec(x: UQ, ctx) -> UQ:
+            return x
+
+        with self.assertRaisesRegex(
+            MissingError,
+            "input parameter 'x' must have an exact DataType descriptor",
+        ):
+            Autogenerate(name="generic_identity", spec=spec)
+
+    def test_get_spec_ast_returns_original_input_types(self):
+        from zolotone.ast.autogen import get_spec_ast
+
+        def spec(x: UQ(2, 3), y: Q(4, 1), ctx) -> Q:
+            del ctx
+            return x + y
+
+        contract = ast_nodes._build_spec_contract("typed_add", spec)
+        spec_ast, spec_inputs, _spec_ctx = get_spec_ast(spec, contract)
+
+        self.assertIsInstance(spec_ast, Add)
+        self.assertEqual(spec_inputs, (spec_ast.lhs, spec_ast.rhs))
+
+    def test_autogenerate_searches_through_converters(self):
+        def mixed_add_spec(x: UQ(2, 0), y: Q(3, 0), ctx) -> Q:
+            del ctx
+            return x + y
+
+        def signed_sum_spec(x: UQ(2, 0), y: UQ(3, 0), ctx) -> Q:
+            del ctx
+            return x + y
+
+        mixed_add = Autogenerate("generated_mixed_add", mixed_add_spec)
+        signed_sum = Autogenerate("generated_signed_sum", signed_sum_spec)
+
+        self.assertEqual(mixed_add.inner_tree.name, "q_add")
+        self.assertEqual(mixed_add.inner_tree.args[0].name, "uq_to_q")
+        self.assertEqual(mixed_add.dtype, Q(4, 0))
+
+        self.assertEqual(signed_sum.inner_tree.name, "uq_to_q")
+        self.assertEqual(signed_sum.inner_tree.args[0].name, "uq_add")
+        self.assertEqual(signed_sum.dtype, Q(5, 0))
+
+    def test_autogenerate_rejects_signed_range_for_unsigned_result(self):
+        def spec(x: Q(3, 0), ctx) -> UQ(2, 0):
+            del ctx
+            return x
+
+        with self.assertRaisesRegex(
+            InfeasibleError,
+            r"result range does not fit UQ<2,0>.*try Q\(3, 0\)",
+        ):
+            Autogenerate("generated_q_to_uq", spec)
+
+    def test_autogenerate_prefers_depth_zero_identity(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            del ctx
+            return x
+
+        generated = Autogenerate("generated_identity", spec)
+
+        self.assertIsInstance(generated.inner_tree, Var)
+        self.assertEqual(generated.dtype, UQ(2, 0))
+
+    def test_autogenerate_uses_contracted_widening_factory(self):
+        def spec(x: UQ(2, 0), ctx) -> Q(4, 0):
+            del ctx
+            return x
+
+        generated = Autogenerate("generated_widened_conversion", spec)
+
+        self.assertEqual(generated.dtype, Q(4, 0))
+        self.assertEqual(generated.inner_tree.name, "uq_to_q")
+        widened = generated.inner_tree.args[0]
+        self.assertEqual(widened.name, "_uq_zero_extend")
+        self.assertEqual(widened.inner_tree.name, "uq_zero_extend")
+
+    def test_autogenerate_matches_registered_non_arithmetic_components(self):
+        def negate_spec(x: Q(3, 0), ctx) -> Q:
+            del ctx
+            return -x
+
+        def less_spec(x: UQ(2, 0), y: UQ(3, 0), ctx) -> Bool:
+            del ctx
+            return x < y
+
+        def zero_spec(x: UQ(2, 0), ctx) -> Bool():
+            return x.eq(ctx.zero())
+
+        def bool_equal_spec(x: Bool(), y: Bool(), ctx) -> Bool:
+            del ctx
+            return x.eq(y)
+
+        negated = Autogenerate("generated_negate", negate_spec)
+        compared = Autogenerate("generated_less", less_spec)
+        zero = Autogenerate("generated_zero", zero_spec)
+        bool_equal = Autogenerate("generated_bool_equal", bool_equal_spec)
+
+        self.assertEqual(negated.inner_tree.name, "q_neg")
+        self.assertEqual(compared.inner_tree.name, "uq_lt")
+        self.assertEqual(zero.inner_tree.name, "uq_eq")
+        self.assertEqual(bool_equal.inner_tree.name, "bool_eq")
+
+    def test_autogenerate_lowers_bool_uq_conversions(self):
+        def bool_to_uq_conversion(x: Bool(), ctx) -> UQ(1, 0):
+            return If(x, ctx.one(), ctx.zero())
+
+        def uq_to_bool_conversion(x: UQ(1, 0), ctx) -> Bool():
+            return x.eq(ctx.one())
+
+        numeric = Autogenerate("generated_bool_to_uq", bool_to_uq_conversion)
+        boolean = Autogenerate("generated_uq_to_bool", uq_to_bool_conversion)
+
+        self.assertEqual(numeric.inner_tree.name, "bool_to_uq")
+        self.assertEqual(numeric.dtype, UQ(1, 0))
+        self.assertEqual(boolean.inner_tree.name, "uq_to_bool")
+        self.assertEqual(boolean.dtype, Bool())
+
+    def test_autogenerate_rejects_return_expression_category_mismatch(self):
+        def numeric_annotation(x: UQ(2, 0), ctx) -> UQ:
+            return x.eq(ctx.zero())
+
+        def boolean_annotation(x: UQ(2, 0), ctx) -> Bool():
+            del ctx
+            return x
+
+        with self.assertRaisesRegex(TypeError, "must produce a real expression"):
+            Autogenerate("numeric_annotation", numeric_annotation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "must produce a Boolean expression",
+        ):
+            Autogenerate("boolean_annotation", boolean_annotation)
+
+    def test_autogenerate_lowers_conditionals(self):
+        def choose_spec(
+            sel: Bool(),
+            in1: UQ(2, 0),
+            in0: UQ(2, 0),
+            ctx,
+        ) -> UQ(2, 0):
+            del ctx
+            return If(sel, in1, in0)
+
+        chosen = Autogenerate("generated_choose", choose_spec)
+
+        self.assertEqual(chosen.inner_tree.name, "_if_then_else")
+
+    def test_autogenerate_lowers_boolean_literals(self):
+        def spec(ctx) -> Bool():
+            return ctx.true()
+
+        generated = Autogenerate("generated_true", spec)
+
+        self.assertIsInstance(generated.inner_tree, Const)
+        self.assertEqual(generated.inner_tree.dtype, Bool())
+        self.assertTrue(generated.inner_tree.value.to_python())
+
+    def test_autogenerate_rejects_result_range_that_does_not_fit(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x + ctx.one()
+
+        with (
+            patch(
+                "zolotone.ast.spec_validation.rival_range_analysis",
+                return_value=(1.0, 4.0),
+            ),
+            self.assertRaisesRegex(
+                InfeasibleError,
+                r"result range does not fit UQ<2,0>; try UQ\(3, 0\)",
+            ),
+        ):
+            Autogenerate("generated_overflowing_add", spec)
+
+    def test_autogenerate_rejects_component_without_spec_contract(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            return x + ctx.one()
+
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (object(),)),
+            self.assertRaisesRegex(
+                MissingError,
+                "does not expose a specification contract",
+            ),
+        ):
+            Autogenerate("generated_with_invalid_component", spec)
+
+    def test_range_analysis_failure_raises_zolotone_error(self):
+        from zolotone.ast.spec_validation import (
+            _output_format_suggestion_with_range_analysis,
+        )
+
+        ctx = SpecContext("missing-range-analysis")
+        spec_ast = ctx.real("x")
+
+        for output_range in (None, (-math.inf, math.inf)):
+            with (
+                self.subTest(output_range=output_range),
+                patch(
+                    "zolotone.ast.spec_validation.rival_range_analysis",
+                    return_value=output_range,
+                ),
+                self.assertRaisesRegex(
+                    ZolotoneError,
+                    "Could not obtain.*output range",
+                ),
+            ):
+                _output_format_suggestion_with_range_analysis(
+                    spec_ast,
+                    UQ(2, 0),
+                    ctx,
+                )
+
+    def test_range_analysis_suggestion_matches_solver_search(self):
+        from zolotone.ast.spec_validation import (
+            _output_format_suggestion_with_range_analysis,
+            _output_format_suggestion_with_search,
+        )
+
+        ctx = SpecContext("compare-output-format-suggestions")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.zero())
+        ctx.assume(x <= ctx.real_val(3))
+        spec_ast = x + ctx.one()
+        return_annotation = UQ(2, 0)
+
+        search_suggestion = _output_format_suggestion_with_search(
+            spec_ast,
+            return_annotation,
+            ctx,
+        )
+        range_suggestion = _output_format_suggestion_with_range_analysis(
+            spec_ast,
+            return_annotation,
+            ctx,
+        )
+
+        self.assertEqual(range_suggestion, search_suggestion)
+        self.assertEqual(range_suggestion, UQ(3, 0))
+
+    def test_autogenerate_suggests_zero_integer_bit_signed_output(self):
+        def spec(ctx) -> UQ(10, 1):
+            return ctx.real_val(-0.5)
+
+        with (
+            patch(
+                "zolotone.ast.spec_validation.rival_range_analysis",
+                return_value=(-0.5, -0.5),
+            ),
+            self.assertRaisesRegex(InfeasibleError, r"try Q\(0, 1\)"),
+        ):
+            Autogenerate("generated_negative_fraction", spec)
+
+    def test_autogenerate_checks_generic_unsigned_result_is_nonnegative(self):
+        def spec(x: Q(3, 0), ctx) -> UQ:
+            del ctx
+            return x
+
+        with self.assertRaisesRegex(
+            InfeasibleError,
+            "result range does not fit.*try Q as the output format",
+        ):
+            Autogenerate("generated_generic_unsigned", spec)
+
+    def test_autogenerate_uses_relational_assumption_for_result_range(self):
+        def spec(x: UQ(3, 0), y: UQ(1, 0), ctx) -> UQ:
+            ctx.assume(x - y >= ctx.zero())
+            return x - y
+
+        generated = Autogenerate("generated_assumed_subtraction", spec)
+
+        self.assertEqual(generated.inner_tree.name, "uq_sub")
+        self.assertEqual(generated.dtype, UQ(4, 0))
+
+    def test_autogenerate_unsupported_spec_reaches_search_limit(self):
+        from zolotone.ast import autogen as ast_autogen
+
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            return x ** ctx.two()
+
+        with patch.object(ast_autogen, "MAX_SEARCH_DEPTH", 2), self.assertRaisesRegex(
+            ZolotoneError,
+            "search reached the maximum depth of 2",
+        ):
+            Autogenerate("generated_pow", spec)
+
     def test_complete_exact_and_family_contracts_are_accepted(self):
         def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
             return x
@@ -9071,6 +9442,22 @@ class TestSolverApis(unittest.TestCase):
 
 
 class TestSignSpecs(unittest.TestCase):
+    def test_bool_uq_converters_preserve_one_bit_encoding(self):
+        bool_input = Var("bool_input", Bool())
+        uq_input = Var("uq_input", UQ(1, 0))
+        as_uq = bool_to_uq(bool_input)
+        as_bool = uq_to_bool(uq_input)
+
+        self.assertEqual(as_uq.dtype, UQ(1, 0))
+        self.assertEqual(as_bool.dtype, Bool())
+
+        for raw in (0, 1):
+            with self.subTest(raw=raw):
+                bool_input.load_value(Bool().from_bits(raw))
+                uq_input.load_value(UQ(1, 0).from_bits(raw))
+                self.assertEqual(as_uq.evaluate().raw, raw)
+                self.assertEqual(as_bool.evaluate().raw, raw)
+
     def test_bit_operators_require_exact_one_bit_uq_descriptors(self):
         bit = Var("bit", UQ(1, 0))
 

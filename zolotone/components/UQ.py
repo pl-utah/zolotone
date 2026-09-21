@@ -478,7 +478,7 @@ def uq_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
 
 
 def uq_is_zero_spec(x: UQ, ctx) -> UQ:
-    return x.eq(ctx.zero())
+    return If(x.eq(ctx.zero()), ctx.one(), ctx.zero())
 
 
 @Primitive(name="uq_is_zero", spec=uq_is_zero_spec)

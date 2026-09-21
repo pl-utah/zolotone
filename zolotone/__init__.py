@@ -1,4 +1,5 @@
 from .ast import *
+from .errors import *
 from .types import *
 from .components.Tuple import *
 from .components.basics import *

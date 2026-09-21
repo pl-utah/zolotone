@@ -2,7 +2,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use rival::{Discretization, Expr, Hint, Ival, Machine, MachineBuilder};
-use rug::{Float, Integer, Rational};
+use rug::{float::Round, Float, Integer, Rational};
 
 #[derive(Clone)]
 struct F64Discretization;
@@ -18,6 +18,23 @@ impl Discretization for F64Discretization {
 
     fn distance(&self, _: usize, lo: &Float, hi: &Float) -> usize {
         ordinal_distance_f64(lo.to_f64(), hi.to_f64())
+    }
+}
+
+#[derive(Clone)]
+struct RangeDiscretization;
+
+impl Discretization for RangeDiscretization {
+    fn target(&self) -> u32 {
+        128
+    }
+
+    fn convert(&self, _: usize, value: &Float) -> Float {
+        value.clone()
+    }
+
+    fn distance(&self, _: usize, _: &Float, _: &Float) -> usize {
+        0
     }
 }
 
@@ -54,6 +71,7 @@ impl RivalHints {
 #[pyclass(module = "zolotone._rival3")]
 struct RawRivalMachine {
     machine: Machine<F64Discretization>,
+    range_machine: Machine<RangeDiscretization>,
 }
 
 #[pymethods]
@@ -79,6 +97,32 @@ impl RawRivalMachine {
         let status_interval = (!status.lo().is_zero(), !status.hi().is_zero());
         Ok((status_interval, RivalHints { hints: next_hints }))
     }
+
+    fn apply_range(&mut self, rect: Vec<(f64, f64)>) -> PyResult<(f64, f64)> {
+        let precision = self.machine.argument_precision();
+        let rival_rect = rect
+            .into_iter()
+            .map(|(lo, hi)| {
+                Ival::from_lo_hi(
+                    Float::with_val(precision, lo),
+                    Float::with_val(precision, hi),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let outputs = self
+            .range_machine
+            .apply(&rival_rect, None, 1)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let range = outputs
+            .first()
+            .ok_or_else(|| PyValueError::new_err("range machine returned no outputs"))?;
+        let output_range = (
+            range.lo().to_f64_round(Round::Down),
+            range.hi().to_f64_round(Round::Up),
+        );
+        Ok(output_range)
+    }
 }
 
 #[pyfunction]
@@ -92,9 +136,14 @@ fn build_machine(exprs: &PyList, free_vars: Vec<String>) -> PyResult<RawRivalMac
         rival_exprs.push(parse_expr(expr)?);
     }
 
+    let range_machine =
+        MachineBuilder::new(RangeDiscretization).build(rival_exprs.clone(), free_vars.clone());
     let machine = MachineBuilder::new(F64Discretization).build(rival_exprs, free_vars);
 
-    Ok(RawRivalMachine { machine })
+    Ok(RawRivalMachine {
+        machine,
+        range_machine,
+    })
 }
 
 fn dict_get<'py>(dict: &'py PyDict, key: &str) -> PyResult<&'py PyAny> {
