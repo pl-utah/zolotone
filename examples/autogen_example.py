@@ -37,7 +37,7 @@ def spec1(x: UQ(2, 0), y: UQ(3, 0), ctx) -> UQ:
 
 
 # The result can be negative
-@Test(TypeError)
+@Test(InfeasibleError)
 def spec_infeasible_subtraction(x: UQ(3, 0), y: UQ(1, 0), ctx) -> UQ:
     return x - y
 
@@ -63,13 +63,13 @@ def spec2(x: UQ(2, 0), y: Q(3, 0), ctx) -> Q:
 
 
 # x does not have a clear precision
-@Test(TypeError)
+@Test(MissingError)
 def spec3(x: UQ, y: Q(3, 0), ctx) -> Q:
     return x + y
 
 
 # infeasible
-@Test(TypeError)
+@Test(InfeasibleError)
 def spec4(x: UQ(2, 0), y: Q(3, 0), ctx) -> UQ(3, 0):
     return x + y
 
@@ -79,7 +79,7 @@ def spec5(x: UQ(2, 0), ctx) -> UQ:
     return x + ctx.one()
 
 
-# sign extension, lsb is not going to be used
+# sign extension, msb is not going to be used
 @Test()
 def spec6(x: Q(2, 0), ctx) -> Q(4, 0):
     return x + ctx.one()
@@ -91,14 +91,14 @@ def spec7(x: Q(3, 0), y: Bool(), ctx) -> Q(3,0):
 
 
 # some undeclared variables in spec
-@Test(TypeError)
+@Test(MissingError)
 def spec8(x: Q(3, 0), ctx) -> Q:
     y = ctx.fresh_real("x")
     return x + ctx.real_val(2) + y
 
 
 # precision for 2.5 is not known
-@Test(TypeError)
+@Test(NotImplementedError)
 def spec9(x: Q(3, 0), ctx) -> Q:
     return x + ctx.real_val(2.5)
 
@@ -110,7 +110,7 @@ def spec10(sel: Bool(), in1: UQ(2, 0), in0: UQ(2, 0), ctx) -> UQ(2, 0):
 
 
 # infeasible
-@Test(TypeError)
+@Test(InfeasibleError)
 def spec11(x: UQ(2, 0), ctx) -> UQ(2, 0):
     return x + ctx.one()
 
@@ -131,4 +131,3 @@ def spec13(x: UQ(2, 0), ctx) -> Float32():
 @Test()
 def spec_bool_to_uq_then_add(x: Bool(), y: UQ(1, 0), ctx) -> UQ(4, 0):
     return If(x, ctx.one(), ctx.zero()) + y
-

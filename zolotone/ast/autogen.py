@@ -1,6 +1,7 @@
 import itertools
 import typing as tp
 
+from ..errors import MissingError, ZolotoneError
 from ..spec.spec_ast import (
     BoolLit,
     BoolVar,
@@ -124,7 +125,9 @@ def search_lower_spec_to_impl(
                 )
             # it is not an integer
             except TypeError:
-                raise TypeError("Cannot currently lower floats into a fixed point")
+                raise NotImplementedError(
+                    "Cannot currently lower floats into a fixed point"
+                )
             state = (literal.spec, literal.node.dtype)
         elif isinstance(expr, BoolLit):
             literal = _Candidate(
@@ -135,7 +138,7 @@ def search_lower_spec_to_impl(
             state = (literal.spec, literal.node.dtype)
         elif isinstance(expr, (BoolVar, RealVar)):
             if expr not in spec_input_nodes:
-                raise TypeError(
+                raise MissingError(
                     f"Undeclared variable in specification: {expr}"
                 )
             continue
@@ -157,7 +160,7 @@ def search_lower_spec_to_impl(
         for component in LOSSLESS_COMPONENTS:
             component_contract = getattr(component, "_spec_contract", None)
             if not isinstance(component_contract, _SpecContract):
-                raise TypeError(
+                raise MissingError(
                     f"Autogeneration component {component!r} does not expose "
                     "a specification contract"
                 )
@@ -219,13 +222,13 @@ def search_lower_spec_to_impl(
             if _matches_result(candidate, spec_ast, return_annotation):
                 return candidate.node
         if not generated:
-            raise TypeError(
+            raise ZolotoneError(
                 f"Cannot lower specification {spec_ast!r} to "
                 f"{return_annotation!r}; search reached a fixpoint after "
                 f"depth {depth} with {len(states)} candidate states"
             )
         if depth == MAX_SEARCH_DEPTH:
-            raise TypeError(
+            raise ZolotoneError(
                 f"Cannot lower specification {spec_ast!r} to "
                 f"{return_annotation!r}; search reached the maximum depth "
                 f"of {MAX_SEARCH_DEPTH} with {len(states)} candidate states"

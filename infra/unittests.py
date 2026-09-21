@@ -8154,7 +8154,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x
 
         with self.assertRaisesRegex(
-            TypeError,
+            MissingError,
             "input parameter 'x' must have an exact DataType descriptor",
         ):
             Autogenerate(name="generic_identity", spec=spec)
@@ -8198,7 +8198,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x
 
         with self.assertRaisesRegex(
-            TypeError,
+            InfeasibleError,
             r"result range does not fit UQ<2,0>.*try Q\(3, 0\)",
         ):
             Autogenerate("generated_q_to_uq", spec)
@@ -8317,11 +8317,50 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 return_value=(1.0, 4.0),
             ),
             self.assertRaisesRegex(
-                TypeError,
+                InfeasibleError,
                 r"result range does not fit UQ<2,0>; try UQ\(3, 0\)",
             ),
         ):
             Autogenerate("generated_overflowing_add", spec)
+
+    def test_autogenerate_rejects_component_without_spec_contract(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            return x + ctx.one()
+
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (object(),)),
+            self.assertRaisesRegex(
+                MissingError,
+                "does not expose a specification contract",
+            ),
+        ):
+            Autogenerate("generated_with_invalid_component", spec)
+
+    def test_range_analysis_failure_raises_zolotone_error(self):
+        from zolotone.ast.spec_validation import (
+            _output_format_suggestion_with_range_analysis,
+        )
+
+        ctx = SpecContext("missing-range-analysis")
+        spec_ast = ctx.real("x")
+
+        for output_range in (None, (-math.inf, math.inf)):
+            with (
+                self.subTest(output_range=output_range),
+                patch(
+                    "zolotone.ast.spec_validation.rival_range_analysis",
+                    return_value=output_range,
+                ),
+                self.assertRaisesRegex(
+                    ZolotoneError,
+                    "Could not obtain.*output range",
+                ),
+            ):
+                _output_format_suggestion_with_range_analysis(
+                    spec_ast,
+                    UQ(2, 0),
+                    ctx,
+                )
 
     def test_range_analysis_suggestion_matches_solver_search(self):
         from zolotone.ast.spec_validation import (
@@ -8359,7 +8398,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 "zolotone.ast.spec_validation.rival_range_analysis",
                 return_value=(-0.5, -0.5),
             ),
-            self.assertRaisesRegex(TypeError, r"try Q\(0, 1\)"),
+            self.assertRaisesRegex(InfeasibleError, r"try Q\(0, 1\)"),
         ):
             Autogenerate("generated_negative_fraction", spec)
 
@@ -8369,7 +8408,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x
 
         with self.assertRaisesRegex(
-            TypeError,
+            InfeasibleError,
             "result range does not fit.*try Q as the output format",
         ):
             Autogenerate("generated_generic_unsigned", spec)
@@ -8391,7 +8430,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x ** ctx.two()
 
         with patch.object(ast_autogen, "MAX_SEARCH_DEPTH", 2), self.assertRaisesRegex(
-            TypeError,
+            ZolotoneError,
             "search reached the maximum depth of 2",
         ):
             Autogenerate("generated_pow", spec)
