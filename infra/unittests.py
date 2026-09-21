@@ -1273,6 +1273,7 @@ class TestCppLowering(unittest.TestCase):
         bool_source = negate(Var("value", Bool())).to_cpp("check_bool")
 
         self.assertIn("#include <cassert>", bool_source)
+        self.assertIn("class Zolotone", bool_source)
         self.assertIn("assert(arg_0 >= 0 && arg_0 <= 1);", bool_source)
         self.assertIn("return check_bool_impl(arg_0);", bool_source)
 
@@ -1284,10 +1285,17 @@ class TestCppLowering(unittest.TestCase):
         self.assertNotIn("#include <cassert>", source)
         self.assertNotIn("    assert(", source)
         self.assertIn(
-            'extern "C" inline ac_uint<1> check_bool(ac_uint<1> arg_0)',
+            "static inline ac_uint<1> check_bool(ac_uint<1> arg_0)",
             source,
         )
         self.assertIn("return check_bool_impl(arg_0);", source)
+
+    def test_jittable_array_elements_use_bounds_checked_access(self):
+        values = Var("values", Tuple(UQ(4, 0), UQ(4, 0)))
+
+        source = values[1].to_cpp("select_second")
+
+        self.assertIn("arg_0.at(1)", source)
 
 
 class TestConstantFolding(unittest.TestCase):

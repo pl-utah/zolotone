@@ -35,7 +35,11 @@ def _basic_get_item(x: Node, idx: int) -> Op:
     return Op(
         impl=op,
         sign=sign,
-        c_lowering=lambda lowered_args, jittable: f"{lowered_args[0]}[{idx}]" if jittable else f"std::get<{idx}>({lowered_args[0]})",
+        c_lowering=lambda lowered_args, jittable: (
+            f"{lowered_args[0]}.at({idx})"
+            if jittable
+            else f"std::get<{idx}>({lowered_args[0]})"
+        ),
         args=[x],
         name=f"_basic_get_item_{idx}",
     )

@@ -68,8 +68,8 @@ if __name__ == "__main__":
     cast.check_determinism()
     cast.check_spec()
 
-    with open("examples/c_models/fp32_to_fp16_jit.hpp", "w") as file:
+    with open("examples/c_models/fp32_to_fp16_jit.cpp", "w") as file:
         file.write(cast.to_cpp(jittable=True))
 
-    with open("examples/c_models/fp32_to_fp16_no_jit.hpp", "w") as file:
+    with open("examples/c_models/fp32_to_fp16_no_jit.cpp", "w") as file:
         file.write(cast.to_cpp(jittable=False))
