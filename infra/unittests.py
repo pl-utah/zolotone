@@ -8218,13 +8218,45 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             del ctx
             return x
 
-        generated = Autogenerate("generated_widened_conversion", spec)
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"consider UQ<2,0>.*range \(0\.0, 3\.0\)",
+        ):
+            generated = Autogenerate("generated_widened_conversion", spec)
 
         self.assertEqual(generated.dtype, Q(4, 0))
         self.assertEqual(generated.inner_tree.name, "uq_to_q")
         widened = generated.inner_tree.args[0]
         self.assertEqual(widened.name, "_uq_zero_extend")
         self.assertEqual(widened.inner_tree.name, "uq_zero_extend")
+
+    def test_output_optimization_propagates_range_analysis_failure(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ(4, 0):
+            del ctx
+            return x
+
+        with (
+            patch(
+                "zolotone.ast.spec_validation.rival_range_analysis",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(
+                ZolotoneError,
+                "Could not obtain output range",
+            ),
+        ):
+            Autogenerate("generated_without_range", spec)
+
+    def test_infeasible_signed_output_suggests_unsigned_format(self):
+        def spec(x: UQ(2, 0), ctx) -> Q(2, 0):
+            del ctx
+            return x
+
+        with self.assertRaisesRegex(
+            InfeasibleError,
+            r"try UQ\(2, 0\)",
+        ):
+            Autogenerate("generated_narrow_signed", spec)
 
     def test_autogenerate_matches_registered_non_arithmetic_components(self):
         def negate_spec(x: Q(3, 0), ctx) -> Q:

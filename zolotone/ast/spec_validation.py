@@ -1,5 +1,6 @@
 import math
 import typing as tp
+import warnings
 
 from ..errors import InfeasibleError, MissingError, ZolotoneError
 from ..rival import rival_range_analysis
@@ -47,10 +48,22 @@ def _fixed_point_result_fits(
     )
 
 
-def _prove_result_fits(ctx: SpecContext, result_fits: BoolExpr) -> bool:
+def _prove_result_fits(spec_ast, output_type, ctx):
+    if output_type is Q:
+        return True
+    if output_type is UQ:
+        result_fits = spec_ast >= ctx.zero()
+    elif isinstance(output_type, (Q, UQ)):
+        result_fits = _fixed_point_result_fits(spec_ast, output_type, ctx)
+    else:
+        raise TypeError(
+            "Result-fit proof expects a Q or UQ output type, got "
+            f"{output_type!r}"
+        )
+
     range_ctx = ctx.copy(checks=[result_fits])
     status, _proof_trace = check_equivalence(range_ctx, schedule=FEASIBILITY_SCHEDULE)
-    return status == "unsat", _proof_trace
+    return status == "unsat"
 
 
 # TODO: this method is mostly for checking range analysis now, to be deleted later
@@ -59,7 +72,7 @@ def _output_format_suggestion_with_search(
     return_annotation: Q | UQ,
     ctx: SpecContext,
 ) -> Q | UQ | None:
-    dtype_type = type(return_annotation)
+    dtype_type = UQ if _prove_result_fits(spec_ast, UQ, ctx) else Q
 
     def candidate(int_bits: int) -> Q | UQ:
         return dtype_type(int_bits, return_annotation.frac_bits)
@@ -69,11 +82,7 @@ def _output_format_suggestion_with_search(
     max_int_bits = return_annotation.int_bits + 32
     widest = candidate(max_int_bits)
 
-    if not _prove_result_fits(ctx, _fixed_point_result_fits(spec_ast, widest, ctx))[0]:
-        # If the result cannot be stored even with a wider UQ output format - try Q
-        if isinstance(return_annotation, UQ):
-            signed = Q(max(0, 1 - return_annotation.frac_bits), return_annotation.frac_bits)
-            return _output_format_debugging(spec_ast, signed, ctx)
+    if not _prove_result_fits(spec_ast, widest, ctx):
         return None
 
     low = min_int_bits
@@ -81,11 +90,12 @@ def _output_format_suggestion_with_search(
     while low < high:
         middle = (low + high) // 2
         middle_dtype = candidate(middle)
-        if _prove_result_fits(ctx, _fixed_point_result_fits(spec_ast, middle_dtype, ctx))[0]:
+        if _prove_result_fits(spec_ast, middle_dtype, ctx):
             high = middle
         else:
             low = middle + 1
     return candidate(low)
+
 
 def _output_format_suggestion_with_range_analysis(
     spec_ast: RealExpr,
@@ -105,7 +115,7 @@ def _output_format_suggestion_with_range_analysis(
 
     frac_bits = return_annotation.frac_bits
     scale = 1 << frac_bits
-    unsigned = _prove_result_fits(ctx, spec_ast >= ctx.zero())[0]
+    unsigned = _prove_result_fits(spec_ast, UQ, ctx)
     # It should be an unsigned fixed-point
     if unsigned:
         required_raw = max(0, math.ceil(upper * scale))
@@ -130,11 +140,11 @@ def _output_format_debugging(
 ) -> object | None:
     # TODO: provide a counterexample
     if return_annotation is UQ:
-        if not _prove_result_fits(ctx, spec_ast >= ctx.zero())[0]:
+        if not _prove_result_fits(spec_ast, UQ, ctx):
             return Q
         return UQ
     elif return_annotation is Q:
-        if _prove_result_fits(ctx, spec_ast >= ctx.zero())[0]:
+        if _prove_result_fits(spec_ast, UQ, ctx):
             return UQ
         return Q
     elif isinstance(return_annotation, (Q, UQ)):
@@ -142,8 +152,8 @@ def _output_format_debugging(
         dtype2 = _output_format_suggestion_with_search(spec_ast, return_annotation, ctx)
         if not dtype1 == dtype2:
             raise AssertionError("derived dtypes are not equal! ranges: " + str(dtype1) + ", search: " + str(dtype2))
-        if not _prove_result_fits(ctx, _fixed_point_result_fits(spec_ast, dtype1, ctx))[0]:
-            raise AssertionError("That's a crime, derived dtype does not fit the result")
+        if not _prove_result_fits(spec_ast, dtype1, ctx):
+            raise AssertionError("That's a bug, derived dtype does not fit the result")
         return dtype1
     else:
         raise NotImplementedError(
@@ -184,41 +194,35 @@ def check_spec_feasibility(
         # At this point there is nothing to check
         return
 
-    elif return_annotation in (Q, UQ) or isinstance(return_annotation, (Q, UQ)):
-        if not isinstance(spec_ast, RealExpr):
-            raise TypeError(
-                f"Specification returning {return_annotation!r} must produce "
-                f"a real expression, got {type(spec_ast).__name__}"
-            )
-        # If output is just Q - there is nothing to check for feasibility really
-        if return_annotation is Q:
-            return
-        # If output is UQ - we can check that output is non-negative
-        if return_annotation is UQ:
-            result_fits = spec_ast >= ctx.zero()
-        # If it is UQ/Q with bit-widths - we can check that range covers all outputs
-        else:
-            result_fits = _fixed_point_result_fits(
-                spec_ast,
-                return_annotation,
-                ctx,
-            )
+    if not isinstance(spec_ast, RealExpr):
+        raise TypeError(
+            f"Specification returning {return_annotation!r} must produce "
+            f"a real expression, got {type(spec_ast).__name__}"
+        )
 
-        if not _prove_result_fits(ctx, result_fits)[0]:
-            suggestion = _output_format_debugging(
-                spec_ast,
-                return_annotation,
-                ctx,
-            )
-            message = f"Specification result range does not fit {return_annotation!r}"
-            if suggestion is not None:
-                message += f"; try {_format_output_annotation(suggestion)} as the output format instead"
-            else:
-                message += "; could not find a fixed-point format that would fit the range"
-            raise InfeasibleError(message)
-        return
-    else:
+    if return_annotation not in (Q, UQ) and not isinstance(return_annotation, (Q, UQ)):
         raise NotImplementedError(
             f"Output format {return_annotation!r} is not supported by "
             "the feasibility check"
         )
+
+    # TODO: counterexample
+    if not _prove_result_fits(spec_ast, return_annotation, ctx):
+        suggestion = _output_format_debugging(spec_ast, return_annotation, ctx)
+        message = f"Specification result range does not fit {return_annotation!r}"
+        if suggestion is not None:
+            message += f"; try {_format_output_annotation(suggestion)} as the output format instead"
+        else:
+            message += "; could not find a fixed-point format that would fit the range"
+        raise InfeasibleError(message)
+
+    suggestion = _output_format_debugging(spec_ast, return_annotation, ctx)
+    if suggestion != return_annotation:
+        output_range = rival_range_analysis(spec_ast, ctx)
+        warnings.warn(
+            f"Output type {return_annotation} is wider than necessary; "
+            f"consider {suggestion} for inferred output range {output_range}",
+            UserWarning,
+            stacklevel=3,
+        )
+    return

@@ -93,6 +93,8 @@ def _matches_result(
         candidate.spec.identical(spec_ast)
         and _annotation_matches(candidate.node.dtype, return_annotation)
     )
+
+
 def search_lower_spec_to_impl(
     spec_ast: SpecNode,
     spec_input_nodes: dict[tp.Any, Node],
