@@ -129,6 +129,14 @@ def spec13(x: UQ(2, 0), ctx) -> Float32():
 
 # conversion can be composed with numeric components
 @Test()
-def spec_bool_to_uq_then_add(x: Bool(), y: UQ(1, 0), ctx) -> UQ(4, 0):
-    ctx.assume(y > ctx.zero())
-    return If(x, ctx.one(), ctx.zero()) + y
+def spec_bool_to_uq_then_add(x: Bool(), y: UQ(2, 1), ctx) -> UQ(5, 1):
+    ctx.assume(y < ctx.two())
+    return If(x, ctx.real_val(2), ctx.zero()) + y
+
+
+# Rival keeps the input range, then solver search uses the compound assumption
+# to shrink the output suggestion to UQ(1, 0).
+@Test()
+def spec_assumption_shrinks_output(x: UQ(4, 0), ctx) -> UQ(4, 0):
+    ctx.assume((x - ctx.one()).eq(ctx.zero()))
+    return x

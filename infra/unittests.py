@@ -8407,19 +8407,38 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         spec_ast = x + ctx.one()
         return_annotation = UQ(2, 0)
 
-        search_suggestion = _output_format_suggestion_with_search(
-            spec_ast,
-            return_annotation,
-            ctx,
-        )
         range_suggestion = _output_format_suggestion_with_range_analysis(
             spec_ast,
             return_annotation,
             ctx,
         )
+        search_suggestion = _output_format_suggestion_with_search(
+            spec_ast,
+            range_suggestion,
+            ctx,
+        )
 
         self.assertEqual(range_suggestion, search_suggestion)
         self.assertEqual(range_suggestion, UQ(3, 0))
+
+    def test_solver_search_shrinks_rival_bound_using_assumptions(self):
+        from zolotone.ast.spec_validation import _output_format_suggestion
+
+        ctx = SpecContext("shrink-output-format-with-assumptions")
+        x = ctx.real("x")
+        ctx.assume(x.eq(ctx.one()))
+
+        with patch(
+            "zolotone.ast.spec_validation.rival_range_analysis",
+            return_value=(-4.0, 7.0),
+        ):
+            suggestion = _output_format_suggestion(
+                x,
+                UQ(4, 0),
+                ctx,
+            )
+
+        self.assertEqual(suggestion, UQ(1, 0))
 
     def test_autogenerate_suggests_zero_integer_bit_signed_output(self):
         def spec(ctx) -> UQ(10, 1):

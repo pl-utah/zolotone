@@ -66,20 +66,19 @@ def _prove_result_fits(spec_ast, output_type, ctx):
     return status == "unsat"
 
 
-# TODO: this method is mostly for checking range analysis now, to be deleted later
 def _output_format_suggestion_with_search(
     spec_ast: RealExpr,
-    return_annotation: Q | UQ,
+    conservative_format: Q | UQ,
     ctx: SpecContext,
 ) -> Q | UQ | None:
+    """Shrink a conservative format using proofs over the full context."""
     dtype_type = UQ if _prove_result_fits(spec_ast, UQ, ctx) else Q
 
     def candidate(int_bits: int) -> Q | UQ:
-        return dtype_type(int_bits, return_annotation.frac_bits)
+        return dtype_type(int_bits, conservative_format.frac_bits)
 
-    # As few integer bits as possible
-    min_int_bits = max(0, 1 - return_annotation.frac_bits)
-    max_int_bits = return_annotation.int_bits + 32
+    min_int_bits = max(0, 1 - conservative_format.frac_bits)
+    max_int_bits = conservative_format.int_bits
     widest = candidate(max_int_bits)
 
     if not _prove_result_fits(spec_ast, widest, ctx):
@@ -115,29 +114,27 @@ def _output_format_suggestion_with_range_analysis(
 
     frac_bits = return_annotation.frac_bits
     scale = 1 << frac_bits
-    unsigned = _prove_result_fits(spec_ast, UQ, ctx)
-    # It should be an unsigned fixed-point
-    if unsigned:
+    if lower >= 0:
         required_raw = max(0, math.ceil(upper * scale))
         total_bits = max(1, frac_bits, required_raw.bit_length())
         int_bits = total_bits - frac_bits
         return UQ(int_bits, frac_bits)
-    # It clearly should be a signed fixed-point
-    else:
-        lower_raw = math.floor(lower * scale)
-        upper_raw = math.ceil(upper * scale)
-        required_magnitude = max(1, -lower_raw, upper_raw + 1)
-        magnitude_bits = (required_magnitude - 1).bit_length()
-        total_bits = max(1, frac_bits, magnitude_bits + 1)
-        int_bits = total_bits - frac_bits
-        return Q(int_bits, frac_bits)
+
+    lower_raw = math.floor(lower * scale)
+    upper_raw = math.ceil(upper * scale)
+    required_magnitude = max(1, -lower_raw, upper_raw + 1)
+    magnitude_bits = (required_magnitude - 1).bit_length()
+    total_bits = max(1, frac_bits, magnitude_bits + 1)
+    int_bits = total_bits - frac_bits
+    return Q(int_bits, frac_bits)
 
 
-def _output_format_debugging(
+def _output_format_suggestion(
     spec_ast: RealExpr,
     return_annotation: object,
     ctx: SpecContext,
 ) -> object | None:
+    """Derive a conservative format with Rival, then shrink it by proof."""
     # TODO: provide a counterexample
     if return_annotation is UQ:
         if not _prove_result_fits(spec_ast, UQ, ctx):
@@ -148,16 +145,27 @@ def _output_format_debugging(
             return UQ
         return Q
     elif isinstance(return_annotation, (Q, UQ)):
-        dtype1 = _output_format_suggestion_with_range_analysis(spec_ast, return_annotation, ctx)
-        dtype2 = _output_format_suggestion_with_search(spec_ast, return_annotation, ctx)
-        if not dtype1 == dtype2:
-            raise AssertionError("derived dtypes are not equal! ranges: " + str(dtype1) + ", search: " + str(dtype2))
-        if not _prove_result_fits(spec_ast, dtype1, ctx):
-            raise AssertionError("That's a bug, derived dtype does not fit the result")
-        return dtype1
+        conservative_format = _output_format_suggestion_with_range_analysis(
+            spec_ast,
+            return_annotation,
+            ctx,
+        )
+        suggestion = _output_format_suggestion_with_search(
+            spec_ast,
+            conservative_format,
+            ctx,
+        )
+        if suggestion is None:
+            raise ValueError(
+                "Rival-derived format does not fit the result: "
+                f"{conservative_format}"
+            )
+        if not _prove_result_fits(spec_ast, suggestion, ctx):
+            raise ValueError("That's a bug, derived dtype does not fit the result")
+        return suggestion
     else:
         raise NotImplementedError(
-            "Output range debugging is not implemented for "
+            "Output format suggestion is not implemented for "
             f"{return_annotation!r}"
         )
 
@@ -208,7 +216,7 @@ def check_spec_feasibility(
 
     # TODO: counterexample
     if not _prove_result_fits(spec_ast, return_annotation, ctx):
-        suggestion = _output_format_debugging(spec_ast, return_annotation, ctx)
+        suggestion = _output_format_suggestion(spec_ast, return_annotation, ctx)
         message = f"Specification result range does not fit {return_annotation!r}"
         if suggestion is not None:
             message += f"; try {_format_output_annotation(suggestion)} as the output format instead"
@@ -216,12 +224,10 @@ def check_spec_feasibility(
             message += "; could not find a fixed-point format that would fit the range"
         raise InfeasibleError(message)
 
-    suggestion = _output_format_debugging(spec_ast, return_annotation, ctx)
+    suggestion = _output_format_suggestion(spec_ast, return_annotation, ctx)
     if suggestion != return_annotation:
-        output_range = rival_range_analysis(spec_ast, ctx)
         warnings.warn(
-            f"Output type {return_annotation} is wider than necessary; "
-            f"consider {suggestion} for inferred output range {output_range}",
+            f"Output type {return_annotation} is wider than necessary; consider {suggestion}",
             UserWarning,
             stacklevel=3,
         )
