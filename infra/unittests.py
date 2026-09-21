@@ -1743,6 +1743,8 @@ class TestBasicOperators(unittest.TestCase):
         from zolotone.components import LOSSLESS_COMPONENTS
 
         self.assertIn(bool_eq, LOSSLESS_COMPONENTS)
+        self.assertIn(bool_to_uq, LOSSLESS_COMPONENTS)
+        self.assertIn(uq_to_bool, LOSSLESS_COMPONENTS)
         self.assertIn(uq_add, LOSSLESS_COMPONENTS)
         self.assertIn(uq_mul, LOSSLESS_COMPONENTS)
         self.assertNotIn(q_to_uq, LOSSLESS_COMPONENTS)
@@ -8250,6 +8252,21 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(zero.inner_tree.name, "uq_eq")
         self.assertEqual(bool_equal.inner_tree.name, "bool_eq")
 
+    def test_autogenerate_lowers_bool_uq_conversions(self):
+        def bool_to_uq_conversion(x: Bool(), ctx) -> UQ(1, 0):
+            return If(x, ctx.one(), ctx.zero())
+
+        def uq_to_bool_conversion(x: UQ(1, 0), ctx) -> Bool():
+            return x.eq(ctx.one())
+
+        numeric = Autogenerate("generated_bool_to_uq", bool_to_uq_conversion)
+        boolean = Autogenerate("generated_uq_to_bool", uq_to_bool_conversion)
+
+        self.assertEqual(numeric.inner_tree.name, "bool_to_uq")
+        self.assertEqual(numeric.dtype, UQ(1, 0))
+        self.assertEqual(boolean.inner_tree.name, "uq_to_bool")
+        self.assertEqual(boolean.dtype, Bool())
+
     def test_autogenerate_rejects_return_expression_category_mismatch(self):
         def numeric_annotation(x: UQ(2, 0), ctx) -> UQ:
             return x.eq(ctx.zero())
@@ -8296,7 +8313,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.ast.autogen.rival_range_analysis",
+                "zolotone.ast.spec_validation.rival_range_analysis",
                 return_value=(1.0, 4.0),
             ),
             self.assertRaisesRegex(
@@ -8307,9 +8324,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             Autogenerate("generated_overflowing_add", spec)
 
     def test_range_analysis_suggestion_matches_solver_search(self):
-        from zolotone.ast.autogen import (
-            output_format_suggestion_with_range_analysis,
-            output_format_suggestion_with_search,
+        from zolotone.ast.spec_validation import (
+            _output_format_suggestion_with_range_analysis,
+            _output_format_suggestion_with_search,
         )
 
         ctx = SpecContext("compare-output-format-suggestions")
@@ -8319,12 +8336,12 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         spec_ast = x + ctx.one()
         return_annotation = UQ(2, 0)
 
-        search_suggestion = output_format_suggestion_with_search(
+        search_suggestion = _output_format_suggestion_with_search(
             spec_ast,
             return_annotation,
             ctx,
         )
-        range_suggestion = output_format_suggestion_with_range_analysis(
+        range_suggestion = _output_format_suggestion_with_range_analysis(
             spec_ast,
             return_annotation,
             ctx,
@@ -8339,7 +8356,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.ast.autogen.rival_range_analysis",
+                "zolotone.ast.spec_validation.rival_range_analysis",
                 return_value=(-0.5, -0.5),
             ),
             self.assertRaisesRegex(TypeError, r"try Q\(0, 1\)"),
@@ -9386,6 +9403,22 @@ class TestSolverApis(unittest.TestCase):
 
 
 class TestSignSpecs(unittest.TestCase):
+    def test_bool_uq_converters_preserve_one_bit_encoding(self):
+        bool_input = Var("bool_input", Bool())
+        uq_input = Var("uq_input", UQ(1, 0))
+        as_uq = bool_to_uq(bool_input)
+        as_bool = uq_to_bool(uq_input)
+
+        self.assertEqual(as_uq.dtype, UQ(1, 0))
+        self.assertEqual(as_bool.dtype, Bool())
+
+        for raw in (0, 1):
+            with self.subTest(raw=raw):
+                bool_input.load_value(Bool().from_bits(raw))
+                uq_input.load_value(UQ(1, 0).from_bits(raw))
+                self.assertEqual(as_uq.evaluate().raw, raw)
+                self.assertEqual(as_bool.evaluate().raw, raw)
+
     def test_bit_operators_require_exact_one_bit_uq_descriptors(self):
         bit = Var("bit", UQ(1, 0))
 

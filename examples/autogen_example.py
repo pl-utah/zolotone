@@ -125,3 +125,10 @@ def spec12(x: UQ(2, 0), ctx) -> Bool():
 @Test(NotImplementedError)
 def spec13(x: UQ(2, 0), ctx) -> Float32():
     return x + ctx.one()
+
+
+# conversion can be composed with numeric components
+@Test()
+def spec_bool_to_uq_then_add(x: Bool(), y: UQ(1, 0), ctx) -> UQ(4, 0):
+    return If(x, ctx.one(), ctx.zero()) + y
+

@@ -48,6 +48,8 @@ def _if_then_else(sel: Node, in1: Node, in0: Node) -> Node:
 LOSSLESS_COMPONENTS = (
     bool_eq,
     negate,
+    bool_to_uq,
+    uq_to_bool,
 
     uq_lt,
     uq_gt,
@@ -78,4 +80,8 @@ LOSSLESS_COMPONENTS = (
     #q_to_uq, # Can be lossy
 
     _if_then_else,
+    bit_and,
+    bit_or,
+    bit_xor,
+    bit_neg,
 )
