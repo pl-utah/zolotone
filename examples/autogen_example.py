@@ -140,3 +140,17 @@ def spec_bool_to_uq_then_add(x: Bool(), y: UQ(2, 1), ctx) -> UQ(5, 1):
 def spec_assumption_shrinks_output(x: UQ(4, 0), ctx) -> UQ(4, 0):
     ctx.assume((x - ctx.one()).eq(ctx.zero()))
     return x
+
+
+@Test(InfeasibleError)
+def unreachable(x: UQ(4, 0), ctx) -> UQ(4, 0):
+    ctx.assume(x > ctx.real_val(1 << 4))
+    return x
+
+@Test()
+def only_zero_is_valid(x: UQ(4, 0), ctx) -> UQ(4, 0):
+    ctx.assume(x <= ctx.zero())
+    return x
+
+
+

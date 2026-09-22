@@ -6,13 +6,17 @@ from ..errors import InfeasibleError, MissingError, ZolotoneError
 from ..rival import rival_range_analysis
 from ..solver import check_equivalence
 from ..spec.spec_ast import BoolExpr, RealExpr, SpecNode
-from ..spec.spec_context import SpecContext
+from ..spec.spec_context import SpecContext, simplify_ctx
 from ..types import Bool, DataType, Q, UQ
 from .nodes import _SpecContract
 
 
 FEASIBILITY_SCHEDULE = [
     {"tool": "simplify"},
+    {"tool": "z3", "timeout_ms": 10_000},
+]
+
+REACHABILITY_FALLBACK_SCHEDULE = [
     {"tool": "z3", "timeout_ms": 10_000},
 ]
 
@@ -66,12 +70,41 @@ def _prove_result_fits(spec_ast, output_type, ctx):
     return status == "unsat"
 
 
+def _check_spec_reachability(ctx: SpecContext) -> None:
+    report = simplify_ctx(ctx.copy(checks=[]))
+    feasibility_status = report.get("feasibility_status", "unknown")
+
+    if feasibility_status == "not feasible":
+        raise InfeasibleError(
+            f"Specification {ctx.name!r} is unreachable: "
+            "no input satisfies its assumptions"
+        )
+    if feasibility_status == "feasible":
+        return
+
+    # Asking whether spec is satisfiable is equivalent to checking the
+    # counterexample query for an always-false property:
+    # assumes && !false == assumes.
+    simplified_ctx = report["new_ctx"]
+    reachability_ctx = simplified_ctx.copy(checks=[simplified_ctx.false()])
+    status, _proof_trace = check_equivalence(
+        reachability_ctx,
+        schedule=REACHABILITY_FALLBACK_SCHEDULE,
+    )
+    if status == "unsat":
+        raise InfeasibleError(
+            f"Specification {ctx.name!r} is unreachable: no input satisfies its assumptions"
+        )
+    elif status != "sat":
+        raise ZolotoneError(
+            f"Could not determine whether specification {ctx.name!r} has a reachable input"
+        )
+
 def _output_format_suggestion_with_search(
     spec_ast: RealExpr,
     conservative_format: Q | UQ,
     ctx: SpecContext,
 ) -> Q | UQ | None:
-    """Shrink a conservative format using proofs over the full context."""
     dtype_type = UQ if _prove_result_fits(spec_ast, UQ, ctx) else Q
 
     def candidate(int_bits: int) -> Q | UQ:
@@ -104,7 +137,7 @@ def _output_format_suggestion_with_range_analysis(
     output_range = rival_range_analysis(spec_ast, ctx)
     if output_range is None:
         raise ZolotoneError(f"Could not obtain output range for: {spec_ast}")
-
+    
     lower, upper = output_range
     if not math.isfinite(lower) or not math.isfinite(upper):
         raise ZolotoneError(
@@ -119,14 +152,14 @@ def _output_format_suggestion_with_range_analysis(
         total_bits = max(1, frac_bits, required_raw.bit_length())
         int_bits = total_bits - frac_bits
         return UQ(int_bits, frac_bits)
-
-    lower_raw = math.floor(lower * scale)
-    upper_raw = math.ceil(upper * scale)
-    required_magnitude = max(1, -lower_raw, upper_raw + 1)
-    magnitude_bits = (required_magnitude - 1).bit_length()
-    total_bits = max(1, frac_bits, magnitude_bits + 1)
-    int_bits = total_bits - frac_bits
-    return Q(int_bits, frac_bits)
+    else:
+        lower_raw = math.floor(lower * scale)
+        upper_raw = math.ceil(upper * scale)
+        required_magnitude = max(1, -lower_raw, upper_raw + 1)
+        magnitude_bits = (required_magnitude - 1).bit_length()
+        total_bits = max(1, frac_bits, magnitude_bits + 1)
+        int_bits = total_bits - frac_bits
+        return Q(int_bits, frac_bits)
 
 
 def _output_format_suggestion(
@@ -199,7 +232,7 @@ def check_spec_feasibility(
                 f"Specification returning {return_annotation!r} must produce "
                 f"a Boolean expression, got {type(spec_ast).__name__}"
             )
-        # At this point there is nothing to check
+        _check_spec_reachability(ctx)
         return
 
     if not isinstance(spec_ast, RealExpr):
@@ -213,6 +246,8 @@ def check_spec_feasibility(
             f"Output format {return_annotation!r} is not supported by "
             "the feasibility check"
         )
+
+    _check_spec_reachability(ctx)
 
     # TODO: counterexample
     if not _prove_result_fits(spec_ast, return_annotation, ctx):

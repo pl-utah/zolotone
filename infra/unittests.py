@@ -8203,6 +8203,25 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             Autogenerate("generated_q_to_uq", spec)
 
+    def test_autogenerate_rejects_unreachable_assumptions(self):
+        def spec(x: UQ(2, 0), ctx) -> Bool:
+            ctx.assume(x < ctx.zero())
+            return x.eq(ctx.zero())
+
+        with self.assertRaisesRegex(
+            InfeasibleError,
+            r"generated_unreachable.*unreachable.*no input satisfies",
+        ):
+            Autogenerate("generated_unreachable", spec)
+
+    def test_autogenerate_uses_z3_when_reachability_is_unknown(self):
+        def spec(x: UQ(2, 0), y: UQ(2, 0), ctx) -> Bool:
+            ctx.assume((x * (y + ctx.one())).ne((x * y) + x))
+            return x.eq(y)
+
+        with self.assertRaisesRegex(InfeasibleError, "unreachable"):
+            Autogenerate("generated_algebraically_unreachable", spec)
+
     def test_autogenerate_prefers_depth_zero_identity(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
             del ctx
