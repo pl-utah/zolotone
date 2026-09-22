@@ -5,7 +5,17 @@ import warnings
 from ..errors import InfeasibleError, MissingError, ZolotoneError
 from ..rival import rival_range_analysis
 from ..solver import check_equivalence
-from ..spec.spec_ast import BoolExpr, RealExpr, SpecNode
+from ..spec.spec_ast import (
+    BoolEq,
+    BoolExpr,
+    BoolLit,
+    Eq,
+    Not,
+    RealExpr,
+    SpecNode,
+    identical_nodes,
+    variables,
+)
 from ..spec.spec_context import SpecContext, simplify_ctx
 from ..types import Bool, DataType, Q, UQ
 from .nodes import _SpecContract
@@ -31,6 +41,85 @@ def reject_untyped_inputs(contract: _SpecContract):
                 f"parameter {parameter.name!r} must have an exact DataType "
                 f"descriptor, got {annotation!r}"
             )
+
+
+def _spec_value_variables(value: tp.Any) -> set[tp.Any]:
+    if isinstance(value, SpecNode):
+        return variables(value)
+    if isinstance(value, tuple):
+        result = set()
+        for item in value:
+            result.update(_spec_value_variables(item))
+        return result
+    return set()
+
+
+def reject_undeclared_variables(
+    spec_ast: SpecNode,
+    spec_inputs: tuple[tp.Any, ...],
+    ctx: SpecContext,
+) -> None:
+    input_variables = _spec_value_variables(spec_inputs)
+    specification_variables = variables(spec_ast)
+    for assumption in ctx.assumes:
+        specification_variables.update(variables(assumption))
+    undeclared_variables = specification_variables - input_variables
+    if not undeclared_variables:
+        return
+
+    rendered = ", ".join(
+        sorted(str(variable) for variable in undeclared_variables)
+    )
+    raise MissingError(
+        f"Undeclared variables in specification: {rendered}"
+    )
+
+
+def _simplify_spec_ast(
+    spec_ast: SpecNode,
+    spec_inputs: tuple[tp.Any, ...],
+    ctx: SpecContext,
+) -> tuple[SpecNode, SpecContext]:
+    probe_ctx = ctx.copy(checks=[])
+    if isinstance(spec_ast, RealExpr):
+        marker = probe_ctx.fresh_real("simplified_spec_result")
+    elif isinstance(spec_ast, BoolExpr):
+        marker = probe_ctx.fresh_bool("simplified_spec_result")
+    else:
+        raise TypeError(
+            "Specification simplification expects a real or Boolean "
+            f"expression, got {type(spec_ast).__name__}"
+        )
+
+    probe_ctx.check(spec_ast.eq(marker))
+    simplified_ctx = simplify_ctx(probe_ctx)["new_ctx"]
+    simplified_checks = simplified_ctx.checks
+    if len(simplified_checks) != 1:
+        raise RuntimeError("That's impossible, specification simplification lost its result marker")
+
+    # Finding marker in a simplified expression
+    carrier = simplified_checks[0]
+    if isinstance(carrier, (Eq, BoolEq)):
+        if identical_nodes(carrier.rhs, marker):
+            simplified = carrier.lhs
+        elif identical_nodes(carrier.lhs, marker):
+            simplified = carrier.rhs
+        else:
+            raise RuntimeError(
+                "Specification simplification rewrote its result marker"
+            )
+    # expressions got simplied to marker itself because (True == marker) -> marker
+    elif isinstance(carrier, type(marker)) and identical_nodes(carrier, marker):
+        simplified = BoolLit(True)
+    # expressions got simplied to marker itself because (False == marker) -> (not marker)
+    elif isinstance(carrier, Not) and identical_nodes(carrier.value, marker):
+        simplified = BoolLit(False)
+    else:
+        raise RuntimeError(
+            "Specification simplification produced an invalid result carrier"
+        )
+
+    return simplified.constant_fold(), simplified_ctx.copy(checks=[])
 
 
 def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[float, float]:
@@ -137,7 +226,7 @@ def _output_format_suggestion_with_range_analysis(
     output_range = rival_range_analysis(spec_ast, ctx)
     if output_range is None:
         raise ZolotoneError(f"Could not obtain output range for: {spec_ast}")
-    
+
     lower, upper = output_range
     if not math.isfinite(lower) or not math.isfinite(upper):
         raise ZolotoneError(

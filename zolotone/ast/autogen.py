@@ -21,7 +21,12 @@ from .nodes import (
     _build_spec_contract,
     _SpecContract,
 )
-from .spec_validation import check_spec_feasibility, reject_untyped_inputs
+from .spec_validation import (
+    _simplify_spec_ast,
+    check_spec_feasibility,
+    reject_untyped_inputs,
+    reject_undeclared_variables,
+)
 
 
 class _Candidate(tp.NamedTuple):
@@ -273,11 +278,15 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     contract = _build_spec_contract(name, spec)
     reject_untyped_inputs(contract)
     spec_ast, spec_inputs, spec_ctx = get_spec_ast(spec, contract)
+    reject_undeclared_variables(spec_ast, spec_inputs, spec_ctx)
 
     # Step 1. Spec Validation
     check_spec_feasibility(spec_ast, spec_inputs, contract, spec_ctx)
 
-    # Step 2. Spec Exploration
+    # Step 2. Spec Simplification
+    spec_ast, spec_ctx = _simplify_spec_ast(spec_ast, spec_inputs, spec_ctx)
+
+    # Step 3. Spec Exploration
     lowered_composite = lower_spec_to_impl(name, spec, contract, spec_ast, spec_inputs)
 
     return lowered_composite

@@ -8232,6 +8232,131 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertIsInstance(generated.inner_tree, Var)
         self.assertEqual(generated.dtype, UQ(2, 0))
 
+    def test_simplify_spec_uses_assumptions_to_prune_output(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-output")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.zero())
+        spec_ast = If(
+            x >= ctx.zero(),
+            abs(x) + ctx.zero(),
+            x ** ctx.two(),
+        )
+
+        simplified_ast, _simplified_ctx = _simplify_spec_ast(
+            spec_ast,
+            (x,),
+            ctx,
+        )
+        self.assertEqual(simplified_ast, x)
+
+    def test_simplify_spec_returns_simplified_assumptions(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-assumptions")
+        x = ctx.real("x")
+        ctx.assume(x.eq(ctx.two()))
+
+        simplified_ast, simplified_ctx = _simplify_spec_ast(
+            x + ctx.one(),
+            (x,),
+            ctx,
+        )
+
+        self.assertEqual(simplified_ast, RealLit(3))
+        self.assertEqual(simplified_ctx.assumes, [])
+        self.assertEqual(simplified_ctx.checks, [])
+        self.assertEqual(ctx.assumes, [x.eq(ctx.two())])
+
+    def test_reject_undeclared_variables_checks_assumptions(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("simplify-spec-internal-variable")
+        x = ctx.real("x")
+        internal = ctx.real("internal")
+        ctx.assume(x.eq(internal + ctx.one()))
+
+        with self.assertRaisesRegex(
+            MissingError,
+            "Undeclared variables.*internal",
+        ):
+            reject_undeclared_variables(x, (x,), ctx)
+
+    def test_autogenerate_rejects_undeclared_assumption_variables(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            internal = ctx.fresh_real("internal")
+            ctx.assume(x.eq(internal + ctx.one()))
+            return x
+
+        with self.assertRaisesRegex(
+            MissingError,
+            "Undeclared variables.*internal",
+        ):
+            Autogenerate("generated_undeclared_assumption", spec)
+
+    def test_reject_undeclared_variables_accepts_only_spec_inputs(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("reject-undeclared-variables")
+        x = ctx.real("x")
+        y = ctx.real("y")
+
+        reject_undeclared_variables(x + ctx.one(), (x,), ctx)
+        with self.assertRaisesRegex(
+            MissingError,
+            "Undeclared variables.*real\\(y\\)",
+        ):
+            reject_undeclared_variables(x + y, (x,), ctx)
+
+    def test_simplify_spec_extracts_literal_results_from_carrier(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        real_ctx = SpecContext("simplify-spec-real-literal")
+        x = real_ctx.real("x")
+        real_ctx.assume(x.eq(real_ctx.two()))
+        simplified_ast, _simplified_ctx = _simplify_spec_ast(
+            x,
+            (x,),
+            real_ctx,
+        )
+        self.assertEqual(simplified_ast, RealLit(2))
+
+        for value in (False, True):
+            with self.subTest(value=value):
+                bool_ctx = SpecContext(f"simplify-spec-bool-{value}")
+                predicate = bool_ctx.bool("predicate")
+                bool_ctx.assume(
+                    predicate.eq(bool_ctx.bool_val(value))
+                )
+                simplified_ast, _simplified_ctx = _simplify_spec_ast(
+                    predicate,
+                    (predicate,),
+                    bool_ctx,
+                )
+                self.assertEqual(simplified_ast, BoolLit(value))
+
+    def test_autogenerate_simplifies_spec_before_lowering(self):
+        def spec(x: UQ(3, 0), ctx) -> UQ:
+            del ctx
+            return abs(x)
+
+        generated = Autogenerate("generated_unsigned_abs", spec)
+
+        self.assertIsInstance(generated.inner_tree, Var)
+        self.assertEqual(generated.dtype, UQ(3, 0))
+
+    def test_autogenerate_does_not_lower_pruned_spec_branch(self):
+        def spec(selected: Bool(), x: UQ(2, 0), ctx) -> UQ:
+            ctx.assume(selected)
+            return If(selected, x, x ** ctx.two())
+
+        generated = Autogenerate("generated_pruned_branch", spec)
+
+        self.assertIsInstance(generated.inner_tree, Var)
+        self.assertEqual(generated.inner_tree.name, "arg_1")
+        self.assertEqual(generated.dtype, UQ(2, 0))
+
     def test_autogenerate_uses_contracted_widening_factory(self):
         def spec(x: UQ(2, 0), ctx) -> Q(4, 0):
             del ctx
