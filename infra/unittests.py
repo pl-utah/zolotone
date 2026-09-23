@@ -8452,6 +8452,52 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             reject_undeclared_variables(x + y, (x,), ctx)
 
+    def test_reject_undeclared_variables_warns_about_unused_inputs(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("unused-input-warning")
+        used = ctx.real("used")
+        unused = ctx.real("unused")
+
+        with self.assertWarnsRegex(
+            UserWarning,
+            "Specification 'unused-input-warning'.*real\\(unused\\)",
+        ):
+            reject_undeclared_variables(used, (used, unused), ctx)
+
+    def test_input_relevance_follows_transitive_condition_dependencies(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("context-input-use")
+        result = ctx.real("result")
+        assumed = ctx.real("assumed")
+        transitive = ctx.real("transitive")
+        unused = ctx.real("unused")
+        ctx.assume(assumed.eq(transitive))
+        ctx.check(result.eq(assumed))
+        ctx.require((result >= ctx.zero()) & (unused >= ctx.zero()))
+
+        with self.assertWarnsRegex(UserWarning, r"real\(unused\)"):
+            reject_undeclared_variables(
+                result,
+                (result, assumed, transitive, unused),
+                ctx,
+            )
+
+    def test_generated_input_assumptions_do_not_hide_unused_inputs(self):
+        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        def spec(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(5, 0):
+            ctx.assume(y.eq(ctx.one()))
+            return x
+
+        contract = ast_nodes._build_spec_contract("unused-variable", spec)
+        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+
+        with self.assertWarnsRegex(UserWarning, r"unused input variables: real\(y_1\)"):
+            reject_undeclared_variables(spec_ast, spec_inputs, ctx)
+
     def test_simplify_spec_extracts_literal_results_from_carrier(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
 

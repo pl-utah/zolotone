@@ -219,3 +219,23 @@ def addition_with_checks2(x: UQ(4, 0), ctx) -> UQ(5, 0):
 def constant_folding(x: UQ(4, 0), ctx) -> UQ(5, 0):
     z = (ctx.one() + ctx.one()) + x
     return z
+
+
+# Unused variable
+@Test()
+def unused_variable(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
+    ctx.assume(y.eq(ctx.one()))
+    return x
+
+
+# Unused variable
+@Test()
+def unused_variable2(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
+    return x
+
+
+# Unused variable
+@Test()
+def used_variable(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
+    ctx.assume(x > y)
+    return x

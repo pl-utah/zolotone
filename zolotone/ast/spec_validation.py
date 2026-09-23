@@ -6,6 +6,7 @@ from ..errors import InfeasibleError, MissingError, ZolotoneError
 from ..rival import rival_range_analysis
 from ..solver import check_equivalence
 from ..spec.spec_ast import (
+    And,
     BoolEq,
     BoolExpr,
     BoolLit,
@@ -55,6 +56,15 @@ def _spec_value_variables(value: tp.Any) -> set[tp.Any]:
     return set()
 
 
+def _condition_conjuncts(condition: BoolExpr) -> tuple[BoolExpr, ...]:
+    if isinstance(condition, And):
+        return (
+            *_condition_conjuncts(condition.lhs),
+            *_condition_conjuncts(condition.rhs),
+        )
+    return (condition,)
+
+
 def _spec_node_count(node: SpecNode) -> int:
     return 1 + sum(_spec_node_count(child) for child in children(node))
 
@@ -78,15 +88,40 @@ def reject_undeclared_variables(
         for expression in expressions:
             specification_variables.update(variables(expression))
     undeclared_variables = specification_variables - input_variables
-    if not undeclared_variables:
-        return
+    if undeclared_variables:
+        rendered = ", ".join(
+            sorted(str(variable) for variable in undeclared_variables)
+        )
+        raise MissingError(
+            f"Undeclared variables in specification: {rendered}"
+        )
 
-    rendered = ", ".join(
-        sorted(str(variable) for variable in undeclared_variables)
-    )
-    raise MissingError(
-        f"Undeclared variables in specification: {rendered}"
-    )
+    relevant_variables = variables(spec_ast)
+    condition_variables = [
+        variables(conjunct)
+        for expressions in (ctx.assumes, ctx.checks, ctx.requirements)
+        for expression in expressions
+        for conjunct in _condition_conjuncts(expression)
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for connected_variables in condition_variables:
+            if relevant_variables & connected_variables:
+                enlarged = relevant_variables | connected_variables
+                if enlarged != relevant_variables:
+                    relevant_variables = enlarged
+                    changed = True
+    unused_variables = input_variables - relevant_variables
+    if unused_variables:
+        rendered = ", ".join(
+            sorted(str(variable) for variable in unused_variables)
+        )
+        warnings.warn(
+            f"Specification {ctx.name!r} has unused input variables: {rendered}",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def _simplify_spec_ast(
@@ -171,9 +206,7 @@ def _fixed_point_result_fits(
     ctx: SpecContext,
 ) -> BoolExpr:
     min_bound, max_bound = _fixed_point_real_bounds(dtype)
-    return (spec_ast >= ctx.real_val(min_bound)) & (
-        spec_ast <= ctx.real_val(max_bound)
-    )
+    return (spec_ast >= ctx.real_val(min_bound)) & (spec_ast <= ctx.real_val(max_bound))
 
 
 def _prove_result_fits(spec_ast, output_type, ctx):
