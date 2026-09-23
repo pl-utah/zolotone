@@ -2519,6 +2519,15 @@ class TestSpecContextLearning(unittest.TestCase):
             [Eq(x, RealLit(0)), Eq(x, RealLit(1)), Eq(y, x)],
         )
 
+    def test_context_simplify_preserves_fact_used_to_discharge_later_assumption(self):
+        ctx = SpecContext("preserve-learned-fact")
+        x = ctx.real("x")
+
+        ctx.assume(x.eq(ctx.one()))
+        ctx.assume(ctx.two().eq(x + ctx.one()))
+
+        self.assertEqual(ctx.simplify().assumes, [Eq(x, RealLit(1))])
+
     def test_context_fixpoint_simplifies_assumptions_from_learned_literals(self):
         ctx = SpecContext("simplify-assumes")
         and_res = ctx.real("and_res")
@@ -2541,7 +2550,11 @@ class TestSpecContextLearning(unittest.TestCase):
         )
         self.assertEqual(
             simplified.assumes,
-            [],
+            [
+                Eq(and_res, x * y),
+                Eq(x, RealLit(0)),
+                Eq(y, RealLit(0)),
+            ],
         )
 
     def test_context_fixpoint_inlines_non_literal_aliases(self):
@@ -2556,8 +2569,7 @@ class TestSpecContextLearning(unittest.TestCase):
 
         simplified = ctx.simplify()
 
-        self.assertNotIn("xor_res", str(simplified))
-        self.assertEqual(simplified.assumes, [])
+        self.assertEqual(simplified.assumes, [Eq(xor_res, x + y)])
         self.assertEqual(simplified.checks, [])
 
     def test_context_fixpoint_preserves_duplicate_aliases_as_constraints(self):
@@ -2573,7 +2585,10 @@ class TestSpecContextLearning(unittest.TestCase):
 
         self.assertEqual(
             simplified.assumes,
-            [Eq(y + RealLit(1), z + RealLit(1))],
+            [
+                Eq(alias, y + RealLit(1)),
+                Eq(y + RealLit(1), z + RealLit(1)),
+            ],
         )
 
     def test_context_fixpoint_keeps_self_referential_constraints(self):
@@ -2627,9 +2642,12 @@ class TestSpecContextLearning(unittest.TestCase):
 
         self.assertEqual(
             simplified.assumes,
-            [],
+            [Eq(x, RealLit(3)), p],
         )
-        self.assertEqual(simplified.learned_literals(), {})
+        self.assertEqual(
+            simplified.learned_literals(),
+            {x: RealLit(3), p: BoolLit(True)},
+        )
 
     def test_context_fixpoint_propagates_through_multiple_rounds(self):
         ctx = SpecContext("simplify-multi-round")
@@ -2645,9 +2663,20 @@ class TestSpecContextLearning(unittest.TestCase):
 
         self.assertEqual(
             simplified.assumes,
-            [],
+            [
+                Eq(x, y + RealLit(1)),
+                Eq(y, z + RealLit(1)),
+                Eq(z, RealLit(0)),
+            ],
         )
-        self.assertEqual(simplified.learned_literals(), {})
+        self.assertEqual(
+            simplified.learned_literals(),
+            {
+                x.eq(y + RealLit(1)): BoolLit(True),
+                y.eq(z + RealLit(1)): BoolLit(True),
+                z: RealLit(0),
+            },
+        )
 
     def test_context_fixpoint_simplifies_checks_from_learned_literals(self):
         ctx = SpecContext("simplify-checks")
@@ -2673,9 +2702,12 @@ class TestSpecContextLearning(unittest.TestCase):
         simplified = ctx.simplify()
 
         self.assertEqual(ctx.assumes, [BoolEq(p, BoolLit(True)), BoolEq(q, p)])
-        self.assertEqual(simplified.assumes, [])
+        self.assertEqual(simplified.assumes, [p, q])
         self.assertEqual(simplified.checks, [])
-        self.assertEqual(simplified.learned_literals(), {})
+        self.assertEqual(
+            simplified.learned_literals(),
+            {p: BoolLit(True), q: BoolLit(True)},
+        )
 
     def test_context_fixpoint_learns_negated_compound_boolean_fact(self):
         ctx = SpecContext("simplify-negated-compound-bool")
@@ -2773,6 +2805,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(
             simplified.assumes,
             [
+                selected.eq(If(condition, ctx.one(), ctx.zero())),
                 (
                     ctx.one()
                     - If(condition, ctx.one(), ctx.zero())
@@ -2795,9 +2828,12 @@ class TestSpecContextLearning(unittest.TestCase):
 
         self.assertEqual(
             simplified.assumes,
-            [],
+            [Eq(x, RealLit(1)), p],
         )
-        self.assertEqual(simplified.learned_literals(), {})
+        self.assertEqual(
+            simplified.learned_literals(),
+            {x: RealLit(1), p: BoolLit(True)},
+        )
 
     def test_context_fixpoint_raises_on_conflicting_bindings(self):
         ctx = SpecContext("simplify-conflict")
@@ -2825,7 +2861,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(ctx.checks, [Eq(x, RealLit(3))])
         self.assertEqual(
             simplified.assumes,
-            [],
+            [Eq(x, Add(y, RealLit(1))), Eq(y, RealLit(2))],
         )
         self.assertEqual(simplified.checks, [])
 
@@ -2869,7 +2905,7 @@ class TestSpecContextLearning(unittest.TestCase):
 
         report = simplify_ctx(ctx)
 
-        self.assertEqual(report["new_ctx"].assumes, [])
+        self.assertEqual(report["new_ctx"].assumes, [x >= zero, x.eq(one)])
         self.assertEqual(report["new_ctx"].checks, [])
         self.assertEqual(report["status"], "unsat")
         self.assertEqual(ctx.assumes, [x >= zero, abs(x).eq(one)])
@@ -9663,7 +9699,7 @@ class TestSolverApis(unittest.TestCase):
         self.assertEqual(len(proof_trace), 1)
         self.assertEqual(proof_trace[0]["tool"], "simplify")
         self.assertEqual(proof_trace[0]["status"], "sat")
-        self.assertIn("Conflicting learned literals", str(proof_trace[0]["info"]))
+        self.assertIn("Assumption folds to false", str(proof_trace[0]["info"]))
 
     def test_check_equivalence_returns_flat_proof_trace(self):
         ctx = SpecContext("flat-trace")

@@ -250,66 +250,24 @@ class SpecContext:
         return None
     
     def _simplify_with_convergence(self) -> tuple["SpecContext", bool]:
-        simplified = self.copy()
-        learned_fact_count = sum(
-            1
-            for assume in simplified.assumes
-            for _ in _assumption_conjuncts(assume)
-        )
-        max_iterations = learned_fact_count + len(simplified.checks) + 1
-        converged = False
-        for _ in range(max_iterations):
-            anchored_literals = simplified._learned_literals_with_anchors()
-            literal_replacements = {
-                expr: value
-                for expr, (value, _anchor) in anchored_literals.items()
-            }
-            alias_replacements = simplified.learned_aliases()
-            
-            variable_replacements = {
-                expr: lit
-                for expr, lit in literal_replacements.items()
-                if isinstance(expr, (RealVar, BoolVar))  # get rid only of assigned vars
-            }
-            check_replacements = alias_replacements | literal_replacements
-            
-            new_assumes = []
-            for assume_idx, assume in enumerate(simplified.assumes):
-                new_assume = substitute_literals(
-                    assume,
-                    alias_replacements
-                    | variable_replacements
-                    | {
-                        expr: value
-                        for expr, (value, anchor) in anchored_literals.items()
-                        if anchor != assume_idx
-                        and not isinstance(expr, (RealVar, BoolVar))
-                    },
-                )
-                new_assumes.append(
-                    simplified._reject_false_assumption(new_assume)
-                )
-            new_checks = [
-                substitute_literals(check, check_replacements)
-                for check in simplified.checks
-            ]
-            if new_assumes == simplified.assumes and new_checks == simplified.checks:
-                converged = True
-                break
-            simplified.assumes = new_assumes
-            simplified.checks = new_checks
+        simplified = self.copy(assumes=[], checks=[])
+        for assume in self.assumes:
+            replacements = simplified.learned_aliases() | simplified.learned_literals()
+            new_assume = simplified._reject_false_assumption(
+                substitute_literals(assume, replacements)
+            )
+            if not identical_nodes(new_assume, BoolLit(True)):
+                simplified.assumes.append(new_assume)
 
-        simplified.assumes = [
-            assume
-            for assume in simplified.assumes
-            if not identical_nodes(assume, BoolLit(True))
-        ]
+        replacements = simplified.learned_aliases() | simplified.learned_literals()
         simplified.checks = [
-            check
-            for check in simplified.checks
-            if not identical_nodes(check, BoolLit(True))
+            new_check
+            for check in self.checks
+            if not identical_nodes(
+                new_check := substitute_literals(check, replacements), BoolLit(True)
+            )
         ]
-        return simplified, converged
+        return simplified, True
 
     def simplify(self) -> "SpecContext":
         """Apply context learning and ordinary constant folding to a fixpoint."""
