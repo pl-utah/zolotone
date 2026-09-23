@@ -452,6 +452,36 @@ def _rewrite_proven_expressions(
     return [rewrite(node, top_level=True) for node in nodes]
 
 
+def _rewrite_assumptions_from_prior_rects(
+    assumes: Sequence[BoolExpr],
+    free_vars: Sequence[str],
+    bool_var_names: set[str],
+    max_rects: int,
+) -> list[BoolExpr]:
+    """Simplify each assumption using only earlier rectangular facts."""
+    domain = _RivalRectDomain.build(free_vars, bool_var_names)
+    variable_kind_cache: dict[int, tuple[bool, bool]] = {}
+    rects = [domain.new_rect()]
+    rewritten_assumes = []
+    has_prior_rect_fact = False
+    for assume in assumes:
+        if has_prior_rect_fact:
+            assume = _rewrite_proven_expressions(
+                [assume], free_vars=free_vars, rects=rects
+            )[0]
+        if identical_nodes(assume, BoolLit(True)):
+            continue
+        rewritten_assumes.append(assume)
+        alternatives = _rival_rect_alternatives(
+            assume, domain, max_rects, variable_kind_cache
+        )
+        if alternatives is None:
+            continue
+        rects = _intersect_rival_rect_sets(rects, alternatives, max_rects)
+        has_prior_rect_fact = True
+    return rewritten_assumes
+
+
 # Preserve assumptions used to construct the rectangular domain. Rewrite all
 # other assumptions and checks only when every applicable rectangle agrees,
 # then drop expressions that are certainly true.
@@ -464,6 +494,13 @@ def rival_trim_context(
     bool_var_names = _collect_bool_var_names(exprs)
     resolved_max_rects = resolve_max_rects(max_rects)
     try:
+        rewritten_assumes = _rewrite_assumptions_from_prior_rects(
+            ctx.assumes,
+            free_vars,
+            bool_var_names,
+            resolved_max_rects,
+        )
+        ctx = ctx.copy(assumes=rewritten_assumes)
         assumption_rects, assumption_contributes_to_rect = (
             _get_rival_rects_and_contributors(
                 ctx.assumes,
