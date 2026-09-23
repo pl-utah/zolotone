@@ -61,8 +61,9 @@ def reject_undeclared_variables(
 ) -> None:
     input_variables = _spec_value_variables(spec_inputs)
     specification_variables = variables(spec_ast)
-    for assumption in ctx.assumes:
-        specification_variables.update(variables(assumption))
+    for expressions in (ctx.assumes, ctx.checks, ctx.requirements):
+        for expression in expressions:
+            specification_variables.update(variables(expression))
     undeclared_variables = specification_variables - input_variables
     if not undeclared_variables:
         return
@@ -80,7 +81,7 @@ def _simplify_spec_ast(
     spec_inputs: tuple[tp.Any, ...],
     ctx: SpecContext,
 ) -> tuple[SpecNode, SpecContext]:
-    probe_ctx = ctx.copy(checks=[])
+    probe_ctx = ctx.copy()
     if isinstance(spec_ast, RealExpr):
         marker = probe_ctx.fresh_real("simplified_spec_result")
     elif isinstance(spec_ast, BoolExpr):
@@ -93,12 +94,18 @@ def _simplify_spec_ast(
 
     probe_ctx.check(spec_ast.eq(marker))
     simplified_ctx = simplify_ctx(probe_ctx)["new_ctx"]
-    simplified_checks = simplified_ctx.checks
-    if len(simplified_checks) != 1:
-        raise RuntimeError("That's impossible, specification simplification lost its result marker")
+    marker_checks = [
+        check
+        for check in simplified_ctx.checks
+        if marker in variables(check)
+    ]
+    if len(marker_checks) != 1:
+        raise RuntimeError(
+            "That's impossible, specification simplification lost its result marker"
+        )
 
     # Finding marker in a simplified expression
-    carrier = simplified_checks[0]
+    carrier = marker_checks[0]
     if isinstance(carrier, (Eq, BoolEq)):
         if identical_nodes(carrier.rhs, marker):
             simplified = carrier.lhs
@@ -119,7 +126,14 @@ def _simplify_spec_ast(
             "Specification simplification produced an invalid result carrier"
         )
 
-    return simplified.constant_fold(), simplified_ctx.copy(checks=[])
+    preserved_checks = [
+        check
+        for check in simplified_ctx.checks
+        if check is not carrier
+    ]
+    return simplified.constant_fold(), simplified_ctx.copy(
+        checks=preserved_checks
+    )
 
 
 def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[float, float]:
@@ -182,12 +196,33 @@ def _check_spec_reachability(ctx: SpecContext) -> None:
     )
     if status == "unsat":
         raise InfeasibleError(
-            f"Specification {ctx.name!r} is unreachable: no input satisfies its assumptions"
+            f"Specification {ctx.name!r} is unreachable: "
+            "no input satisfies its assumptions"
         )
     elif status != "sat":
         raise ZolotoneError(
             f"Could not determine whether specification {ctx.name!r} has a reachable input"
         )
+
+
+def _check_spec_obligations(ctx: SpecContext) -> None:
+    if not ctx.checks:
+        return
+
+    status, _proof_trace = check_equivalence(
+        ctx,
+        schedule=FEASIBILITY_SCHEDULE,
+    )
+    if status == "unsat":
+        return
+    if status == "sat":
+        raise InfeasibleError(
+            f"Specification {ctx.name!r} has a check that does not hold"
+        )
+    raise ZolotoneError(
+        f"Could not prove all checks in specification {ctx.name!r}"
+    )
+
 
 def _output_format_suggestion_with_search(
     spec_ast: RealExpr,
@@ -314,7 +349,7 @@ def check_spec_feasibility(
             ctx.assume(_fixed_point_result_fits(spec_input, dtype, ctx))
 
     return_annotation = contract.annotations["return"]
-    # Output checks
+    # Output validation
     if return_annotation is Bool or isinstance(return_annotation, Bool):
         if not isinstance(spec_ast, BoolExpr):
             raise TypeError(
@@ -322,6 +357,7 @@ def check_spec_feasibility(
                 f"a Boolean expression, got {type(spec_ast).__name__}"
             )
         _check_spec_reachability(ctx)
+        _check_spec_obligations(ctx)
         return
 
     if not isinstance(spec_ast, RealExpr):
@@ -337,6 +373,7 @@ def check_spec_feasibility(
         )
 
     _check_spec_reachability(ctx)
+    _check_spec_obligations(ctx)
 
     # TODO: counterexample
     if not _prove_result_fits(spec_ast, return_annotation, ctx):

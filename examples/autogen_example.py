@@ -147,10 +147,70 @@ def unreachable(x: UQ(4, 0), ctx) -> UQ(4, 0):
     ctx.assume(x > ctx.real_val(1 << 4))
     return x
 
+
+@Test(InfeasibleError)
+def unreachable_less_than_zero(x: UQ(4, 0), ctx) -> UQ(4, 0):
+    ctx.check(x < ctx.zero())
+    return x
+
+
+@Test(InfeasibleError)
+def unreachable_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.check(x.eq(ctx.zero()))
+    return x
+
+
+@Test()
+def reachable_assume_and_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.assume(x.eq(ctx.zero()))
+    ctx.check(x.eq(ctx.zero()))
+    return x
+
+
+@Test()
+def reachable_assume_and_check2(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.check(x.eq(ctx.zero()))
+    ctx.assume(x.eq(ctx.zero()))
+    return x
+
+
+@Test(InfeasibleError)
+def unreachable_contradictionary(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.assume(x.eq(ctx.one()))
+    ctx.assume(x.eq(ctx.zero()))
+    return x
+
+
+@Test()
+def reachable_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.check(x >= ctx.zero())
+    return x
+
+
+@Test(InfeasibleError)
+def reachable_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.check(x > ctx.zero())
+    return x
+
+
 @Test()
 def only_zero_is_valid(x: UQ(4, 0), ctx) -> UQ(4, 0):
     ctx.assume(x <= ctx.zero())
     return x
 
 
+@Test()
+def addition_with_checks(x: UQ(4, 0), ctx) -> UQ(5, 0):
+    ctx.assume(x >= ctx.one())
+    z = x + ctx.one()
+    ctx.check(z >= ctx.real_val(2))
+    return z
+
+
+@Test(InfeasibleError)
+def addition_with_checks2(x: UQ(4, 0), ctx) -> UQ(5, 0):
+    ctx.assume(x >= ctx.one())
+    z = x + ctx.one()
+    ctx.check(z > ctx.real_val(2))
+    return z
 

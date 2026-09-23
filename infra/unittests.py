@@ -8222,6 +8222,24 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         with self.assertRaisesRegex(InfeasibleError, "unreachable"):
             Autogenerate("generated_algebraically_unreachable", spec)
 
+    def test_autogenerate_proves_spec_checks(self):
+        def valid_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            ctx.check(x >= ctx.zero())
+            return x
+
+        generated = Autogenerate("generated_valid_check", valid_spec)
+        self.assertEqual(generated.dtype, UQ(2, 0))
+
+        def invalid_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            ctx.check(x.eq(ctx.zero()))
+            return x
+
+        with self.assertRaisesRegex(
+            InfeasibleError,
+            "check that does not hold",
+        ):
+            Autogenerate("generated_invalid_check", invalid_spec)
+
     def test_autogenerate_prefers_depth_zero_identity(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
             del ctx
@@ -8269,6 +8287,24 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(simplified_ctx.checks, [])
         self.assertEqual(ctx.assumes, [x.eq(ctx.two())])
 
+    def test_simplify_spec_preserves_user_checks(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-checks")
+        x = ctx.real("x")
+        check = x >= ctx.zero()
+        ctx.check(check)
+
+        simplified_ast, simplified_ctx = _simplify_spec_ast(
+            x + ctx.zero(),
+            (x,),
+            ctx,
+        )
+
+        self.assertEqual(simplified_ast, x)
+        self.assertEqual(simplified_ctx.checks, [check])
+        self.assertEqual(ctx.checks, [check])
+
     def test_reject_undeclared_variables_checks_assumptions(self):
         from zolotone.ast.spec_validation import reject_undeclared_variables
 
@@ -8276,6 +8312,20 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         x = ctx.real("x")
         internal = ctx.real("internal")
         ctx.assume(x.eq(internal + ctx.one()))
+
+        with self.assertRaisesRegex(
+            MissingError,
+            "Undeclared variables.*internal",
+        ):
+            reject_undeclared_variables(x, (x,), ctx)
+
+    def test_reject_undeclared_variables_finds_variables_in_checks(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("check-undeclared-check-variable")
+        x = ctx.real("x")
+        internal = ctx.real("internal")
+        ctx.check(x.eq(internal))
 
         with self.assertRaisesRegex(
             MissingError,
