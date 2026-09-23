@@ -13,6 +13,7 @@ from ..spec.spec_ast import (
     Not,
     RealExpr,
     SpecNode,
+    children,
     identical_nodes,
     variables,
 )
@@ -54,6 +55,18 @@ def _spec_value_variables(value: tp.Any) -> set[tp.Any]:
     return set()
 
 
+def _spec_node_count(node: SpecNode) -> int:
+    return 1 + sum(_spec_node_count(child) for child in children(node))
+
+
+def _spec_simplification_size(spec_ast: SpecNode, ctx: SpecContext) -> int:
+    return _spec_node_count(spec_ast) + sum(
+        _spec_node_count(expression)
+        for expressions in (ctx.assumes, ctx.checks)
+        for expression in expressions
+    )
+
+
 def reject_undeclared_variables(
     spec_ast: SpecNode,
     spec_inputs: tuple[tp.Any, ...],
@@ -81,7 +94,9 @@ def _simplify_spec_ast(
     spec_inputs: tuple[tp.Any, ...],
     ctx: SpecContext,
 ) -> tuple[SpecNode, SpecContext]:
-    probe_ctx = ctx.copy()
+    size_before = _spec_simplification_size(spec_ast, ctx)
+    # Checks are not getting simplified
+    probe_ctx = ctx.copy(checks=[])
     if isinstance(spec_ast, RealExpr):
         marker = probe_ctx.fresh_real("simplified_spec_result")
     elif isinstance(spec_ast, BoolExpr):
@@ -94,18 +109,14 @@ def _simplify_spec_ast(
 
     probe_ctx.check(spec_ast.eq(marker))
     simplified_ctx = simplify_ctx(probe_ctx)["new_ctx"]
-    marker_checks = [
-        check
-        for check in simplified_ctx.checks
-        if marker in variables(check)
-    ]
-    if len(marker_checks) != 1:
+    simplified_checks = simplified_ctx.checks
+    if len(simplified_checks) != 1:
         raise RuntimeError(
             "That's impossible, specification simplification lost its result marker"
         )
 
     # Finding marker in a simplified expression
-    carrier = marker_checks[0]
+    carrier = simplified_checks[0]
     if isinstance(carrier, (Eq, BoolEq)):
         if identical_nodes(carrier.rhs, marker):
             simplified = carrier.lhs
@@ -126,14 +137,24 @@ def _simplify_spec_ast(
             "Specification simplification produced an invalid result carrier"
         )
 
-    preserved_checks = [
-        check
-        for check in simplified_ctx.checks
-        if check is not carrier
-    ]
-    return simplified.constant_fold(), simplified_ctx.copy(
-        checks=preserved_checks
-    )
+    simplified_spec_ast = simplified.constant_fold()
+    # Keep simplified assumptions, but restore user checks verbatim after
+    # removing the probe's temporary result carrier.
+    result_ctx = simplified_ctx.copy(checks=list(ctx.checks))
+    size_after = _spec_simplification_size(simplified_spec_ast, result_ctx)
+    reduction = size_before - size_after
+    if reduction > 0:
+        size_change = f"reduced node count by {reduction}"
+    elif reduction < 0:
+        size_change = f"increased node count by {-reduction}"
+    if reduction != 0:
+        warnings.warn(
+            f"Specification {ctx.name} simplification {size_change}: "
+            f"{size_before} -> {size_after}",
+            UserWarning,
+            stacklevel=3,
+        )
+    return simplified_spec_ast, result_ctx
 
 
 def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[float, float]:

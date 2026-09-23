@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import time
+import warnings
 from fractions import Fraction
 from pathlib import Path
 from unittest.mock import Mock, call, patch
@@ -8292,7 +8293,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         ctx = SpecContext("simplify-spec-checks")
         x = ctx.real("x")
-        check = x >= ctx.zero()
+        assumption = x.eq(ctx.one())
+        check = (x + ctx.two()).eq(ctx.real_val(3))
+        ctx.assume(assumption)
         ctx.check(check)
 
         simplified_ast, simplified_ctx = _simplify_spec_ast(
@@ -8301,9 +8304,51 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             ctx,
         )
 
-        self.assertEqual(simplified_ast, x)
+        self.assertEqual(simplified_ast, RealLit(1))
+        self.assertEqual(simplified_ctx.assumes, [])
         self.assertEqual(simplified_ctx.checks, [check])
+        self.assertEqual(ctx.assumes, [assumption])
         self.assertEqual(ctx.checks, [check])
+
+    def test_simplify_spec_warns_about_node_count_reduction(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-size")
+        x = ctx.real("x")
+
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"Specification simplify-spec-size simplification "
+            r"reduced node count by 2: 3 -> 1",
+        ):
+            simplified_ast, simplified_ctx = _simplify_spec_ast(
+                x + ctx.zero(),
+                (x,),
+                ctx,
+            )
+
+        self.assertEqual(simplified_ast, x)
+        self.assertEqual(simplified_ctx.assumes, [])
+        self.assertEqual(simplified_ctx.checks, [])
+
+    def test_simplify_spec_does_not_warn_when_node_count_is_unchanged(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-noop")
+        x = ctx.real("x")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            simplified_ast, simplified_ctx = _simplify_spec_ast(
+                x,
+                (x,),
+                ctx,
+            )
+
+        self.assertEqual(caught, [])
+        self.assertEqual(simplified_ast, x)
+        self.assertEqual(simplified_ctx.assumes, [])
+        self.assertEqual(simplified_ctx.checks, [])
 
     def test_reject_undeclared_variables_checks_assumptions(self):
         from zolotone.ast.spec_validation import reject_undeclared_variables
