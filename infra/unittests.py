@@ -7038,6 +7038,18 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(trimmed.assumes, [contributing])
 
+    def test_rival_trim_context_drops_bound_implied_by_earlier_assumption(self):
+        ctx = SpecContext("rival-trim-redundant-conjunct")
+        x = ctx.real("x")
+        one = ctx.one()
+        upper = ctx.real_val(15)
+        ctx.assume(x >= one)
+        ctx.assume((x >= ctx.zero()) & (x <= upper))
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [x >= one, x <= upper])
+
     def test_rival_trim_context_keeps_maybe_exprs(self):
         ctx = SpecContext("rival-trim-maybe")
         x = ctx.real("x")
@@ -8320,7 +8332,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         )
 
         self.assertEqual(simplified_ast, RealLit(3))
-        self.assertEqual(simplified_ctx.assumes, [])
+        self.assertEqual(simplified_ctx.assumes, [x.eq(ctx.two())])
         self.assertEqual(simplified_ctx.checks, [])
         self.assertEqual(ctx.assumes, [x.eq(ctx.two())])
 
@@ -8341,7 +8353,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         )
 
         self.assertEqual(simplified_ast, RealLit(1))
-        self.assertEqual(simplified_ctx.assumes, [])
+        self.assertEqual(simplified_ctx.assumes, [assumption])
         self.assertEqual(simplified_ctx.checks, [check])
         self.assertEqual(ctx.assumes, [assumption])
         self.assertEqual(ctx.checks, [check])

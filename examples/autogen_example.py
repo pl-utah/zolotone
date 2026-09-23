@@ -214,3 +214,8 @@ def addition_with_checks2(x: UQ(4, 0), ctx) -> UQ(5, 0):
     ctx.check(z > ctx.real_val(2))
     return z
 
+
+@Test()
+def constant_folding(x: UQ(4, 0), ctx) -> UQ(5, 0):
+    z = (ctx.one() + ctx.one()) + x
+    return z
