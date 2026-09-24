@@ -182,13 +182,13 @@ def unreachable_contradictionary(x: UQ(1, 0), ctx) -> UQ(1, 0):
 
 
 @Test()
-def reachable_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+def good_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
     ctx.check(x >= ctx.zero())
     return x
 
 
 @Test(InfeasibleError)
-def reachable_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+def wrong_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
     ctx.check(x > ctx.zero())
     return x
 
