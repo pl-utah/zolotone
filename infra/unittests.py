@@ -47,6 +47,7 @@ from zolotone.rival import (
     collect_free_vars,
     get_rival_rects,
     rival_feasibility_check,
+    rival_domain_errors,
     rival_range_analysis,
     rival_trim_context,
     to_rival_ir,
@@ -6569,6 +6570,80 @@ class TestRivalTranslation(unittest.TestCase):
             ["x"],
         )
 
+    def test_rival_domain_analysis_ignores_wide_valid_ranges(self):
+        x = RealVar("x")
+
+        self.assertEqual(rival_domain_errors([x], []), [])
+
+    def test_rival_domain_analysis_observes_invalid_power(self):
+        x = RealVar("x")
+
+        findings = rival_domain_errors(
+            [x ** RealLit(-1)],
+            [x >= RealLit(0)],
+        )
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding.expression_index, 0)
+        self.assertEqual(finding.free_vars, ("x",))
+        self.assertEqual(finding.rect, ((0.0, math.inf),))
+        self.assertEqual(
+            rival_domain_errors(
+                [x ** RealLit(-1)],
+                [x >= RealLit(1)],
+            ),
+            [],
+        )
+
+    def test_rival_domain_analysis_uses_one_multi_output_machine(self):
+        x = RealVar("x")
+        y = RealVar("y")
+        x_reciprocal = x ** RealLit(-1)
+        y_reciprocal = y ** RealLit(-1)
+        machine = Mock()
+        events = []
+
+        def build(expressions, free_vars):
+            events.append(("build", tuple(expressions), tuple(free_vars)))
+            return machine
+
+        statuses = iter([[(False, True), (True, True), (False, True)]])
+        machine.domain_errors.side_effect = lambda rect: (
+            events.append(("apply", tuple(rect))) or next(statuses)
+        )
+
+        with (
+            patch(
+                "zolotone.rival.get_rival_rects",
+                return_value=[
+                    [(0.0, 0.0), (0.0, 0.0)],
+                    [(1.0, 1.0), (1.0, 1.0)],
+                ],
+            ),
+            patch("zolotone.rival._build_domain_machine", side_effect=build),
+        ):
+            findings = rival_domain_errors(
+                [x_reciprocal, y_reciprocal, x_reciprocal + y_reciprocal],
+                [],
+            )
+
+        self.assertEqual(
+            [event[0] for event in events],
+            ["build", "apply"],
+        )
+        self.assertEqual(
+            events[0][1],
+            (x_reciprocal, y_reciprocal, x_reciprocal + y_reciprocal),
+        )
+        self.assertEqual(
+            [finding.expression_index for finding in findings],
+            [0, 1],
+        )
+        self.assertTrue(all(
+            finding.rect == ((0.0, 0.0), (0.0, 0.0))
+            for finding in findings
+        ))
+
     def test_rival_range_analysis_unions_rectangle_outputs(self):
         ctx = SpecContext("rival-output-range")
         x = ctx.real("x")
@@ -8288,6 +8363,126 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             "check that does not hold",
         ):
             Autogenerate("generated_invalid_check", invalid_spec)
+
+    def test_domain_warning_reports_innermost_result_computation(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        ctx = SpecContext("domain-result")
+        x = ctx.real("x")
+        reciprocal = x ** ctx.real_val(-1)
+
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"Specification 'domain-result'.*result: \(real\(x\) \*\* -1\)",
+        ):
+            _warn_about_domain_errors(
+                reciprocal + ctx.one(),
+                ctx,
+            )
+
+    def test_domain_warning_prunes_parent_error_expressions(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        ctx = SpecContext("domain-pruned-parents")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        ctx.assume((x >= ctx.real_val(-8)) & (x <= ctx.real_val(7)))
+        ctx.assume((y >= ctx.zero()) & (y <= ctx.real_val(15)))
+        x_reciprocal = x ** ctx.real_val(-1)
+        y_reciprocal = y ** ctx.real_val(-1)
+        result = (x_reciprocal + ctx.one()) + y_reciprocal
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _warn_about_domain_errors(result, ctx)
+
+        messages = [str(warning.message) for warning in caught]
+        self.assertEqual(len(messages), 2)
+        self.assertIn(str(x_reciprocal), messages[0])
+        self.assertIn(str(y_reciprocal), messages[1])
+        self.assertNotIn(str(x_reciprocal + ctx.one()), "\n".join(messages))
+        self.assertNotIn(str(result), "\n".join(messages))
+
+    def test_spec_validation_runs_domain_error_check(self):
+        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.spec_validation import check_spec_feasibility
+
+        def spec(x: UQ(2, 0), ctx) -> Bool:
+            return (x ** ctx.real_val(-1)) > ctx.zero()
+
+        contract = ast_nodes._build_spec_contract("domain-pipeline", spec)
+        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"Specification .*domain-pipeline.*result: .*\*\* -1",
+        ):
+            check_spec_feasibility(spec_ast, spec_inputs, contract, ctx)
+
+    def test_domain_warning_uses_all_assumptions_for_shared_rects(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        ctx = SpecContext("domain-assumption")
+        x = ctx.real("x")
+        reciprocal_positive = (x ** ctx.real_val(-1)) > ctx.zero()
+        ctx.assume(reciprocal_positive)
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"assumption 1: .*\*\* -1.*x in \[-inf, inf\]",
+        ):
+            _warn_about_domain_errors(
+                ctx.one(),
+                ctx,
+            )
+
+        ctx.assume(x >= ctx.one())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _warn_about_domain_errors(
+                ctx.one(),
+                ctx,
+            )
+        self.assertEqual(caught, [])
+
+    def test_domain_warning_covers_checks_and_requirements(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        for collection, expected_location in (
+            ("checks", "check 1"),
+            ("requirements", "requirement 1"),
+        ):
+            with self.subTest(collection=collection):
+                ctx = SpecContext(f"domain-{collection}")
+                x = ctx.real("x")
+                expression = (x ** ctx.real_val(-1)) > ctx.zero()
+                getattr(ctx, collection).append(expression)
+
+                with self.assertWarnsRegex(UserWarning, expected_location):
+                    _warn_about_domain_errors(
+                        ctx.one(),
+                        ctx,
+                    )
+
+    def test_domain_warning_evaluates_each_if_branch_node(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        ctx = SpecContext("domain-dead-branch")
+        x = ctx.real("x")
+        result = If(
+            x.eq(ctx.zero()),
+            ctx.one(),
+            x ** ctx.real_val(-1),
+        )
+
+        ctx.assume(x.eq(ctx.zero()))
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"result: \(real\(x\) \*\* -1\); ranges: x in \[0\.0, 0\.0\]",
+        ):
+            _warn_about_domain_errors(
+                result,
+                ctx,
+            )
 
     def test_autogenerate_prefers_depth_zero_identity(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:

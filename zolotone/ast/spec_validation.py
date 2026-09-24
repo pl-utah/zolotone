@@ -3,7 +3,7 @@ import typing as tp
 import warnings
 
 from ..errors import InfeasibleError, MissingError, ZolotoneError
-from ..rival import rival_range_analysis
+from ..rival import rival_domain_errors, rival_range_analysis
 from ..solver import check_equivalence
 from ..spec.spec_ast import (
     And,
@@ -278,6 +278,59 @@ def _check_spec_obligations(ctx: SpecContext) -> None:
     )
 
 
+def _domain_nodes(location: str, expression: SpecNode):
+    for child in children(expression):
+        yield from _domain_nodes(location, child)
+    yield location, expression
+
+
+def _warn_about_domain_errors(
+    spec_ast: SpecNode,
+    ctx: SpecContext,
+) -> None:
+    roots: list[tuple[str, SpecNode]] = [
+        (f"assumption {index}", assume)
+        for index, assume in enumerate(ctx.assumes, start=1)
+    ]
+    roots.append(("result", spec_ast))
+    roots.extend(
+        (f"check {index}", check)
+        for index, check in enumerate(ctx.checks, start=1)
+    )
+    roots.extend(
+        (f"requirement {index}", requirement)
+        for index, requirement in enumerate(ctx.requirements, start=1)
+    )
+    tagged_nodes = [
+        tagged_node
+        for location, expression in roots
+        for tagged_node in _domain_nodes(location, expression)
+    ]
+    findings = rival_domain_errors(
+        [expression for _, expression in tagged_nodes],
+        ctx.assumes,
+    )
+    if not findings:
+        return
+
+    for finding in findings:
+        location, culprit = tagged_nodes[finding.expression_index]
+        ranges = ", ".join(
+            f"{name} in [{lower}, {upper}]"
+            for name, (lower, upper) in zip(
+                finding.free_vars,
+                finding.rect,
+                strict=True,
+            )
+        ) or "no input variables"
+        warnings.warn(
+            f"Specification {ctx.name!r} may trigger a domain error in "
+            f"{location}: {culprit}; ranges: {ranges}",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def _output_format_suggestion_with_search(
     spec_ast: RealExpr,
     conservative_format: Q | UQ,
@@ -411,6 +464,7 @@ def check_spec_feasibility(
                 f"a Boolean expression, got {type(spec_ast).__name__}"
             )
         _check_spec_reachability(ctx)
+        _warn_about_domain_errors(spec_ast, ctx)
         _check_spec_obligations(ctx)
         return
 
@@ -427,6 +481,7 @@ def check_spec_feasibility(
         )
 
     _check_spec_reachability(ctx)
+    _warn_about_domain_errors(spec_ast, ctx)
     _check_spec_obligations(ctx)
 
     # TODO: counterexample

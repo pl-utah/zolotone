@@ -234,8 +234,25 @@ def unused_variable2(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
     return x
 
 
-# Unused variable
+# Used variable
 @Test()
 def used_variable(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
     ctx.assume(x > y)
     return x
+
+
+@Test()
+def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
+    return x ** (ctx.real_val(-1)) + ctx.one() + y ** (ctx.real_val(-1)) 
+
+
+# Domain error
+# @Test()
+# def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
+#     return x ** (ctx.real_val(-1)) + ctx.one()
+
+
+# # Domain error
+# @Test()
+# def domain_error2(x: Q(4, 0), ctx) -> Q:
+#     return (x + ctx.one()) ** (ctx.real_val(-1)) + ctx.one()
