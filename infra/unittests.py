@@ -6833,7 +6833,7 @@ class TestRivalTranslation(unittest.TestCase):
             ],
         )
 
-    def test_rival_rects_stop_before_cartesian_product_exceeds_cap(self):
+    def test_rival_rects_fall_back_to_unbounded_when_cap_is_exceeded(self):
         ctx = SpecContext("rival-rects-capped-cartesian-or")
         sign = ctx.real("sign")
         exponent = ctx.real("exponent")
@@ -6841,15 +6841,14 @@ class TestRivalTranslation(unittest.TestCase):
         ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
         ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
-        with self.assertRaises(RivalRectLimitExceeded) as raised:
+        self.assertEqual(
             get_rival_rects(
                 ctx.assumes,
                 ["sign", "exponent"],
                 max_rects=3,
-            )
-
-        self.assertEqual(raised.exception.rect_count, 4)
-        self.assertEqual(raised.exception.max_rects, 3)
+            ),
+            [[(-math.inf, math.inf), (-math.inf, math.inf)]],
+        )
 
     def test_rival_rect_cap_can_be_configured_with_environment(self):
         ctx = SpecContext("rival-rects-environment-cap")
@@ -6859,11 +6858,13 @@ class TestRivalTranslation(unittest.TestCase):
         ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
         ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
-        with (
-            patch.dict(os.environ, {MAX_RECTS_ENV: "3"}),
-            self.assertRaises(RivalRectLimitExceeded),
-        ):
-            get_rival_rects(ctx.assumes, ["sign", "exponent"])
+        with patch.dict(os.environ, {MAX_RECTS_ENV: "3"}):
+            rects = get_rival_rects(ctx.assumes, ["sign", "exponent"])
+
+        self.assertEqual(
+            rects,
+            [[(-math.inf, math.inf), (-math.inf, math.inf)]],
+        )
 
     def test_rival_feasibility_returns_unknown_when_rect_cap_is_exceeded(self):
         ctx = SpecContext("rival-feasibility-capped-rects")
@@ -6873,11 +6874,9 @@ class TestRivalTranslation(unittest.TestCase):
         ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
         ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
-        with patch("zolotone.rival.build_machine") as build:
-            status = rival_feasibility_check(ctx, max_rects=3)
+        status = rival_feasibility_check(ctx, max_rects=3)
 
         self.assertEqual(status, "unknown")
-        build.assert_not_called()
 
     def test_rival_trim_returns_original_context_when_rect_cap_is_exceeded(self):
         ctx = SpecContext("rival-trim-capped-rects")

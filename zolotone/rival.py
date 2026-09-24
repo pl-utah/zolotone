@@ -224,12 +224,20 @@ def get_rival_rects(
 ) -> list[list[tuple[float, float]]]:
     resolved_max_rects = resolve_max_rects(max_rects)
     resolved_bool_var_names = _collect_bool_var_names(assumes) if bool_var_names is None else set(bool_var_names)
-    rects, _ = _get_rival_rects_and_contributors(
-        assumes,
-        free_vars,
-        resolved_bool_var_names,
-        resolved_max_rects,
-    )
+    try:
+        rects, _ = _get_rival_rects_and_contributors(
+            assumes,
+            free_vars,
+            resolved_bool_var_names,
+            resolved_max_rects,
+        )
+    except RivalRectLimitExceeded:
+        rects = [
+            _RivalRectDomain.build(
+                free_vars,
+                resolved_bool_var_names,
+            ).new_rect()
+        ]
     return rects
 
 
@@ -246,15 +254,12 @@ def rival_range_analysis(
     all_exprs = ctx.assumes + [expr]
     free_vars = collect_free_vars(all_exprs)
     bool_var_names = _collect_bool_var_names(all_exprs)
-    try:
-        rects = get_rival_rects(
-            ctx.assumes,
-            free_vars,
-            bool_var_names,
-            max_rects=max_rects,
-        )
-    except RivalRectLimitExceeded:
-        return None
+    rects = get_rival_rects(
+        ctx.assumes,
+        free_vars,
+        bool_var_names,
+        max_rects=max_rects,
+    )
     if not rects:
         return None
 
@@ -285,15 +290,12 @@ def rival_domain_errors(
     all_exprs = [*assumes, *expression_list]
     free_vars = collect_free_vars(all_exprs)
     bool_var_names = _collect_bool_var_names(all_exprs)
-    try:
-        rects = get_rival_rects(
-            assumes,
-            free_vars,
-            bool_var_names,
-            max_rects=max_rects,
-        )
-    except RivalRectLimitExceeded:
-        rects = [_RivalRectDomain.build(free_vars, bool_var_names).new_rect()]
+    rects = get_rival_rects(
+        assumes,
+        free_vars,
+        bool_var_names,
+        max_rects=max_rects,
+    )
     if not rects:
         return []
 
@@ -390,15 +392,12 @@ def rival_feasibility_check(
     if not exprs:
         return "feasible"
     
-    try:
-        rects = get_rival_rects(
-            ctx.assumes,
-            free_vars,
-            bool_var_names,
-            max_rects=max_rects,
-        )
-    except RivalRectLimitExceeded:
-        return "unknown"
+    rects = get_rival_rects(
+        ctx.assumes,
+        free_vars,
+        bool_var_names,
+        max_rects=max_rects,
+    )
     if not rects:
         return "not feasible"
 
