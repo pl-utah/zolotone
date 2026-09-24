@@ -281,10 +281,6 @@ class SpecContext:
 
         return simplified, False
 
-    def simplify(self) -> "SpecContext":
-        """Apply context learning and ordinary constant folding to a fixpoint."""
-        return self._simplify_with_convergence()[0]
-    
     def spec_of(self, node: Node):
         if not self._spec_cache_valid:
             raise RuntimeError(

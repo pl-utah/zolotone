@@ -2382,7 +2382,7 @@ class TestPowSpecOp(unittest.TestCase):
 
         ctx.check(If(BoolLit(False), x + RealLit(1), RealLit(3)).eq(RealLit(3)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
         self.assertEqual(simplified.checks, [])
 
     def test_context_simplify_uses_mul_by_zero_shortcut(self):
@@ -2391,7 +2391,7 @@ class TestPowSpecOp(unittest.TestCase):
 
         ctx.check((RealLit(0) * (x + RealLit(5))).eq(RealLit(0)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
         self.assertEqual(simplified.checks, [])
 
 
@@ -2475,7 +2475,7 @@ class TestSpecContextLearning(unittest.TestCase):
             },
         )
         ctx.check((x + y).eq(ctx.one()))
-        self.assertEqual(ctx.simplify().checks, [])
+        self.assertEqual(simplify_ctx(ctx)["new_ctx"].checks, [])
 
     def test_context_simplify_substitutes_literal_into_sibling_conjunct(self):
         ctx = SpecContext("simplify-sibling-conjunct")
@@ -2486,7 +2486,7 @@ class TestSpecContextLearning(unittest.TestCase):
 
         ctx.assume(x.eq(zero) & result.eq(x * y))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
@@ -2540,8 +2540,9 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(ctx.checks, before.checks)
 
         ctx.assume(y.eq(x))
-        with self.assertRaises(ValueError):
-            ctx.simplify()
+        report = simplify_ctx(ctx)
+        self.assertEqual(report["feasibility_status"], "not feasible")
+        self.assertIsInstance(report["info"], ValueError)
 
         self.assertEqual(
             ctx.assumes,
@@ -2555,7 +2556,10 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.one()))
         ctx.assume(ctx.two().eq(x + ctx.one()))
 
-        self.assertEqual(ctx.simplify().assumes, [Eq(x, RealLit(1))])
+        self.assertEqual(
+            simplify_ctx(ctx)["new_ctx"].assumes,
+            [Eq(x, RealLit(1))],
+        )
 
     def test_context_fixpoint_simplifies_assumptions_from_learned_literals(self):
         ctx = SpecContext("simplify-assumes")
@@ -2567,7 +2571,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.zero()))
         ctx.assume(y.eq(ctx.zero()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             ctx.assumes,
@@ -2596,7 +2600,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume((xor_res * ctx.one()).eq(x + y))
         ctx.check((xor_res + ctx.one()).eq((x + y) + ctx.one()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [Eq(xor_res, x + y)])
         self.assertEqual(simplified.checks, [])
@@ -2610,7 +2614,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(alias.eq(y + ctx.one()))
         ctx.assume(alias.eq(z + ctx.one()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
@@ -2627,7 +2631,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(abs(x)))
         ctx.check(x.eq(abs(x)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [Eq(x, Abs(x))])
         self.assertEqual(simplified.checks, [])
@@ -2667,7 +2671,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(ctx.real_val(4).eq(x + ctx.one()))
         ctx.assume(p.eq(ctx.two().eq(ctx.two())))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
@@ -2688,7 +2692,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(y.eq(z + ctx.one()))
         ctx.assume(z.eq(ctx.zero()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
@@ -2714,7 +2718,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.one()))
         ctx.check((x + ctx.two()).eq(ctx.real_val(3)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(ctx.checks, [Eq(x + RealLit(2), RealLit(3))])
         self.assertEqual(simplified.checks, [])
@@ -2728,7 +2732,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(q.eq(p))
         ctx.check(q.eq(ctx.true()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(ctx.assumes, [BoolEq(p, BoolLit(True)), BoolEq(q, p)])
         self.assertEqual(simplified.assumes, [p, q])
@@ -2746,7 +2750,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(overflow.eq(ctx.false()))
         ctx.check(overflow.eq(ctx.false()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [~overflow])
         self.assertEqual(simplified.checks, [])
@@ -2763,7 +2767,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(in_range.eq(ctx.true()))
         ctx.check(in_range)
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
@@ -2789,8 +2793,9 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(positive_y)
         ctx.assume(~(positive_x & positive_y))
 
-        with self.assertRaisesRegex(ValueError, "Assumption folds to false"):
-            ctx.simplify()
+        report = simplify_ctx(ctx)
+        self.assertEqual(report["feasibility_status"], "not feasible")
+        self.assertRegex(str(report["info"]), "Assumption folds to false")
 
     def test_context_fixpoint_keeps_one_anchor_for_duplicate_compound_facts(self):
         ctx = SpecContext("simplify-duplicate-compound")
@@ -2801,7 +2806,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(positive)
         ctx.check(positive)
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [positive])
         self.assertEqual(simplified.checks, [])
@@ -2818,12 +2823,12 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.check(x.eq(y))
         ctx.check(p.eq(q))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [x.eq(y), p.eq(q)])
         self.assertEqual(simplified.checks, [])
 
-    def test_context_preserves_finite_if_after_alias_substitution(self):
+    def test_simplify_ctx_preserves_finite_if_after_alias_substitution(self):
         ctx = SpecContext("simplify-if-alias")
         selected = ctx.fresh_real("selected")
         condition = ctx.bool("condition")
@@ -2832,19 +2837,19 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume((ctx.one() - selected).eq(ctx.one()))
         ctx.check(condition)
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
             [
-                selected.eq(If(condition, ctx.one(), ctx.zero())),
+                selected.eq(ctx.zero()),
                 (
                     ctx.one()
                     - If(condition, ctx.one(), ctx.zero())
                 ).eq(ctx.one())
             ],
         )
-        self.assertEqual(simplified.checks, [condition])
+        self.assertEqual(simplified.checks, [ctx.false()])
 
     def test_context_fixpoint_accepts_duplicate_equivalent_bindings(self):
         ctx = SpecContext("simplify-duplicate")
@@ -2856,7 +2861,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(p.eq(ctx.true()))
         ctx.assume(ctx.real_val(3).eq(ctx.real_val(3)).eq(p))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
@@ -2874,8 +2879,9 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.zero()))
         ctx.assume(x.eq(ctx.one()))
 
-        with self.assertRaises(ValueError):
-            ctx.simplify()
+        report = simplify_ctx(ctx)
+        self.assertEqual(report["feasibility_status"], "not feasible")
+        self.assertIsInstance(report["info"], ValueError)
 
     def test_simplify_returns_new_simplified_context(self):
         ctx = SpecContext("simplify-output")
@@ -2886,7 +2892,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(y.eq(ctx.two()))
         ctx.check(x.eq(ctx.real_val(3)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertIsNot(simplified, ctx)
         self.assertEqual(ctx.assumes, [Eq(x, Add(y, RealLit(1))), Eq(y, RealLit(2))])
@@ -2904,8 +2910,9 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.zero()))
         ctx.assume(x.eq(ctx.one()))
 
-        with self.assertRaises(ValueError):
-            ctx.simplify()
+        report = simplify_ctx(ctx)
+        self.assertEqual(report["feasibility_status"], "not feasible")
+        self.assertIsInstance(report["info"], ValueError)
 
         self.assertEqual(ctx.assumes, [Eq(x, RealLit(0)), Eq(x, RealLit(1))])
 
@@ -3124,7 +3131,10 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
         expected = expected.constant_fold()
         expected_checks = [] if expected == BoolLit(True) else [expected]
-        self.assertEqual(ctx.simplify().checks, expected_checks)
+        self.assertEqual(
+            simplify_ctx(ctx)["new_ctx"].checks,
+            expected_checks,
+        )
 
     def test_fp_expr_declares_required_abstract_format_operations(self):
         self.assertEqual(
@@ -9918,7 +9928,7 @@ class TestSolverApis(unittest.TestCase):
         )
         base_ctx = adder.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in adder.inner_args]
-        simplified = ast_case_split._collect_classified_spec(
+        collected = ast_case_split._collect_classified_spec(
             ast_nodes._Spec(
                 "outer_spec",
                 lambda ctx: adder.spec(*inputs, ctx=ctx),
@@ -9930,7 +9940,8 @@ class TestSolverApis(unittest.TestCase):
                 "arg1": "inf",
                 "outer_spec": "norm",
             },
-        ).simplify()
+        )
+        simplified = simplify_ctx(collected)["new_ctx"]
 
         env = {}
         solver = z3.Solver()

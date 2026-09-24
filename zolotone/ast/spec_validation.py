@@ -270,12 +270,8 @@ def _check_spec_obligations(ctx: SpecContext) -> None:
     if status == "unsat":
         return
     if status == "sat":
-        raise InfeasibleError(
-            f"Specification {ctx.name!r} has a check that does not hold"
-        )
-    raise ZolotoneError(
-        f"Could not prove all checks in specification {ctx.name!r}"
-    )
+        raise InfeasibleError(f"Specification {ctx.name!r} has a check that does not hold")
+    raise ZolotoneError(f"Could not prove all checks in specification {ctx.name!r}")
 
 
 def _domain_nodes(location: str, expression: SpecNode):
