@@ -129,5 +129,130 @@ def spec13(x: UQ(2, 0), ctx) -> Float32():
 
 # conversion can be composed with numeric components
 @Test()
-def spec_bool_to_uq_then_add(x: Bool(), y: UQ(1, 0), ctx) -> UQ(4, 0):
-    return If(x, ctx.one(), ctx.zero()) + y
+def spec_bool_to_uq_then_add(x: Bool(), y: UQ(2, 1), ctx) -> UQ(5, 1):
+    ctx.assume(y < ctx.two())
+    return If(x, ctx.real_val(2), ctx.zero()) + y
+
+
+# Rival keeps the input range, then solver search uses the compound assumption
+# to shrink the output suggestion to UQ(1, 0).
+@Test()
+def spec_assumption_shrinks_output(x: UQ(4, 0), ctx) -> UQ(4, 0):
+    ctx.assume((x - ctx.one()).eq(ctx.zero()))
+    return x
+
+
+@Test(InfeasibleError)
+def unreachable(x: UQ(4, 0), ctx) -> UQ(4, 0):
+    ctx.assume(x > ctx.real_val(1 << 4))
+    return x
+
+
+@Test(InfeasibleError)
+def unreachable_less_than_zero(x: UQ(4, 0), ctx) -> UQ(4, 0):
+    ctx.check(x < ctx.zero())
+    return x
+
+
+@Test(InfeasibleError)
+def unreachable_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.check(x.eq(ctx.zero()))
+    return x
+
+
+@Test()
+def reachable_assume_and_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.assume(x.eq(ctx.zero()))
+    ctx.check(x.eq(ctx.zero()))
+    return x
+
+
+@Test()
+def reachable_assume_and_check2(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.check(x.eq(ctx.zero()))
+    ctx.assume(x.eq(ctx.zero()))
+    return x
+
+
+@Test(InfeasibleError)
+def unreachable_contradictionary(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.assume(x.eq(ctx.one()))
+    ctx.assume(x.eq(ctx.zero()))
+    return x
+
+
+@Test()
+def good_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.check(x >= ctx.zero())
+    return x
+
+
+@Test(InfeasibleError)
+def wrong_check(x: UQ(1, 0), ctx) -> UQ(1, 0):
+    ctx.check(x > ctx.zero())
+    return x
+
+
+@Test()
+def only_zero_is_valid(x: UQ(4, 0), ctx) -> UQ(4, 0):
+    ctx.assume(x <= ctx.zero())
+    return x
+
+
+@Test()
+def addition_with_checks(x: UQ(4, 0), ctx) -> UQ(5, 0):
+    ctx.assume(x >= ctx.one())
+    z = x + ctx.one()
+    ctx.check(z >= ctx.real_val(2))
+    return z
+
+
+@Test(InfeasibleError)
+def addition_with_checks2(x: UQ(4, 0), ctx) -> UQ(5, 0):
+    ctx.assume(x >= ctx.one())
+    z = x + ctx.one()
+    ctx.check(z > ctx.real_val(2))
+    return z
+
+
+@Test()
+def constant_folding(x: UQ(4, 0), ctx) -> UQ(5, 0):
+    z = (ctx.one() + ctx.one()) + x
+    return z
+
+
+# Unused variable
+@Test()
+def unused_variable(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
+    ctx.assume(y.eq(ctx.one()))
+    return x
+
+
+# Unused variable
+@Test()
+def unused_variable2(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
+    return x
+
+
+# Used variable
+@Test()
+def used_variable(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
+    ctx.assume(x > y)
+    return x
+
+
+@Test()
+def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
+    return x ** (ctx.real_val(-1)) + ctx.one() + y ** (ctx.real_val(-1)) 
+
+
+# Domain error
+# @Test()
+# def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
+#     return x ** (ctx.real_val(-1)) + ctx.one()
+
+
+# # Domain error
+# @Test()
+# def domain_error2(x: Q(4, 0), ctx) -> Q:
+#     return (x + ctx.one()) ** (ctx.real_val(-1)) + ctx.one()

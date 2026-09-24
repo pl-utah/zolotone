@@ -6,7 +6,7 @@ class ZolotoneError(Exception):
 
 
 class InfeasibleError(ZolotoneError, TypeError):
-    """A valid specification cannot fit its requested output format."""
+    """A specification cannot be satisfied under its declared contract."""
 
 
 class MissingError(ZolotoneError, TypeError):

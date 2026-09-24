@@ -76,6 +76,28 @@ struct RawRivalMachine {
 
 #[pymethods]
 impl RawRivalMachine {
+    fn domain_errors(&mut self, rect: Vec<(f64, f64)>) -> PyResult<Vec<(bool, bool)>> {
+        let precision = self.range_machine.argument_precision();
+        let rival_rect = rect
+            .into_iter()
+            .map(|(lo, hi)| {
+                Ival::from_lo_hi(
+                    Float::with_val(precision, lo),
+                    Float::with_val(precision, hi),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let outputs = self
+            .range_machine
+            .apply(&rival_rect, None, 1)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(outputs
+            .iter()
+            .map(|output| (!output.lo().is_zero(), !output.hi().is_zero()))
+            .collect())
+    }
+
     fn apply_with_hints(
         &mut self,
         rect: Vec<(f64, f64)>,
@@ -181,6 +203,7 @@ fn parse_expr(obj: &PyAny) -> PyResult<Expr> {
         "ge" => parse_binary(dict, Expr::Ge),
         "bool_eq" => parse_binary(dict, Expr::Eq),
         "not" => parse_unary(dict, Expr::Not),
+        "error" => parse_unary(dict, Expr::Error),
         "or" => parse_binary(dict, Expr::Or),
         "and" => parse_binary(dict, Expr::And),
         "assert" => parse_unary(dict, Expr::Assert),

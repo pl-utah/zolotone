@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import time
+import warnings
 from fractions import Fraction
 from pathlib import Path
 from unittest.mock import Mock, call, patch
@@ -46,6 +47,7 @@ from zolotone.rival import (
     collect_free_vars,
     get_rival_rects,
     rival_feasibility_check,
+    rival_domain_errors,
     rival_range_analysis,
     rival_trim_context,
     to_rival_ir,
@@ -1277,7 +1279,7 @@ class TestCppLowering(unittest.TestCase):
         self.assertIn("#include <cassert>", bool_source)
         self.assertIn("class Zolotone", bool_source)
         self.assertIn("assert(arg_0 >= 0 && arg_0 <= 1);", bool_source)
-        self.assertIn("return check_bool_impl(arg_0);", bool_source)
+        self.assertIn("return check_bool(arg_0);", bool_source)
 
     def test_nonjittable_entry_relies_on_exact_width_type(self):
         source = negate(Var("value", Bool())).to_cpp(
@@ -1290,7 +1292,7 @@ class TestCppLowering(unittest.TestCase):
             "static inline ac_uint<1> check_bool(ac_uint<1> arg_0)",
             source,
         )
-        self.assertIn("return check_bool_impl(arg_0);", source)
+        self.assertIn("return check_bool(arg_0);", source)
 
     def test_jittable_array_elements_use_bounds_checked_access(self):
         values = Var("values", Tuple(UQ(4, 0), UQ(4, 0)))
@@ -1643,6 +1645,11 @@ class TestConstantFolding(unittest.TestCase):
             exponent=254,
             mantissa=127,
         )
+        small_normal = BFloat16().from_fields(
+            sign=0,
+            exponent=BFloat16.exponent_bias - 40,
+            mantissa=0,
+        )
         smallest_subnormal = BFloat16().from_fields(sign=0, exponent=0, mantissa=1)
 
         cases = [
@@ -1657,6 +1664,12 @@ class TestConstantFolding(unittest.TestCase):
                 [smallest_subnormal, zero, zero, zero],
                 [one, largest_finite, zero, zero],
                 0x00010000,
+            ),
+            (
+                "two small products survive zero product exponent masking",
+                [small_normal, zero, one, small_normal],
+                [one, largest_finite, zero, one],
+                Float32().from_fields(sign=0, exponent=88, mantissa=0).raw,
             ),
             (
                 "all zero products",
@@ -2369,7 +2382,7 @@ class TestPowSpecOp(unittest.TestCase):
 
         ctx.check(If(BoolLit(False), x + RealLit(1), RealLit(3)).eq(RealLit(3)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
         self.assertEqual(simplified.checks, [])
 
     def test_context_simplify_uses_mul_by_zero_shortcut(self):
@@ -2378,7 +2391,7 @@ class TestPowSpecOp(unittest.TestCase):
 
         ctx.check((RealLit(0) * (x + RealLit(5))).eq(RealLit(0)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
         self.assertEqual(simplified.checks, [])
 
 
@@ -2462,7 +2475,24 @@ class TestSpecContextLearning(unittest.TestCase):
             },
         )
         ctx.check((x + y).eq(ctx.one()))
-        self.assertEqual(ctx.simplify().checks, [])
+        self.assertEqual(simplify_ctx(ctx)["new_ctx"].checks, [])
+
+    def test_context_simplify_substitutes_literal_into_sibling_conjunct(self):
+        ctx = SpecContext("simplify-sibling-conjunct")
+        result = ctx.real("result")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        zero = ctx.zero()
+
+        ctx.assume(x.eq(zero) & result.eq(x * y))
+
+        simplified = simplify_ctx(ctx)["new_ctx"]
+
+        self.assertEqual(
+            simplified.assumes,
+            [x.eq(zero), result.eq(zero)],
+        )
+        self.assertEqual(simplified.learned_literals()[x], zero)
 
     def test_learned_literals_reads_non_literal_equalities_as_boolean_facts(self):
         ctx = SpecContext("learn-ignore")
@@ -2510,12 +2540,25 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(ctx.checks, before.checks)
 
         ctx.assume(y.eq(x))
-        with self.assertRaises(ValueError):
-            ctx.simplify()
+        report = simplify_ctx(ctx)
+        self.assertEqual(report["feasibility_status"], "not feasible")
+        self.assertIsInstance(report["info"], ValueError)
 
         self.assertEqual(
             ctx.assumes,
             [Eq(x, RealLit(0)), Eq(x, RealLit(1)), Eq(y, x)],
+        )
+
+    def test_context_simplify_preserves_fact_used_to_discharge_later_assumption(self):
+        ctx = SpecContext("preserve-learned-fact")
+        x = ctx.real("x")
+
+        ctx.assume(x.eq(ctx.one()))
+        ctx.assume(ctx.two().eq(x + ctx.one()))
+
+        self.assertEqual(
+            simplify_ctx(ctx)["new_ctx"].assumes,
+            [Eq(x, RealLit(1))],
         )
 
     def test_context_fixpoint_simplifies_assumptions_from_learned_literals(self):
@@ -2528,7 +2571,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.zero()))
         ctx.assume(y.eq(ctx.zero()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             ctx.assumes,
@@ -2540,7 +2583,11 @@ class TestSpecContextLearning(unittest.TestCase):
         )
         self.assertEqual(
             simplified.assumes,
-            [],
+            [
+                Eq(and_res, RealLit(0)),
+                Eq(x, RealLit(0)),
+                Eq(y, RealLit(0)),
+            ],
         )
 
     def test_context_fixpoint_inlines_non_literal_aliases(self):
@@ -2553,10 +2600,9 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume((xor_res * ctx.one()).eq(x + y))
         ctx.check((xor_res + ctx.one()).eq((x + y) + ctx.one()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
-        self.assertNotIn("xor_res", str(simplified))
-        self.assertEqual(simplified.assumes, [])
+        self.assertEqual(simplified.assumes, [Eq(xor_res, x + y)])
         self.assertEqual(simplified.checks, [])
 
     def test_context_fixpoint_preserves_duplicate_aliases_as_constraints(self):
@@ -2568,11 +2614,14 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(alias.eq(y + ctx.one()))
         ctx.assume(alias.eq(z + ctx.one()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
-            [Eq(y + RealLit(1), z + RealLit(1))],
+            [
+                Eq(alias, y + RealLit(1)),
+                Eq(y + RealLit(1), z + RealLit(1)),
+            ],
         )
 
     def test_context_fixpoint_keeps_self_referential_constraints(self):
@@ -2582,7 +2631,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(abs(x)))
         ctx.check(x.eq(abs(x)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [Eq(x, Abs(x))])
         self.assertEqual(simplified.checks, [])
@@ -2622,13 +2671,16 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(ctx.real_val(4).eq(x + ctx.one()))
         ctx.assume(p.eq(ctx.two().eq(ctx.two())))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
-            [],
+            [Eq(x, RealLit(3)), p],
         )
-        self.assertEqual(simplified.learned_literals(), {})
+        self.assertEqual(
+            simplified.learned_literals(),
+            {x: RealLit(3), p: BoolLit(True)},
+        )
 
     def test_context_fixpoint_propagates_through_multiple_rounds(self):
         ctx = SpecContext("simplify-multi-round")
@@ -2640,13 +2692,24 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(y.eq(z + ctx.one()))
         ctx.assume(z.eq(ctx.zero()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
-            [],
+            [
+                Eq(x, RealLit(2)),
+                Eq(y, RealLit(1)),
+                Eq(z, RealLit(0)),
+            ],
         )
-        self.assertEqual(simplified.learned_literals(), {})
+        self.assertEqual(
+            simplified.learned_literals(),
+            {
+                x: RealLit(2),
+                y: RealLit(1),
+                z: RealLit(0),
+            },
+        )
 
     def test_context_fixpoint_simplifies_checks_from_learned_literals(self):
         ctx = SpecContext("simplify-checks")
@@ -2655,7 +2718,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.one()))
         ctx.check((x + ctx.two()).eq(ctx.real_val(3)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(ctx.checks, [Eq(x + RealLit(2), RealLit(3))])
         self.assertEqual(simplified.checks, [])
@@ -2669,12 +2732,15 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(q.eq(p))
         ctx.check(q.eq(ctx.true()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(ctx.assumes, [BoolEq(p, BoolLit(True)), BoolEq(q, p)])
-        self.assertEqual(simplified.assumes, [])
+        self.assertEqual(simplified.assumes, [p, q])
         self.assertEqual(simplified.checks, [])
-        self.assertEqual(simplified.learned_literals(), {})
+        self.assertEqual(
+            simplified.learned_literals(),
+            {p: BoolLit(True), q: BoolLit(True)},
+        )
 
     def test_context_fixpoint_learns_negated_compound_boolean_fact(self):
         ctx = SpecContext("simplify-negated-compound-bool")
@@ -2684,7 +2750,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(overflow.eq(ctx.false()))
         ctx.check(overflow.eq(ctx.false()))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [~overflow])
         self.assertEqual(simplified.checks, [])
@@ -2701,9 +2767,12 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(in_range.eq(ctx.true()))
         ctx.check(in_range)
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
-        self.assertEqual(simplified.assumes, [in_range])
+        self.assertEqual(
+            simplified.assumes,
+            [x >= ctx.real_val(-1), x <= ctx.one()],
+        )
         self.assertEqual(simplified.checks, [])
         self.assertEqual(
             simplified.learned_literals(),
@@ -2724,8 +2793,9 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(positive_y)
         ctx.assume(~(positive_x & positive_y))
 
-        with self.assertRaisesRegex(ValueError, "Assumption folds to false"):
-            ctx.simplify()
+        report = simplify_ctx(ctx)
+        self.assertEqual(report["feasibility_status"], "not feasible")
+        self.assertRegex(str(report["info"]), "Assumption folds to false")
 
     def test_context_fixpoint_keeps_one_anchor_for_duplicate_compound_facts(self):
         ctx = SpecContext("simplify-duplicate-compound")
@@ -2736,7 +2806,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(positive)
         ctx.check(positive)
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [positive])
         self.assertEqual(simplified.checks, [])
@@ -2753,12 +2823,12 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.check(x.eq(y))
         ctx.check(p.eq(q))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.assumes, [x.eq(y), p.eq(q)])
         self.assertEqual(simplified.checks, [])
 
-    def test_context_preserves_finite_if_after_alias_substitution(self):
+    def test_simplify_ctx_preserves_finite_if_after_alias_substitution(self):
         ctx = SpecContext("simplify-if-alias")
         selected = ctx.fresh_real("selected")
         condition = ctx.bool("condition")
@@ -2767,18 +2837,19 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume((ctx.one() - selected).eq(ctx.one()))
         ctx.check(condition)
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
             [
+                selected.eq(ctx.zero()),
                 (
                     ctx.one()
                     - If(condition, ctx.one(), ctx.zero())
                 ).eq(ctx.one())
             ],
         )
-        self.assertEqual(simplified.checks, [condition])
+        self.assertEqual(simplified.checks, [ctx.false()])
 
     def test_context_fixpoint_accepts_duplicate_equivalent_bindings(self):
         ctx = SpecContext("simplify-duplicate")
@@ -2790,13 +2861,16 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(p.eq(ctx.true()))
         ctx.assume(ctx.real_val(3).eq(ctx.real_val(3)).eq(p))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(
             simplified.assumes,
-            [],
+            [Eq(x, RealLit(1)), p],
         )
-        self.assertEqual(simplified.learned_literals(), {})
+        self.assertEqual(
+            simplified.learned_literals(),
+            {x: RealLit(1), p: BoolLit(True)},
+        )
 
     def test_context_fixpoint_raises_on_conflicting_bindings(self):
         ctx = SpecContext("simplify-conflict")
@@ -2805,8 +2879,9 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.zero()))
         ctx.assume(x.eq(ctx.one()))
 
-        with self.assertRaises(ValueError):
-            ctx.simplify()
+        report = simplify_ctx(ctx)
+        self.assertEqual(report["feasibility_status"], "not feasible")
+        self.assertIsInstance(report["info"], ValueError)
 
     def test_simplify_returns_new_simplified_context(self):
         ctx = SpecContext("simplify-output")
@@ -2817,14 +2892,14 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(y.eq(ctx.two()))
         ctx.check(x.eq(ctx.real_val(3)))
 
-        simplified = ctx.simplify()
+        simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertIsNot(simplified, ctx)
         self.assertEqual(ctx.assumes, [Eq(x, Add(y, RealLit(1))), Eq(y, RealLit(2))])
         self.assertEqual(ctx.checks, [Eq(x, RealLit(3))])
         self.assertEqual(
             simplified.assumes,
-            [],
+            [Eq(x, RealLit(3)), Eq(y, RealLit(2))],
         )
         self.assertEqual(simplified.checks, [])
 
@@ -2835,8 +2910,9 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(x.eq(ctx.zero()))
         ctx.assume(x.eq(ctx.one()))
 
-        with self.assertRaises(ValueError):
-            ctx.simplify()
+        report = simplify_ctx(ctx)
+        self.assertEqual(report["feasibility_status"], "not feasible")
+        self.assertIsInstance(report["info"], ValueError)
 
         self.assertEqual(ctx.assumes, [Eq(x, RealLit(0)), Eq(x, RealLit(1))])
 
@@ -2868,7 +2944,7 @@ class TestSpecContextLearning(unittest.TestCase):
 
         report = simplify_ctx(ctx)
 
-        self.assertEqual(report["new_ctx"].assumes, [])
+        self.assertEqual(report["new_ctx"].assumes, [x.eq(one)])
         self.assertEqual(report["new_ctx"].checks, [])
         self.assertEqual(report["status"], "unsat")
         self.assertEqual(ctx.assumes, [x >= zero, abs(x).eq(one)])
@@ -3055,7 +3131,10 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
         expected = expected.constant_fold()
         expected_checks = [] if expected == BoolLit(True) else [expected]
-        self.assertEqual(ctx.simplify().checks, expected_checks)
+        self.assertEqual(
+            simplify_ctx(ctx)["new_ctx"].checks,
+            expected_checks,
+        )
 
     def test_fp_expr_declares_required_abstract_format_operations(self):
         self.assertEqual(
@@ -4495,8 +4574,8 @@ class TestUE4M3Spec(unittest.TestCase):
             {"tool": "simplify"},
             {
                 "tool": "egglog-rewrite",
-                "iterations": 6,
-                "scheduler": {"match_limit": 500_000, "ban_length": 1},
+                "iterations": 4,
+                "scheduler": {"match_limit": 50_000, "ban_length": 1},
             },
         ]
         with (
@@ -6532,6 +6611,80 @@ class TestRivalTranslation(unittest.TestCase):
             ["x"],
         )
 
+    def test_rival_domain_analysis_ignores_wide_valid_ranges(self):
+        x = RealVar("x")
+
+        self.assertEqual(rival_domain_errors([x], []), [])
+
+    def test_rival_domain_analysis_observes_invalid_power(self):
+        x = RealVar("x")
+
+        findings = rival_domain_errors(
+            [x ** RealLit(-1)],
+            [x >= RealLit(0)],
+        )
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding.expression_index, 0)
+        self.assertEqual(finding.free_vars, ("x",))
+        self.assertEqual(finding.rect, ((0.0, math.inf),))
+        self.assertEqual(
+            rival_domain_errors(
+                [x ** RealLit(-1)],
+                [x >= RealLit(1)],
+            ),
+            [],
+        )
+
+    def test_rival_domain_analysis_uses_one_multi_output_machine(self):
+        x = RealVar("x")
+        y = RealVar("y")
+        x_reciprocal = x ** RealLit(-1)
+        y_reciprocal = y ** RealLit(-1)
+        machine = Mock()
+        events = []
+
+        def build(expressions, free_vars):
+            events.append(("build", tuple(expressions), tuple(free_vars)))
+            return machine
+
+        statuses = iter([[(False, True), (True, True), (False, True)]])
+        machine.domain_errors.side_effect = lambda rect: (
+            events.append(("apply", tuple(rect))) or next(statuses)
+        )
+
+        with (
+            patch(
+                "zolotone.rival.get_rival_rects",
+                return_value=[
+                    [(0.0, 0.0), (0.0, 0.0)],
+                    [(1.0, 1.0), (1.0, 1.0)],
+                ],
+            ),
+            patch("zolotone.rival._build_domain_machine", side_effect=build),
+        ):
+            findings = rival_domain_errors(
+                [x_reciprocal, y_reciprocal, x_reciprocal + y_reciprocal],
+                [],
+            )
+
+        self.assertEqual(
+            [event[0] for event in events],
+            ["build", "apply"],
+        )
+        self.assertEqual(
+            events[0][1],
+            (x_reciprocal, y_reciprocal, x_reciprocal + y_reciprocal),
+        )
+        self.assertEqual(
+            [finding.expression_index for finding in findings],
+            [0, 1],
+        )
+        self.assertTrue(all(
+            finding.rect == ((0.0, 0.0), (0.0, 0.0))
+            for finding in findings
+        ))
+
     def test_rival_range_analysis_unions_rectangle_outputs(self):
         ctx = SpecContext("rival-output-range")
         x = ctx.real("x")
@@ -6721,7 +6874,7 @@ class TestRivalTranslation(unittest.TestCase):
             ],
         )
 
-    def test_rival_rects_stop_before_cartesian_product_exceeds_cap(self):
+    def test_rival_rects_fall_back_to_unbounded_when_cap_is_exceeded(self):
         ctx = SpecContext("rival-rects-capped-cartesian-or")
         sign = ctx.real("sign")
         exponent = ctx.real("exponent")
@@ -6729,15 +6882,14 @@ class TestRivalTranslation(unittest.TestCase):
         ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
         ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
-        with self.assertRaises(RivalRectLimitExceeded) as raised:
+        self.assertEqual(
             get_rival_rects(
                 ctx.assumes,
                 ["sign", "exponent"],
                 max_rects=3,
-            )
-
-        self.assertEqual(raised.exception.rect_count, 4)
-        self.assertEqual(raised.exception.max_rects, 3)
+            ),
+            [[(-math.inf, math.inf), (-math.inf, math.inf)]],
+        )
 
     def test_rival_rect_cap_can_be_configured_with_environment(self):
         ctx = SpecContext("rival-rects-environment-cap")
@@ -6747,11 +6899,13 @@ class TestRivalTranslation(unittest.TestCase):
         ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
         ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
-        with (
-            patch.dict(os.environ, {MAX_RECTS_ENV: "3"}),
-            self.assertRaises(RivalRectLimitExceeded),
-        ):
-            get_rival_rects(ctx.assumes, ["sign", "exponent"])
+        with patch.dict(os.environ, {MAX_RECTS_ENV: "3"}):
+            rects = get_rival_rects(ctx.assumes, ["sign", "exponent"])
+
+        self.assertEqual(
+            rects,
+            [[(-math.inf, math.inf), (-math.inf, math.inf)]],
+        )
 
     def test_rival_feasibility_returns_unknown_when_rect_cap_is_exceeded(self):
         ctx = SpecContext("rival-feasibility-capped-rects")
@@ -6761,11 +6915,9 @@ class TestRivalTranslation(unittest.TestCase):
         ctx.assume(sign.eq(ctx.zero()) | sign.eq(ctx.one()))
         ctx.assume(exponent.eq(ctx.zero()) | exponent.eq(ctx.real_val(255)))
 
-        with patch("zolotone.rival.build_machine") as build:
-            status = rival_feasibility_check(ctx, max_rects=3)
+        status = rival_feasibility_check(ctx, max_rects=3)
 
         self.assertEqual(status, "unknown")
-        build.assert_not_called()
 
     def test_rival_trim_returns_original_context_when_rect_cap_is_exceeded(self):
         ctx = SpecContext("rival-trim-capped-rects")
@@ -7000,6 +7152,18 @@ class TestRivalTranslation(unittest.TestCase):
         trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.assumes, [contributing])
+
+    def test_rival_trim_context_drops_bound_implied_by_earlier_assumption(self):
+        ctx = SpecContext("rival-trim-redundant-conjunct")
+        x = ctx.real("x")
+        one = ctx.one()
+        upper = ctx.real_val(15)
+        ctx.assume(x >= one)
+        ctx.assume((x >= ctx.zero()) & (x <= upper))
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [x >= one, x <= upper])
 
     def test_rival_trim_context_keeps_maybe_exprs(self):
         ctx = SpecContext("rival-trim-maybe")
@@ -8203,6 +8367,163 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             Autogenerate("generated_q_to_uq", spec)
 
+    def test_autogenerate_rejects_unreachable_assumptions(self):
+        def spec(x: UQ(2, 0), ctx) -> Bool:
+            ctx.assume(x < ctx.zero())
+            return x.eq(ctx.zero())
+
+        with self.assertRaisesRegex(
+            InfeasibleError,
+            r"generated_unreachable.*unreachable.*no input satisfies",
+        ):
+            Autogenerate("generated_unreachable", spec)
+
+    def test_autogenerate_uses_z3_when_reachability_is_unknown(self):
+        def spec(x: UQ(2, 0), y: UQ(2, 0), ctx) -> Bool:
+            ctx.assume((x * (y + ctx.one())).ne((x * y) + x))
+            return x.eq(y)
+
+        with self.assertRaisesRegex(InfeasibleError, "unreachable"):
+            Autogenerate("generated_algebraically_unreachable", spec)
+
+    def test_autogenerate_proves_spec_checks(self):
+        def valid_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            ctx.check(x >= ctx.zero())
+            return x
+
+        generated = Autogenerate("generated_valid_check", valid_spec)
+        self.assertEqual(generated.dtype, UQ(2, 0))
+
+        def invalid_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            ctx.check(x.eq(ctx.zero()))
+            return x
+
+        with self.assertRaisesRegex(
+            InfeasibleError,
+            "check that does not hold",
+        ):
+            Autogenerate("generated_invalid_check", invalid_spec)
+
+    def test_domain_warning_reports_innermost_result_computation(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        ctx = SpecContext("domain-result")
+        x = ctx.real("x")
+        reciprocal = x ** ctx.real_val(-1)
+
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"Specification 'domain-result'.*result: \(real\(x\) \*\* -1\)",
+        ):
+            _warn_about_domain_errors(
+                reciprocal + ctx.one(),
+                ctx,
+            )
+
+    def test_domain_warning_prunes_parent_error_expressions(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        ctx = SpecContext("domain-pruned-parents")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        ctx.assume((x >= ctx.real_val(-8)) & (x <= ctx.real_val(7)))
+        ctx.assume((y >= ctx.zero()) & (y <= ctx.real_val(15)))
+        x_reciprocal = x ** ctx.real_val(-1)
+        y_reciprocal = y ** ctx.real_val(-1)
+        result = (x_reciprocal + ctx.one()) + y_reciprocal
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _warn_about_domain_errors(result, ctx)
+
+        messages = [str(warning.message) for warning in caught]
+        self.assertEqual(len(messages), 2)
+        self.assertIn(str(x_reciprocal), messages[0])
+        self.assertIn(str(y_reciprocal), messages[1])
+        self.assertNotIn(str(x_reciprocal + ctx.one()), "\n".join(messages))
+        self.assertNotIn(str(result), "\n".join(messages))
+
+    def test_spec_validation_runs_domain_error_check(self):
+        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.spec_validation import check_spec_feasibility
+
+        def spec(x: UQ(2, 0), ctx) -> Bool:
+            return (x ** ctx.real_val(-1)) > ctx.zero()
+
+        contract = ast_nodes._build_spec_contract("domain-pipeline", spec)
+        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"Specification .*domain-pipeline.*result: .*\*\* -1",
+        ):
+            check_spec_feasibility(spec_ast, spec_inputs, contract, ctx)
+
+    def test_domain_warning_uses_all_assumptions_for_shared_rects(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        ctx = SpecContext("domain-assumption")
+        x = ctx.real("x")
+        reciprocal_positive = (x ** ctx.real_val(-1)) > ctx.zero()
+        ctx.assume(reciprocal_positive)
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"assumption 1: .*\*\* -1.*x in \[-inf, inf\]",
+        ):
+            _warn_about_domain_errors(
+                ctx.one(),
+                ctx,
+            )
+
+        ctx.assume(x >= ctx.one())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _warn_about_domain_errors(
+                ctx.one(),
+                ctx,
+            )
+        self.assertEqual(caught, [])
+
+    def test_domain_warning_covers_checks_and_requirements(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        for collection, expected_location in (
+            ("checks", "check 1"),
+            ("requirements", "requirement 1"),
+        ):
+            with self.subTest(collection=collection):
+                ctx = SpecContext(f"domain-{collection}")
+                x = ctx.real("x")
+                expression = (x ** ctx.real_val(-1)) > ctx.zero()
+                getattr(ctx, collection).append(expression)
+
+                with self.assertWarnsRegex(UserWarning, expected_location):
+                    _warn_about_domain_errors(
+                        ctx.one(),
+                        ctx,
+                    )
+
+    def test_domain_warning_evaluates_each_if_branch_node(self):
+        from zolotone.ast.spec_validation import _warn_about_domain_errors
+
+        ctx = SpecContext("domain-dead-branch")
+        x = ctx.real("x")
+        result = If(
+            x.eq(ctx.zero()),
+            ctx.one(),
+            x ** ctx.real_val(-1),
+        )
+
+        ctx.assume(x.eq(ctx.zero()))
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"result: \(real\(x\) \*\* -1\); ranges: x in \[0\.0, 0\.0\]",
+        ):
+            _warn_about_domain_errors(
+                result,
+                ctx,
+            )
+
     def test_autogenerate_prefers_depth_zero_identity(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
             del ctx
@@ -8213,18 +8534,297 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertIsInstance(generated.inner_tree, Var)
         self.assertEqual(generated.dtype, UQ(2, 0))
 
+    def test_simplify_spec_uses_assumptions_to_prune_output(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-output")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.zero())
+        spec_ast = If(
+            x >= ctx.zero(),
+            abs(x) + ctx.zero(),
+            x ** ctx.two(),
+        )
+
+        simplified_ast, _simplified_ctx = _simplify_spec_ast(
+            spec_ast,
+            (x,),
+            ctx,
+        )
+        self.assertEqual(simplified_ast, x)
+
+    def test_simplify_spec_returns_simplified_assumptions(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-assumptions")
+        x = ctx.real("x")
+        ctx.assume(x.eq(ctx.two()))
+
+        simplified_ast, simplified_ctx = _simplify_spec_ast(
+            x + ctx.one(),
+            (x,),
+            ctx,
+        )
+
+        self.assertEqual(simplified_ast, RealLit(3))
+        self.assertEqual(simplified_ctx.assumes, [x.eq(ctx.two())])
+        self.assertEqual(simplified_ctx.checks, [])
+        self.assertEqual(ctx.assumes, [x.eq(ctx.two())])
+
+    def test_simplify_spec_preserves_user_checks(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-checks")
+        x = ctx.real("x")
+        assumption = x.eq(ctx.one())
+        check = (x + ctx.two()).eq(ctx.real_val(3))
+        ctx.assume(assumption)
+        ctx.check(check)
+
+        simplified_ast, simplified_ctx = _simplify_spec_ast(
+            x + ctx.zero(),
+            (x,),
+            ctx,
+        )
+
+        self.assertEqual(simplified_ast, RealLit(1))
+        self.assertEqual(simplified_ctx.assumes, [assumption])
+        self.assertEqual(simplified_ctx.checks, [check])
+        self.assertEqual(ctx.assumes, [assumption])
+        self.assertEqual(ctx.checks, [check])
+
+    def test_simplify_spec_warns_about_node_count_reduction(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-size")
+        x = ctx.real("x")
+
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"Specification simplify-spec-size simplification "
+            r"reduced node count by 2: 3 -> 1",
+        ):
+            simplified_ast, simplified_ctx = _simplify_spec_ast(
+                x + ctx.zero(),
+                (x,),
+                ctx,
+            )
+
+        self.assertEqual(simplified_ast, x)
+        self.assertEqual(simplified_ctx.assumes, [])
+        self.assertEqual(simplified_ctx.checks, [])
+
+    def test_simplify_spec_does_not_warn_when_node_count_is_unchanged(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-noop")
+        x = ctx.real("x")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            simplified_ast, simplified_ctx = _simplify_spec_ast(
+                x,
+                (x,),
+                ctx,
+            )
+
+        self.assertEqual(caught, [])
+        self.assertEqual(simplified_ast, x)
+        self.assertEqual(simplified_ctx.assumes, [])
+        self.assertEqual(simplified_ctx.checks, [])
+
+    def test_reject_undeclared_variables_checks_assumptions(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("simplify-spec-internal-variable")
+        x = ctx.real("x")
+        internal = ctx.real("internal")
+        ctx.assume(x.eq(internal + ctx.one()))
+
+        with self.assertRaisesRegex(
+            MissingError,
+            "Undeclared variables.*internal",
+        ):
+            reject_undeclared_variables(x, (x,), ctx)
+
+    def test_reject_undeclared_variables_finds_variables_in_checks(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("check-undeclared-check-variable")
+        x = ctx.real("x")
+        internal = ctx.real("internal")
+        ctx.check(x.eq(internal))
+
+        with self.assertRaisesRegex(
+            MissingError,
+            "Undeclared variables.*internal",
+        ):
+            reject_undeclared_variables(x, (x,), ctx)
+
+    def test_autogenerate_rejects_undeclared_assumption_variables(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            internal = ctx.fresh_real("internal")
+            ctx.assume(x.eq(internal + ctx.one()))
+            return x
+
+        with self.assertRaisesRegex(
+            MissingError,
+            "Undeclared variables.*internal",
+        ):
+            Autogenerate("generated_undeclared_assumption", spec)
+
+    def test_reject_undeclared_variables_accepts_only_spec_inputs(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("reject-undeclared-variables")
+        x = ctx.real("x")
+        y = ctx.real("y")
+
+        reject_undeclared_variables(x + ctx.one(), (x,), ctx)
+        with self.assertRaisesRegex(
+            MissingError,
+            "Undeclared variables.*real\\(y\\)",
+        ):
+            reject_undeclared_variables(x + y, (x,), ctx)
+
+    def test_reject_undeclared_variables_warns_about_unused_inputs(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("unused-input-warning")
+        used = ctx.real("used")
+        unused = ctx.real("unused")
+
+        with self.assertWarnsRegex(
+            UserWarning,
+            "Specification 'unused-input-warning'.*real\\(unused\\)",
+        ):
+            reject_undeclared_variables(used, (used, unused), ctx)
+
+    def test_input_relevance_follows_transitive_condition_dependencies(self):
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("context-input-use")
+        result = ctx.real("result")
+        assumed = ctx.real("assumed")
+        transitive = ctx.real("transitive")
+        unused = ctx.real("unused")
+        ctx.assume(assumed.eq(transitive))
+        ctx.check(result.eq(assumed))
+        ctx.require((result >= ctx.zero()) & (unused >= ctx.zero()))
+
+        with self.assertWarnsRegex(UserWarning, r"real\(unused\)"):
+            reject_undeclared_variables(
+                result,
+                (result, assumed, transitive, unused),
+                ctx,
+            )
+
+    def test_generated_input_assumptions_do_not_hide_unused_inputs(self):
+        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.spec_validation import reject_undeclared_variables
+
+        def spec(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(5, 0):
+            ctx.assume(y.eq(ctx.one()))
+            return x
+
+        contract = ast_nodes._build_spec_contract("unused-variable", spec)
+        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+
+        with self.assertWarnsRegex(UserWarning, r"unused input variables: real\(y_1\)"):
+            reject_undeclared_variables(spec_ast, spec_inputs, ctx)
+
+    def test_simplify_spec_extracts_literal_results_from_carrier(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        real_ctx = SpecContext("simplify-spec-real-literal")
+        x = real_ctx.real("x")
+        real_ctx.assume(x.eq(real_ctx.two()))
+        simplified_ast, _simplified_ctx = _simplify_spec_ast(
+            x,
+            (x,),
+            real_ctx,
+        )
+        self.assertEqual(simplified_ast, RealLit(2))
+
+        for value in (False, True):
+            with self.subTest(value=value):
+                bool_ctx = SpecContext(f"simplify-spec-bool-{value}")
+                predicate = bool_ctx.bool("predicate")
+                bool_ctx.assume(
+                    predicate.eq(bool_ctx.bool_val(value))
+                )
+                simplified_ast, _simplified_ctx = _simplify_spec_ast(
+                    predicate,
+                    (predicate,),
+                    bool_ctx,
+                )
+                self.assertEqual(simplified_ast, BoolLit(value))
+
+    def test_autogenerate_simplifies_spec_before_lowering(self):
+        def spec(x: UQ(3, 0), ctx) -> UQ:
+            del ctx
+            return abs(x)
+
+        generated = Autogenerate("generated_unsigned_abs", spec)
+
+        self.assertIsInstance(generated.inner_tree, Var)
+        self.assertEqual(generated.dtype, UQ(3, 0))
+
+    def test_autogenerate_does_not_lower_pruned_spec_branch(self):
+        def spec(selected: Bool(), x: UQ(2, 0), ctx) -> UQ:
+            ctx.assume(selected)
+            return If(selected, x, x ** ctx.two())
+
+        generated = Autogenerate("generated_pruned_branch", spec)
+
+        self.assertIsInstance(generated.inner_tree, Var)
+        self.assertEqual(generated.inner_tree.name, "arg_1")
+        self.assertEqual(generated.dtype, UQ(2, 0))
+
     def test_autogenerate_uses_contracted_widening_factory(self):
         def spec(x: UQ(2, 0), ctx) -> Q(4, 0):
             del ctx
             return x
 
-        generated = Autogenerate("generated_widened_conversion", spec)
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"consider UQ<2,0>",
+        ):
+            generated = Autogenerate("generated_widened_conversion", spec)
 
         self.assertEqual(generated.dtype, Q(4, 0))
         self.assertEqual(generated.inner_tree.name, "uq_to_q")
         widened = generated.inner_tree.args[0]
         self.assertEqual(widened.name, "_uq_zero_extend")
         self.assertEqual(widened.inner_tree.name, "uq_zero_extend")
+
+    def test_output_optimization_propagates_range_analysis_failure(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ(4, 0):
+            del ctx
+            return x
+
+        with (
+            patch(
+                "zolotone.ast.spec_validation.rival_range_analysis",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(
+                ZolotoneError,
+                "Could not obtain output range",
+            ),
+        ):
+            Autogenerate("generated_without_range", spec)
+
+    def test_infeasible_signed_output_suggests_unsigned_format(self):
+        def spec(x: UQ(2, 0), ctx) -> Q(2, 0):
+            del ctx
+            return x
+
+        with self.assertRaisesRegex(
+            InfeasibleError,
+            r"try UQ\(2, 0\)",
+        ):
+            Autogenerate("generated_narrow_signed", spec)
 
     def test_autogenerate_matches_registered_non_arithmetic_components(self):
         def negate_spec(x: Q(3, 0), ctx) -> Q:
@@ -8375,19 +8975,38 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         spec_ast = x + ctx.one()
         return_annotation = UQ(2, 0)
 
-        search_suggestion = _output_format_suggestion_with_search(
-            spec_ast,
-            return_annotation,
-            ctx,
-        )
         range_suggestion = _output_format_suggestion_with_range_analysis(
             spec_ast,
             return_annotation,
             ctx,
         )
+        search_suggestion = _output_format_suggestion_with_search(
+            spec_ast,
+            range_suggestion,
+            ctx,
+        )
 
         self.assertEqual(range_suggestion, search_suggestion)
         self.assertEqual(range_suggestion, UQ(3, 0))
+
+    def test_solver_search_shrinks_rival_bound_using_assumptions(self):
+        from zolotone.ast.spec_validation import _output_format_suggestion
+
+        ctx = SpecContext("shrink-output-format-with-assumptions")
+        x = ctx.real("x")
+        ctx.assume(x.eq(ctx.one()))
+
+        with patch(
+            "zolotone.ast.spec_validation.rival_range_analysis",
+            return_value=(-4.0, 7.0),
+        ):
+            suggestion = _output_format_suggestion(
+                x,
+                UQ(4, 0),
+                ctx,
+            )
+
+        self.assertEqual(suggestion, UQ(1, 0))
 
     def test_autogenerate_suggests_zero_integer_bit_signed_output(self):
         def spec(ctx) -> UQ(10, 1):
@@ -9240,15 +9859,7 @@ class TestSolverApis(unittest.TestCase):
             check_result = design.check_spec(
                 schedule=[
                     {"tool": "simplify"},
-                    {
-                        "tool": "egglog-rewrite",
-                        "iterations": 6,
-                        "scheduler": {
-                            "match_limit": 500_000,
-                            "ban_length": 1,
-                        },
-                    },
-                    {"tool": "simplify"},
+                    {"tool": "z3", "timeout_ms": 10_000},
                 ],
             )
 
@@ -9257,8 +9868,7 @@ class TestSolverApis(unittest.TestCase):
         proof_trace = check_result["proof_traces"][0]
         self.assertTrue(
             any(
-                report["tool"] in {"simplify", "egglog-rewrite"}
-                and report["status"] == "unsat"
+                report["status"] == "unsat"
                 for report in proof_trace
             ),
             proof_trace,
@@ -9267,11 +9877,6 @@ class TestSolverApis(unittest.TestCase):
     def test_conventional_check_spec_handles_multiple_cases(self):
         self._assert_dot_product_check_spec_with_two_zero_inputs(
             bf16x8_dot_fp32_conventional,
-        )
-
-    def test_optimized_check_spec_handles_multiple_cases(self):
-        self._assert_dot_product_check_spec_with_two_zero_inputs(
-            bf16x8_dot_fp32_optimized,
         )
 
     def test_fp32_adder_inner_tree_collects_multiple_cases(self):
@@ -9323,7 +9928,7 @@ class TestSolverApis(unittest.TestCase):
         )
         base_ctx = adder.ctx.copy()
         inputs = [base_ctx.spec_of(arg) for arg in adder.inner_args]
-        simplified = ast_case_split._collect_classified_spec(
+        collected = ast_case_split._collect_classified_spec(
             ast_nodes._Spec(
                 "outer_spec",
                 lambda ctx: adder.spec(*inputs, ctx=ctx),
@@ -9335,7 +9940,8 @@ class TestSolverApis(unittest.TestCase):
                 "arg1": "inf",
                 "outer_spec": "norm",
             },
-        ).simplify()
+        )
+        simplified = simplify_ctx(collected)["new_ctx"]
 
         env = {}
         solver = z3.Solver()

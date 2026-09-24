@@ -158,41 +158,39 @@ class SpecContext:
             expr: value
             for expr, (value, _anchor) in self._learned_literals_with_anchors().items()
         }
-    
-    # Try to learn non-literal aliases from assumes only. Multiple aliases for
-    # one variable are allowed; the remaining assumptions preserve constraints.
+
+    # Learn variable aliases such as x == y + 1. Literal-valued equalities are
+    # handled by learned_literals() so their justifying assumption is retained.
     def learned_aliases(self) -> dict[RealVar | BoolVar, SpecNode]:
         aliases: dict[RealVar | BoolVar, SpecNode] = {}
-        
-        def safe_alias(var, expr, lit_type):
-            if isinstance(expr, (lit_type, RealVar, BoolVar)):
+
+        def safe_alias(var, expr):
+            if isinstance(expr, (RealLit, BoolLit, RealVar, BoolVar)):
                 return None
             if var in variables(expr):
                 return None
             return var, expr
-        
-        def from_sides(lhs, rhs, var_type, lit_type):
-            if isinstance(lhs, var_type):
-                return safe_alias(lhs, rhs, lit_type)
-            if isinstance(rhs, var_type):
-                return safe_alias(rhs, lhs, lit_type)
+
+        def from_sides(lhs, rhs):
+            if isinstance(lhs, (RealVar, BoolVar)):
+                return safe_alias(lhs, rhs)
+            if isinstance(rhs, (RealVar, BoolVar)):
+                return safe_alias(rhs, lhs)
             return None
-        
+
         def learned_from(assume):
             assume = assume.constant_fold()
             if isinstance(assume, Eq):
-                return from_sides(assume.lhs, assume.rhs, RealVar, RealLit)
+                return from_sides(assume.lhs, assume.rhs)
             if isinstance(assume, BoolEq):
-                return from_sides(assume.lhs, assume.rhs, BoolVar, BoolLit)
+                return from_sides(assume.lhs, assume.rhs)
             return None
-        
+
         for assume in self.assumes:
             for conjunct in _assumption_conjuncts(assume):
                 learned = learned_from(conjunct)
-                if learned is None:
-                    continue
-                var, expr = learned
-                aliases.setdefault(var, expr)
+                if learned is not None:
+                    aliases.setdefault(*learned)
         return aliases
 
     @staticmethod
@@ -202,7 +200,7 @@ class SpecContext:
         return assume
     
     # learning facts like: RealExpr == RealLit
-    def _canonical_learned_assumption(self, assume: BoolExpr) -> tuple[SpecNode, RealLit | BoolLit] | None:
+    def _canonical_learned_assumption(self, assume: BoolExpr):
         assume = self._reject_false_assumption(assume.constant_fold())
         if isinstance(assume, BoolVar):
             return assume, BoolLit(True)
@@ -210,38 +208,17 @@ class SpecContext:
         # contextual fact even when predicate is a compound BoolExpr.
         if isinstance(assume, Not):
             return assume.value, BoolLit(False)
-        if isinstance(assume, Eq):
-            # constant_fold() already returns a node with folded children.
-            rhs_folded = assume.rhs
-            lhs_folded = assume.lhs
-            if (
-                isinstance(lhs_folded, RealExpr)
-                and not isinstance(lhs_folded, RealLit)
-                and isinstance(rhs_folded, RealLit)
+        if isinstance(assume, (Eq, BoolEq)):
+            # constant_fold() has reduced every constant expression to a literal.
+            for expr, literal in (
+                (assume.lhs, assume.rhs),
+                (assume.rhs, assume.lhs),
             ):
-                return lhs_folded, rhs_folded
-            if (
-                isinstance(rhs_folded, RealExpr)
-                and not isinstance(rhs_folded, RealLit)
-                and isinstance(lhs_folded, RealLit)
-            ):
-                return rhs_folded, lhs_folded
-        
-        elif isinstance(assume, BoolEq):
-            rhs_folded = assume.rhs
-            lhs_folded = assume.lhs
-            if (
-                isinstance(lhs_folded, BoolExpr)
-                and not isinstance(lhs_folded, BoolLit)
-                and isinstance(rhs_folded, BoolLit)
-            ):
-                return lhs_folded, rhs_folded
-            if (
-                isinstance(rhs_folded, BoolExpr)
-                and not isinstance(rhs_folded, BoolLit)
-                and isinstance(lhs_folded, BoolLit)
-            ):
-                return rhs_folded, lhs_folded
+                if (
+                    not isinstance(expr, (RealLit, BoolLit))
+                    and isinstance(literal, (RealLit, BoolLit))
+                ):
+                    return expr, literal
         # Any remaining Boolean in the assumptions list is asserted true.
         # Keep this independent of the Eq/BoolEq branches so equalities that
         # do not expose a literal binding are still learned as Boolean facts.
@@ -250,71 +227,60 @@ class SpecContext:
         return None
     
     def _simplify_with_convergence(self) -> tuple["SpecContext", bool]:
-        simplified = self.copy()
-        learned_fact_count = sum(
-            1
-            for assume in simplified.assumes
-            for _ in _assumption_conjuncts(assume)
+        # Every assumption is conjunctive, so handling its conjuncts as
+        # separate assumptions gives each learned fact a simple integer anchor.
+        simplified = self.copy(
+            assumes=[
+                conjunct
+                for assume in self.assumes
+                for conjunct in _assumption_conjuncts(
+                    self._reject_false_assumption(assume.constant_fold())
+                )
+            ]
         )
+        learned_fact_count = len(simplified.assumes)
         max_iterations = learned_fact_count + len(simplified.checks) + 1
-        converged = False
+
         for _ in range(max_iterations):
             anchored_literals = simplified._learned_literals_with_anchors()
-            literal_replacements = {
-                expr: value
-                for expr, (value, _anchor) in anchored_literals.items()
-            }
-            alias_replacements = simplified.learned_aliases()
-            
-            variable_replacements = {
-                expr: lit
-                for expr, lit in literal_replacements.items()
-                if isinstance(expr, (RealVar, BoolVar))  # get rid only of assigned vars
-            }
-            check_replacements = alias_replacements | literal_replacements
-            
-            new_assumes = []
+            next_ctx = simplified.copy(assumes=[], checks=[])
+
             for assume_idx, assume in enumerate(simplified.assumes):
-                new_assume = substitute_literals(
-                    assume,
-                    alias_replacements
-                    | variable_replacements
-                    | {
-                        expr: value
-                        for expr, (value, anchor) in anchored_literals.items()
-                        if anchor != assume_idx
-                        and not isinstance(expr, (RealVar, BoolVar))
-                    },
+                prior_facts = next_ctx.learned_aliases() | next_ctx.learned_literals()
+                later_literals = {
+                    expr: value
+                    for expr, (value, anchor) in anchored_literals.items()
+                    if anchor != assume_idx
+                }
+                new_assume = simplified._reject_false_assumption(
+                    substitute_literals(
+                        assume,
+                        prior_facts | later_literals,
+                    )
                 )
-                new_assumes.append(
-                    simplified._reject_false_assumption(new_assume)
-                )
-            new_checks = [
-                substitute_literals(check, check_replacements)
+                if not identical_nodes(new_assume, BoolLit(True)):
+                    next_ctx.assumes.append(new_assume)
+
+            replacements = next_ctx.learned_aliases() | next_ctx.learned_literals()
+            next_ctx.checks = [
+                new_check
                 for check in simplified.checks
+                if not identical_nodes(
+                    new_check := substitute_literals(check, replacements),
+                    BoolLit(True),
+                )
             ]
-            if new_assumes == simplified.assumes and new_checks == simplified.checks:
-                converged = True
-                break
-            simplified.assumes = new_assumes
-            simplified.checks = new_checks
 
-        simplified.assumes = [
-            assume
-            for assume in simplified.assumes
-            if not identical_nodes(assume, BoolLit(True))
-        ]
-        simplified.checks = [
-            check
-            for check in simplified.checks
-            if not identical_nodes(check, BoolLit(True))
-        ]
-        return simplified, converged
+            if (
+                next_ctx.assumes == simplified.assumes
+                and next_ctx.checks == simplified.checks
+            ):
+                return next_ctx, True
 
-    def simplify(self) -> "SpecContext":
-        """Apply context learning and ordinary constant folding to a fixpoint."""
-        return self._simplify_with_convergence()[0]
-    
+            simplified = next_ctx
+
+        return simplified, False
+
     def spec_of(self, node: Node):
         if not self._spec_cache_valid:
             raise RuntimeError(

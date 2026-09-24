@@ -68,7 +68,7 @@ class UQ(DataType[int]):
 
     def to_spec(self, name, ctx):
         variable = ctx.fresh_real(name)
-        ctx.assume(variable.eq(abs(variable)))
+        # ctx.assume(variable.eq(abs(variable)))
         return variable
 
     def random_value(self, rng: random.Random) -> Value[int]:

@@ -92,7 +92,7 @@ def compile_(node: Node, jittable: bool):
                 '#include "lowered.cpp"',
                 "",
                 f'extern "C" {return_type} {function_name}_entry({", ".join(arg_decls)}) {{',
-                f"    return static_cast<{return_type}>(Zolotone::{function_name}({call_args}));",
+                f"    return static_cast<{return_type}>(Zolotone::zolotone({call_args}));",
                 "}",
                 "",
             ]

@@ -15,7 +15,9 @@ RivalIR = dict[str, Any]
 __all__ = [
     "DEFAULT_MAX_RECTS",
     "MAX_RECTS_ENV",
+    "RivalDomainError",
     "RivalRectLimitExceeded",
+    "rival_domain_errors",
     "rival_range_analysis",
     "rival_feasibility_check",
     "rival_trim_context",
@@ -63,6 +65,14 @@ def _check_rect_limit(rect_count: int, max_rects: int) -> None:
 class RivalAnalysis:
     status: tuple[bool, bool]
     hints: Any
+
+
+@dataclass(frozen=True)
+class RivalDomainError:
+    expression_index: int
+    status: tuple[bool, bool]
+    free_vars: tuple[str, ...]
+    rect: tuple[tuple[float, float], ...]
 
 
 @dataclass(frozen=True)
@@ -119,6 +129,15 @@ class RivalMachine:
         bounds = self._raw_machine.apply_range(rect)
         return float(bounds[0]), float(bounds[1])
 
+    def domain_errors(
+        self,
+        rect: Sequence[tuple[float, float]],
+    ) -> list[tuple[bool, bool]]:
+        return [
+            (bool(status[0]), bool(status[1]))
+            for status in self._raw_machine.domain_errors(rect)
+        ]
+
 
 def build_machine(
     exprs: Sequence[SpecNode],
@@ -144,6 +163,22 @@ def build_range_machine(
     native = _load_native_module()
     raw_machine = native.build_machine([to_rival_ir(expr)], var_list)
     return RivalMachine(raw_machine)
+
+
+def _build_domain_machine(
+    exprs: Sequence[SpecNode],
+    free_vars: Sequence[str],
+) -> RivalMachine:
+    expression_list = list(exprs)
+    var_list = _validate_free_vars(free_vars)
+    _validate_referenced_vars(expression_list, var_list)
+    native = _load_native_module()
+    # Adding error node to each expression
+    translated = [
+        {"op": "error", "arg": to_rival_ir(expression)}
+        for expression in expression_list
+    ]
+    return RivalMachine(native.build_machine(translated, var_list))
 
 
 def collect_free_vars(exprs: Iterable[SpecNode]) -> list[str]:
@@ -189,12 +224,20 @@ def get_rival_rects(
 ) -> list[list[tuple[float, float]]]:
     resolved_max_rects = resolve_max_rects(max_rects)
     resolved_bool_var_names = _collect_bool_var_names(assumes) if bool_var_names is None else set(bool_var_names)
-    rects, _ = _get_rival_rects_and_contributors(
-        assumes,
-        free_vars,
-        resolved_bool_var_names,
-        resolved_max_rects,
-    )
+    try:
+        rects, _ = _get_rival_rects_and_contributors(
+            assumes,
+            free_vars,
+            resolved_bool_var_names,
+            resolved_max_rects,
+        )
+    except RivalRectLimitExceeded:
+        rects = [
+            _RivalRectDomain.build(
+                free_vars,
+                resolved_bool_var_names,
+            ).new_rect()
+        ]
     return rects
 
 
@@ -211,15 +254,12 @@ def rival_range_analysis(
     all_exprs = ctx.assumes + [expr]
     free_vars = collect_free_vars(all_exprs)
     bool_var_names = _collect_bool_var_names(all_exprs)
-    try:
-        rects = get_rival_rects(
-            ctx.assumes,
-            free_vars,
-            bool_var_names,
-            max_rects=max_rects,
-        )
-    except RivalRectLimitExceeded:
-        return None
+    rects = get_rival_rects(
+        ctx.assumes,
+        free_vars,
+        bool_var_names,
+        max_rects=max_rects,
+    )
     if not rects:
         return None
 
@@ -236,6 +276,76 @@ def rival_range_analysis(
     if lower > upper:
         return None
     return lower, upper
+
+
+def rival_domain_errors(
+    exprs: Sequence[SpecNode],
+    assumes: Sequence[BoolExpr],
+    max_rects: int | None = None,
+) -> list[RivalDomainError]:
+    """Return every error observed in the first failing rectangle."""
+    expression_list = list(exprs)
+    if not expression_list:
+        return []
+    all_exprs = [*assumes, *expression_list]
+    free_vars = collect_free_vars(all_exprs)
+    bool_var_names = _collect_bool_var_names(all_exprs)
+    rects = get_rival_rects(
+        assumes,
+        free_vars,
+        bool_var_names,
+        max_rects=max_rects,
+    )
+    if not rects:
+        return []
+
+    machine = _build_domain_machine(expression_list, free_vars)
+    for rect in rects:
+        statuses = machine.domain_errors(rect)
+        if len(statuses) != len(expression_list):
+            raise RuntimeError(
+                "Rival domain machine returned an unexpected number of outputs"
+            )
+        findings = [
+            RivalDomainError(
+                expression_index=expression_index,
+                status=status,
+                free_vars=tuple(free_vars),
+                rect=tuple(rect),
+            )
+            for expression_index, status in enumerate(statuses)
+            if status != (False, False)
+        ]
+        if findings:
+            failing_expressions = [
+                expression_list[finding.expression_index]
+                for finding in findings
+            ]
+            return [
+                finding
+                for finding in findings
+                if not _contains_failing_descendant(
+                    expression_list[finding.expression_index],
+                    failing_expressions,
+                )
+            ]
+    return []
+
+
+def _contains_failing_descendant(
+    expression: SpecNode,
+    failing_expressions: Sequence[SpecNode],
+) -> bool:
+    pending = list(children(expression))
+    while pending:
+        descendant = pending.pop()
+        if any(
+            identical_nodes(descendant, failing)
+            for failing in failing_expressions
+        ):
+            return True
+        pending.extend(children(descendant))
+    return False
 
 
 def _get_rival_rects_and_contributors(
@@ -282,15 +392,12 @@ def rival_feasibility_check(
     if not exprs:
         return "feasible"
     
-    try:
-        rects = get_rival_rects(
-            ctx.assumes,
-            free_vars,
-            bool_var_names,
-            max_rects=max_rects,
-        )
-    except RivalRectLimitExceeded:
-        return "unknown"
+    rects = get_rival_rects(
+        ctx.assumes,
+        free_vars,
+        bool_var_names,
+        max_rects=max_rects,
+    )
     if not rects:
         return "not feasible"
 
@@ -452,6 +559,36 @@ def _rewrite_proven_expressions(
     return [rewrite(node, top_level=True) for node in nodes]
 
 
+def _rewrite_assumptions_from_prior_rects(
+    assumes: Sequence[BoolExpr],
+    free_vars: Sequence[str],
+    bool_var_names: set[str],
+    max_rects: int,
+) -> list[BoolExpr]:
+    """Simplify each assumption using only earlier rectangular facts."""
+    domain = _RivalRectDomain.build(free_vars, bool_var_names)
+    variable_kind_cache: dict[int, tuple[bool, bool]] = {}
+    rects = [domain.new_rect()]
+    rewritten_assumes = []
+    has_prior_rect_fact = False
+    for assume in assumes:
+        if has_prior_rect_fact:
+            assume = _rewrite_proven_expressions(
+                [assume], free_vars=free_vars, rects=rects
+            )[0]
+        if identical_nodes(assume, BoolLit(True)):
+            continue
+        rewritten_assumes.append(assume)
+        alternatives = _rival_rect_alternatives(
+            assume, domain, max_rects, variable_kind_cache
+        )
+        if alternatives is None:
+            continue
+        rects = _intersect_rival_rect_sets(rects, alternatives, max_rects)
+        has_prior_rect_fact = True
+    return rewritten_assumes
+
+
 # Preserve assumptions used to construct the rectangular domain. Rewrite all
 # other assumptions and checks only when every applicable rectangle agrees,
 # then drop expressions that are certainly true.
@@ -464,6 +601,13 @@ def rival_trim_context(
     bool_var_names = _collect_bool_var_names(exprs)
     resolved_max_rects = resolve_max_rects(max_rects)
     try:
+        rewritten_assumes = _rewrite_assumptions_from_prior_rects(
+            ctx.assumes,
+            free_vars,
+            bool_var_names,
+            resolved_max_rects,
+        )
+        ctx = ctx.copy(assumes=rewritten_assumes)
         assumption_rects, assumption_contributes_to_rect = (
             _get_rival_rects_and_contributors(
                 ctx.assumes,
