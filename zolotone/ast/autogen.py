@@ -283,8 +283,11 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     # Step 1. Spec Validation
     check_spec_feasibility(spec_ast, spec_inputs, contract, spec_ctx)
 
+    print(spec_ctx)
     # Step 2. Spec Simplification
     spec_ast, spec_ctx = _simplify_spec_ast(spec_ast, spec_inputs, spec_ctx)
+    print(spec_ctx)
+    print("----------------------------")
 
     # Step 3. Spec Exploration
     lowered_composite = lower_spec_to_impl(name, spec, contract, spec_ast, spec_inputs)

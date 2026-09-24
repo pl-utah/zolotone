@@ -2477,6 +2477,23 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.check((x + y).eq(ctx.one()))
         self.assertEqual(ctx.simplify().checks, [])
 
+    def test_context_simplify_substitutes_literal_into_sibling_conjunct(self):
+        ctx = SpecContext("simplify-sibling-conjunct")
+        result = ctx.real("result")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        zero = ctx.zero()
+
+        ctx.assume(x.eq(zero) & result.eq(x * y))
+
+        simplified = ctx.simplify()
+
+        self.assertEqual(
+            simplified.assumes,
+            [x.eq(zero), result.eq(zero)],
+        )
+        self.assertEqual(simplified.learned_literals()[x], zero)
+
     def test_learned_literals_reads_non_literal_equalities_as_boolean_facts(self):
         ctx = SpecContext("learn-ignore")
         x = ctx.real("x")
@@ -2563,7 +2580,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(
             simplified.assumes,
             [
-                Eq(and_res, x * y),
+                Eq(and_res, RealLit(0)),
                 Eq(x, RealLit(0)),
                 Eq(y, RealLit(0)),
             ],
@@ -2676,16 +2693,16 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(
             simplified.assumes,
             [
-                Eq(x, y + RealLit(1)),
-                Eq(y, z + RealLit(1)),
+                Eq(x, RealLit(2)),
+                Eq(y, RealLit(1)),
                 Eq(z, RealLit(0)),
             ],
         )
         self.assertEqual(
             simplified.learned_literals(),
             {
-                x.eq(y + RealLit(1)): BoolLit(True),
-                y.eq(z + RealLit(1)): BoolLit(True),
+                x: RealLit(2),
+                y: RealLit(1),
                 z: RealLit(0),
             },
         )
@@ -2748,7 +2765,10 @@ class TestSpecContextLearning(unittest.TestCase):
 
         simplified = ctx.simplify()
 
-        self.assertEqual(simplified.assumes, [in_range])
+        self.assertEqual(
+            simplified.assumes,
+            [x >= ctx.real_val(-1), x <= ctx.one()],
+        )
         self.assertEqual(simplified.checks, [])
         self.assertEqual(
             simplified.learned_literals(),
@@ -2873,7 +2893,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(ctx.checks, [Eq(x, RealLit(3))])
         self.assertEqual(
             simplified.assumes,
-            [Eq(x, Add(y, RealLit(1))), Eq(y, RealLit(2))],
+            [Eq(x, RealLit(3)), Eq(y, RealLit(2))],
         )
         self.assertEqual(simplified.checks, [])
 
@@ -2917,7 +2937,7 @@ class TestSpecContextLearning(unittest.TestCase):
 
         report = simplify_ctx(ctx)
 
-        self.assertEqual(report["new_ctx"].assumes, [x >= zero, x.eq(one)])
+        self.assertEqual(report["new_ctx"].assumes, [x.eq(one)])
         self.assertEqual(report["new_ctx"].checks, [])
         self.assertEqual(report["status"], "unsat")
         self.assertEqual(ctx.assumes, [x >= zero, abs(x).eq(one)])
@@ -4544,7 +4564,7 @@ class TestUE4M3Spec(unittest.TestCase):
             {"tool": "simplify"},
             {
                 "tool": "egglog-rewrite",
-                "iterations": 3,
+                "iterations": 4,
                 "scheduler": {"match_limit": 50_000, "ban_length": 1},
             },
         ]
@@ -7665,7 +7685,7 @@ class TestStdoutVerificationObserver(unittest.TestCase):
             self.assertEqual(rewrite_step["iterations"], 7)
             self.assertEqual(
                 rewrite_step["scheduler"],
-                {"match_limit": 10_000, "ban_length": 1},
+                {"match_limit": 500_000, "ban_length": 1},
             )
 
     def test_prints_completed_case_with_decisive_tool(self):
@@ -9948,7 +9968,7 @@ class TestSolverApis(unittest.TestCase):
         self.assertEqual(len(proof_trace), 1)
         self.assertEqual(proof_trace[0]["tool"], "simplify")
         self.assertEqual(proof_trace[0]["status"], "sat")
-        self.assertIn("Assumption folds to false", str(proof_trace[0]["info"]))
+        self.assertIn("Conflicting learned literals", str(proof_trace[0]["info"]))
 
     def test_check_equivalence_returns_flat_proof_trace(self):
         ctx = SpecContext("flat-trace")
