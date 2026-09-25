@@ -1103,6 +1103,30 @@ def _can_constant_fold_literal(output_type, value: float | int | bool) -> bool:
     return output_type is not RealLit or _real_lit_fits_c_long(value)
 
 
+# Replace a structural subexpression without simplifying the result.
+def substitute_spec_node(
+    node: "SpecNode",
+    source: "SpecNode",
+    replacement: "SpecNode",
+) -> "SpecNode":
+    if node == source:
+        return replacement
+
+    args = children(node)
+    if args == ():
+        return node
+
+    substituted_args = tuple(
+        substitute_spec_node(arg, source, replacement)
+        for arg in args
+    )
+    return (
+        node
+        if all(old is new for old, new in zip(args, substituted_args))
+        else type(node)(*substituted_args)
+    )
+
+
 # Substitute exact learned facts, then rebuild and constant-fold.
 def substitute_literals(
     node: "SpecNode",

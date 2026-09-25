@@ -16,6 +16,7 @@ from ..spec.spec_ast import (
     SpecNode,
     children,
     identical_nodes,
+    substitute_spec_node,
     variables,
 )
 from ..spec.spec_context import SpecContext, simplify_ctx
@@ -173,9 +174,19 @@ def _simplify_spec_ast(
         )
 
     simplified_spec_ast = simplified.constant_fold()
-    # Keep simplified assumptions, but restore user checks verbatim after
-    # removing the probe's temporary result carrier.
-    result_ctx = simplified_ctx.copy(checks=list(ctx.checks))
+    # Keep assumptions that justified the simplified result. Rewrite checks to
+    # refer to that result without folding them away; they will be lowered as
+    # runtime implementation checks later.
+    result_ctx = simplified_ctx.copy(
+        checks=[
+            substitute_spec_node(
+                check,
+                spec_ast,
+                simplified_spec_ast,
+            )
+            for check in ctx.checks
+        ]
+    )
     size_after = _spec_simplification_size(simplified_spec_ast, result_ctx)
     reduction = size_before - size_after
     if reduction > 0:
@@ -327,6 +338,46 @@ def _warn_about_domain_errors(
         )
 
 
+def _derive_output_asserts(
+    spec_ast: SpecNode,
+    return_annotation: object,
+    ctx: SpecContext,
+) -> None:
+    """Add checks derived from the specification's output type and range."""
+    if return_annotation in (Q, UQ) or isinstance(return_annotation, (Q, UQ)):
+        if not isinstance(spec_ast, RealExpr):
+            raise TypeError(
+                "Numeric output assertions require a real expression, got "
+                f"{type(spec_ast).__name__}"
+            )
+        output_range = rival_range_analysis(spec_ast, ctx)
+        if output_range is None:
+            raise ZolotoneError(f"Could not obtain output range for: {spec_ast}")
+
+        lower, upper = output_range
+        if not math.isfinite(lower) or not math.isfinite(upper):
+            raise ZolotoneError(
+                f"Could not obtain finite output range, got {output_range} "
+                f"for {spec_ast}"
+            )
+        ctx.check(
+            (spec_ast >= ctx.real_val(lower))
+            & (spec_ast <= ctx.real_val(upper))
+        )
+        return
+
+    if return_annotation is Bool or isinstance(return_annotation, Bool):
+        ctx.check(
+            spec_ast.eq(ctx.true())
+            | spec_ast.eq(ctx.false())
+        )
+        return None
+
+    raise NotImplementedError(
+        f"Output assertions are not implemented for {return_annotation!r}"
+    )
+
+
 def _output_format_suggestion_with_search(
     spec_ast: RealExpr,
     conservative_format: Q | UQ,
@@ -446,10 +497,14 @@ def check_spec_feasibility(
 ) -> None:
     # Input ranges
     input_parameters = list(contract.signature.parameters.values())[:-1]
+    input_range_assumes = []
     for spec_input, parameter in zip(spec_inputs, input_parameters, strict=True):
         dtype = contract.annotations[parameter.name]
         if isinstance(dtype, (Q, UQ)):
-            ctx.assume(_fixed_point_result_fits(spec_input, dtype, ctx))
+            input_range_assumes.append(
+                _fixed_point_result_fits(spec_input, dtype, ctx)
+            )
+    ctx.assumes[:0] = input_range_assumes
 
     return_annotation = contract.annotations["return"]
     # Output validation
@@ -461,6 +516,7 @@ def check_spec_feasibility(
             )
         _check_spec_reachability(ctx)
         _warn_about_domain_errors(spec_ast, ctx)
+        _derive_output_asserts(spec_ast, return_annotation, ctx)
         _check_spec_obligations(ctx)
         return
 
@@ -478,6 +534,7 @@ def check_spec_feasibility(
 
     _check_spec_reachability(ctx)
     _warn_about_domain_errors(spec_ast, ctx)
+    _derive_output_asserts(spec_ast, return_annotation, ctx)
     _check_spec_obligations(ctx)
 
     # TODO: counterexample

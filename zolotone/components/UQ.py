@@ -35,7 +35,7 @@ def uq_lt_spec(x: UQ, y: UQ, ctx) -> Bool:
     return x < y
 
 
-@Primitive(name="uq_lt", spec=uq_lt_spec)
+@Primitive(name="uq_lt", spec=uq_lt_spec, c_inline=True)
 def uq_lt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
     return basic_less(aligned_x, aligned_y, out=Bool())
@@ -45,7 +45,7 @@ def uq_le_spec(x: UQ, y: UQ, ctx) -> Bool:
     return x <= y
 
 
-@Primitive(name="uq_le", spec=uq_le_spec)
+@Primitive(name="uq_le", spec=uq_le_spec, c_inline=True)
 def uq_le(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
     return basic_less_or_equal(aligned_x, aligned_y, out=Bool())
@@ -55,7 +55,7 @@ def uq_gt_spec(x: UQ, y: UQ, ctx) -> Bool:
     return x > y
 
 
-@Primitive(name="uq_gt", spec=uq_gt_spec)
+@Primitive(name="uq_gt", spec=uq_gt_spec, c_inline=True)
 def uq_gt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
     return basic_greater(aligned_x, aligned_y, out=Bool())
@@ -65,7 +65,7 @@ def uq_ge_spec(x: UQ, y: UQ, ctx) -> Bool:
     return x >= y
 
 
-@Primitive(name="uq_ge", spec=uq_ge_spec)
+@Primitive(name="uq_ge", spec=uq_ge_spec, c_inline=True)
 def uq_ge(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
     return basic_greater_or_equal(aligned_x, aligned_y, out=Bool())
@@ -75,7 +75,7 @@ def uq_eq_spec(x: UQ, y: UQ, ctx) -> Bool:
     return x.eq(y)
 
 
-@Primitive(name="uq_eq", spec=uq_eq_spec)
+@Primitive(name="uq_eq", spec=uq_eq_spec, c_inline=True)
 def uq_eq(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
     return basic_equal(aligned_x, aligned_y, out=Bool())
@@ -85,7 +85,7 @@ def uq_ne_spec(x: UQ, y: UQ, ctx) -> Bool:
     return x.ne(y)
 
 
-@Primitive(name="uq_ne", spec=uq_ne_spec)
+@Primitive(name="uq_ne", spec=uq_ne_spec, c_inline=True)
 def uq_ne(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = uq_aligner(x, y, None, max)
     return basic_not_equal(aligned_x, aligned_y, out=Bool())
@@ -95,10 +95,9 @@ def uq_aligner(x: Node,
                y: Node,
                int_aggr: tp.Callable | None,
                frac_aggr: tp.Callable | None) -> Node:
-
     _int_aggr = lambda arg: int_aggr(x.dtype.int_bits, y.dtype.int_bits) if int_aggr is not None else arg.dtype.int_bits
     _frac_aggr = lambda arg: frac_aggr(x.dtype.frac_bits, y.dtype.frac_bits) if frac_aggr is not None else arg.dtype.frac_bits
-    
+
     def uq_aligner_spec(x: UQ, y: UQ, ctx) -> Tuple(UQ, UQ):
         return x, y
 
@@ -107,11 +106,11 @@ def uq_aligner(x: Node,
         def align(x):
             int_bits = _int_aggr(x)
             frac_bits = _frac_aggr(x)
-            
+
             shift = frac_bits - x.dtype.frac_bits
             if shift < 0:
                 raise NotImplementedError("truncation is not implemented yet")  # truncation
-            
+
             # frac bits extension
             if shift > 0:
                 return basic_lshift(
@@ -123,11 +122,11 @@ def uq_aligner(x: Node,
             # no extension
             if int_bits == x.dtype.int_bits and frac_bits == x.dtype.frac_bits:
                 return x
-            
+
             # int bits extension
             return basic_identity(x, UQ(int_bits, frac_bits))
         return make_Tuple(align(x), align(y))
-    
+
     return impl(x, y)
 
 

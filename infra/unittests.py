@@ -1755,7 +1755,9 @@ class TestBasicOperators(unittest.TestCase):
     def test_lossless_component_whitelist_is_conservative(self):
         from zolotone.components import LOSSLESS_COMPONENTS
 
+        self.assertIn(bool_and, LOSSLESS_COMPONENTS)
         self.assertIn(bool_eq, LOSSLESS_COMPONENTS)
+        self.assertIn(bool_or, LOSSLESS_COMPONENTS)
         self.assertIn(bool_to_uq, LOSSLESS_COMPONENTS)
         self.assertIn(uq_to_bool, LOSSLESS_COMPONENTS)
         self.assertIn(uq_add, LOSSLESS_COMPONENTS)
@@ -8299,6 +8301,23 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
 
 class TestSpecificationDTypeContracts(unittest.TestCase):
+    def test_autogenerate_lowers_float_literals_exactly(self):
+        from zolotone.ast.autogen import _exact_fixed_point_value
+
+        positive = _exact_fixed_point_value(3.75)
+        negative = _exact_fixed_point_value(-3.75)
+        rounded_third = 1 / 3
+        third = _exact_fixed_point_value(rounded_third)
+
+        self.assertEqual(positive, UQ(2, 2).from_bits(15))
+        self.assertEqual(negative, Q(3, 2).from_bits(17))
+        self.assertEqual(third.to_python(), rounded_third)
+        self.assertEqual(third.dtype, UQ(0, 54))
+        self.assertEqual(
+            Fraction(third.raw, 1 << third.dtype.frac_bits),
+            Fraction(rounded_third),
+        )
+
     def test_autogenerate_accepts_exact_input_contract(self):
         captured = {}
 
@@ -8403,6 +8422,49 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             "check that does not hold",
         ):
             Autogenerate("generated_invalid_check", invalid_spec)
+
+    def test_autogenerate_lowers_assumes_and_checks_into_impl(self):
+        def spec(x: Bool(), y: Bool(), ctx) -> Bool():
+            ctx.assume(x | y)
+            ctx.check(x | ~x)
+            return x & y
+
+        generated = Autogenerate("lowered_contract", spec)
+
+        self.assertEqual(
+            [condition.name for condition in generated.inner_assumes],
+            ["bool_or"],
+        )
+        self.assertEqual(
+            [condition.name for condition in generated.inner_checks],
+            ["bool_or", "bool_or"],
+        )
+        derived_check = generated.inner_checks[-1]
+        for comparison in derived_check.args:
+            self.assertIs(comparison.args[0], generated.inner_tree)
+        self.assertTrue(
+            all(
+                isinstance(condition.dtype, Bool)
+                for condition in (
+                    *generated.inner_assumes,
+                    *generated.inner_checks,
+                )
+            )
+        )
+
+        source = generated.to_cpp("lowered_contract")
+        function_start = source.index(
+            "static inline uint8_t lowered_contract(uint8_t arg_0, uint8_t arg_1)"
+        )
+        function_end = source.index("\n    }", function_start)
+        function = source[function_start:function_end]
+        assume_position = function.index("// assume")
+        result_position = function.index("// basic_and")
+        check_position = function.index("// check")
+        return_position = function.index("return ")
+        self.assertLess(assume_position, result_position)
+        self.assertLess(result_position, check_position)
+        self.assertLess(check_position, return_position)
 
     def test_domain_warning_reports_innermost_result_computation(self):
         from zolotone.ast.spec_validation import _warn_about_domain_errors
@@ -8592,6 +8654,25 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(simplified_ctx.checks, [check])
         self.assertEqual(ctx.assumes, [assumption])
         self.assertEqual(ctx.checks, [check])
+
+    def test_simplify_spec_retargets_checks_without_folding_them(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-retarget-check")
+        x = ctx.real("x")
+        spec_ast = x + ctx.zero()
+        literal = ctx.real_val(1.5)
+        ctx.check(spec_ast.eq(literal))
+
+        simplified_ast, simplified_ctx = _simplify_spec_ast(
+            spec_ast,
+            (x,),
+            ctx,
+        )
+
+        self.assertIs(simplified_ast, x)
+        self.assertEqual(simplified_ctx.checks, [x.eq(literal)])
+        self.assertIs(simplified_ctx.checks[0].rhs, literal)
 
     def test_simplify_spec_warns_about_node_count_reduction(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
@@ -8988,6 +9069,55 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertEqual(range_suggestion, search_suggestion)
         self.assertEqual(range_suggestion, UQ(3, 0))
+
+    def test_spec_validation_adds_derived_output_range_check(self):
+        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.spec_validation import check_spec_feasibility
+
+        def spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
+            ctx.assume(x <= ctx.real_val(7))
+            return x + ctx.one()
+
+        contract = ast_nodes._build_spec_contract("derived-output-range", spec)
+        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+
+        with (
+            patch(
+                "zolotone.ast.spec_validation.rival_range_analysis",
+                return_value=(1.0, 8.0),
+            ) as range_analysis,
+        ):
+            check_spec_feasibility(spec_ast, spec_inputs, contract, ctx)
+
+        expected_check = (
+            (spec_ast >= ctx.real_val(1.0))
+            & (spec_ast <= ctx.real_val(8.0))
+        )
+        self.assertEqual(ctx.checks, [expected_check])
+        range_analysis.assert_any_call(spec_ast, ctx)
+
+    def test_derive_output_asserts_adds_boolean_exhaustiveness_check(self):
+        from zolotone.ast.spec_validation import _derive_output_asserts
+
+        for return_annotation in (Bool, Bool()):
+            with self.subTest(return_annotation=return_annotation):
+                ctx = SpecContext("derived-boolean-output")
+                result = ctx.bool("result")
+                with patch(
+                    "zolotone.ast.spec_validation.rival_range_analysis"
+                ) as range_analysis:
+                    output_range = _derive_output_asserts(
+                        result,
+                        return_annotation,
+                        ctx,
+                    )
+
+                self.assertIsNone(output_range)
+                self.assertEqual(
+                    ctx.checks,
+                    [result.eq(ctx.true()) | result.eq(ctx.false())],
+                )
+                range_analysis.assert_not_called()
 
     def test_solver_search_shrinks_rival_bound_using_assumptions(self):
         from zolotone.ast.spec_validation import _output_format_suggestion
