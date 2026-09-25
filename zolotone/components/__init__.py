@@ -8,7 +8,7 @@ from .UE4M3 import *
 from .E5M2 import *
 from .E5M2FNUZ import *
 from .E2M1 import *
-from .Bool import bool_eq, negate
+from .Bool import bool_and, bool_eq, bool_or, negate
 from ..ast import Composite, Node
 from ..ast.helpers import _if_then_else_spec, if_then_else
 from ..types import Bool, DataType, Q, UQ
@@ -46,7 +46,9 @@ def _if_then_else(sel: Node, in1: Node, in0: Node) -> Node:
 
 
 LOSSLESS_COMPONENTS = (
+    bool_and,
     bool_eq,
+    bool_or,
     negate,
     bool_to_uq,
     uq_to_bool,

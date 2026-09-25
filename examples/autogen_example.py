@@ -26,6 +26,8 @@ def Test(expect=None):
 
         generated.print_tree(depth=1)
         print(f"{spec.__name__}: passed")
+        print(generated.to_cpp())
+        print("-------------------")
         return spec
 
     return wrapper

@@ -16,6 +16,7 @@ from ..spec.spec_ast import (
     SpecNode,
     children,
     identical_nodes,
+    substitute_spec_node,
     variables,
 )
 from ..spec.spec_context import SpecContext, simplify_ctx
@@ -173,9 +174,19 @@ def _simplify_spec_ast(
         )
 
     simplified_spec_ast = simplified.constant_fold()
-    # Keep simplified assumptions, but restore user checks verbatim after
-    # removing the probe's temporary result carrier.
-    result_ctx = simplified_ctx.copy(checks=list(ctx.checks))
+    # Keep assumptions that justified the simplified result. Rewrite checks to
+    # refer to that result without folding them away; they will be lowered as
+    # runtime implementation checks later.
+    result_ctx = simplified_ctx.copy(
+        checks=[
+            substitute_spec_node(
+                check,
+                spec_ast,
+                simplified_spec_ast,
+            )
+            for check in ctx.checks
+        ]
+    )
     size_after = _spec_simplification_size(simplified_spec_ast, result_ctx)
     reduction = size_before - size_after
     if reduction > 0:

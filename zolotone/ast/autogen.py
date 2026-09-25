@@ -11,7 +11,7 @@ from ..spec.spec_ast import (
     children,
 )
 from ..spec.spec_context import SpecContext
-from ..types import Bool, Q, UQ
+from ..types import Bool, Q, UQ, Value
 from .node import Node
 from .nodes import (
     Composite,
@@ -36,6 +36,33 @@ class _Candidate(tp.NamedTuple):
 
 
 MAX_SEARCH_DEPTH = 30
+
+
+# TODO: this is not too good
+def _exact_fixed_point_value(value: int | float) -> Value[int]:
+    numerator, denominator = value.as_integer_ratio()
+    if denominator & (denominator - 1):
+        raise NotImplementedError(
+            f"Cannot exactly represent {value!r} as fixed point"
+        )
+
+    if denominator == 1:
+        try:
+            return UQ.from_int(numerator)
+        except ValueError:
+            return Q.from_int(numerator)
+
+    frac_bits = denominator.bit_length() - 1
+    if numerator >= 0:
+        total_bits = max(frac_bits, numerator.bit_length())
+        dtype = UQ(total_bits - frac_bits, frac_bits)
+        raw = numerator
+    else:
+        signed_bits = (abs(numerator) - 1).bit_length() + 1
+        total_bits = max(frac_bits, signed_bits)
+        dtype = Q(total_bits - frac_bits, frac_bits)
+        raw = (1 << total_bits) + numerator
+    return dtype.from_bits(raw)
 
 
 def get_spec_ast(
@@ -117,24 +144,11 @@ def search_lower_spec_to_impl(
 
     for expr in subexpressions:
         if isinstance(expr, RealLit):
-            try:
-                literal = _Candidate(
-                    node=Const(UQ.from_int(expr.value)),
-                    spec=expr,
-                    depth=0,
-                )
-            # value is negative
-            except ValueError:
-                literal = _Candidate(
-                    node=Const(Q.from_int(expr.value)),
-                    spec=expr,
-                    depth=0,
-                )
-            # it is not an integer
-            except TypeError:
-                raise NotImplementedError(
-                    "Cannot currently lower floats into a fixed point"
-                )
+            literal = _Candidate(
+                node=Const(_exact_fixed_point_value(expr.value)),
+                spec=expr,
+                depth=0,
+            )
             state = (literal.spec, literal.node.dtype)
         elif isinstance(expr, BoolLit):
             literal = _Candidate(
@@ -251,6 +265,7 @@ def lower_spec_to_impl(
     contract: _SpecContract,
     spec_ast: SpecNode,
     spec_inputs: tuple[tp.Any, ...],
+    spec_ctx: SpecContext,
 ) -> Node:
     @Composite(name=name, spec=spec)
     def generated_impl(*impl_inputs: Node) -> Node:
@@ -271,7 +286,34 @@ def lower_spec_to_impl(
         )
         for parameter in input_parameters
     ]
-    return generated_impl(*impl_inputs)
+    lowered_composite = generated_impl(*impl_inputs)
+    spec_input_nodes = dict(
+        zip(spec_inputs, lowered_composite.inner_args, strict=True)
+    )
+    lowered_assumes = tuple(
+        search_lower_spec_to_impl(
+            assumption,
+            spec_input_nodes,
+            Bool(),
+        )
+        for assumption in spec_ctx.assumes
+    )
+
+    spec_input_nodes[spec_ast] = lowered_composite.inner_tree
+    lowered_checks = tuple(
+        search_lower_spec_to_impl(
+            check,
+            spec_input_nodes,
+            Bool(),
+        )
+        for check in spec_ctx.checks
+    )
+    lowered_composite.set_impl_conditions(
+        assumes=lowered_assumes,
+        checks=lowered_checks,
+    )
+
+    return lowered_composite
 
 
 def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
@@ -287,6 +329,11 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     spec_ast, spec_ctx = _simplify_spec_ast(spec_ast, spec_inputs, spec_ctx)
 
     # Step 3. Spec Exploration
-    lowered_composite = lower_spec_to_impl(name, spec, contract, spec_ast, spec_inputs)
-
-    return lowered_composite
+    return lower_spec_to_impl(
+        name,
+        spec,
+        contract,
+        spec_ast,
+        spec_inputs,
+        spec_ctx=spec_ctx,
+    )

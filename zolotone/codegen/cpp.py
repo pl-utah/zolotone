@@ -30,6 +30,7 @@ class _CppEmitter:
         self._reserved_names = {}
         self._function_cache: dict[tp.Any, str] = {}
         self._functions: list[str] = []
+        self._uses_assertions = False
 
     def emit_cpp(self, root: Node, function_name: str) -> str:
         # public_name = self._make_name(function_name)
@@ -52,6 +53,8 @@ class _CppEmitter:
                 "#include <tuple>",
                 "#include <ac_int.h>",
             ])
+            if self._uses_assertions:
+                includes.append("#include <cassert>")
         parts = [
             *includes,
             "",
@@ -103,6 +106,15 @@ class _CppEmitter:
         env: dict[Node, _CppValue],
     ) -> str:
         ctx = _FunctionContext()
+        inner_assumes = root.inner_assumes if isinstance(root, composite) else ()
+        inner_checks = root.inner_checks if isinstance(root, composite) else ()
+        if inner_assumes or inner_checks:
+            self._uses_assertions = True
+
+        for assumption in inner_assumes:
+            condition = self._lower(assumption, env, ctx)
+            ctx.statements.append(f"assert({condition.expr});  // assume")
+
         if root.c_lowering is not None:
             result = self._lower_direct_cpp(
                 root.dtype,
@@ -112,6 +124,10 @@ class _CppEmitter:
         else:
             result = self._lower(root.inner_tree, env, ctx)
 
+        for check in inner_checks:
+            condition = self._lower(check, env, ctx)
+            ctx.statements.append(f"assert({condition.expr});  // check")
+
         signature = f"static inline {self._signature(name, root.inner_args, root.dtype)}"
 
         body = [*ctx.statements, f"return {result.expr};"]
@@ -119,7 +135,15 @@ class _CppEmitter:
         return "\n".join([signature + f" {{  // {root.name}", indented_body, "}"])
 
     def _should_inline(self, node: Node) -> bool:
-        return isinstance(node, (primitive, composite)) and node.c_inline
+        has_conditions = (
+            isinstance(node, composite)
+            and bool(node.inner_assumes or node.inner_checks)
+        )
+        return (
+            isinstance(node, (primitive, composite))
+            and node.c_inline
+            and not has_conditions
+        )
 
     def _lower(
         self,

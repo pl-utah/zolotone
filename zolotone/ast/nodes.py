@@ -379,6 +379,8 @@ class composite(Node):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
         self.ctx = SpecContext(name)
+        self.inner_assumes: tuple[Node, ...] = ()
+        self.inner_checks: tuple[Node, ...] = ()
         _validate_spec_inputs(spec_contract, args)
         self.inner_args = [
             Var(name=f"arg_{i}", dtype=x.dtype, constant=x.constant)
@@ -467,6 +469,18 @@ class composite(Node):
             observer=observer,
             max_workers=max_workers,
         )
+
+    def set_impl_conditions(
+        self,
+        *,
+        assumes: tp.Iterable[Node],
+        checks: tp.Iterable[Node],
+    ) -> None:
+        """Attach lowered Boolean preconditions and postconditions."""
+        self.inner_assumes = tuple(assumes)
+        self.inner_checks = tuple(checks)
+        self._validate_components(self.name)
+        self._fingerprint_cache.clear()
     
     def _validate_components(self, composite_name: str) -> None:
         visited: set[Node] = set()
@@ -490,6 +504,12 @@ class composite(Node):
             )
         
         visit(self.inner_tree, f"{composite_name}.impl")
+        for kind, conditions in (
+            ("assume", self.inner_assumes),
+            ("check", self.inner_checks),
+        ):
+            for index, condition in enumerate(conditions):
+                visit(condition, f"{composite_name}.{kind}[{index}]")
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):
         connector = "└── " if is_last else "├── "
@@ -523,6 +543,11 @@ class composite(Node):
                 tuple(arg._type_and_constant_fingerprint() for arg in self.inner_args),
                 direct_cpp_lowering,
                 self.inner_tree._fingerprint(jittable) if direct_cpp_lowering is None else None,
+                tuple(
+                    assumption._fingerprint(jittable)
+                    for assumption in self.inner_assumes
+                ),
+                tuple(check._fingerprint(jittable) for check in self.inner_checks),
             )
         
         return self._cached_fingerprint(jittable, build)
