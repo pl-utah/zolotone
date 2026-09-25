@@ -327,6 +327,46 @@ def _warn_about_domain_errors(
         )
 
 
+def _derive_output_asserts(
+    spec_ast: SpecNode,
+    return_annotation: object,
+    ctx: SpecContext,
+) -> None:
+    """Add checks derived from the specification's output type and range."""
+    if return_annotation in (Q, UQ) or isinstance(return_annotation, (Q, UQ)):
+        if not isinstance(spec_ast, RealExpr):
+            raise TypeError(
+                "Numeric output assertions require a real expression, got "
+                f"{type(spec_ast).__name__}"
+            )
+        output_range = rival_range_analysis(spec_ast, ctx)
+        if output_range is None:
+            raise ZolotoneError(f"Could not obtain output range for: {spec_ast}")
+
+        lower, upper = output_range
+        if not math.isfinite(lower) or not math.isfinite(upper):
+            raise ZolotoneError(
+                f"Could not obtain finite output range, got {output_range} "
+                f"for {spec_ast}"
+            )
+        ctx.check(
+            (spec_ast >= ctx.real_val(lower))
+            & (spec_ast <= ctx.real_val(upper))
+        )
+        return
+
+    if return_annotation is Bool or isinstance(return_annotation, Bool):
+        ctx.check(
+            spec_ast.eq(ctx.true())
+            | spec_ast.eq(ctx.false())
+        )
+        return None
+
+    raise NotImplementedError(
+        f"Output assertions are not implemented for {return_annotation!r}"
+    )
+
+
 def _output_format_suggestion_with_search(
     spec_ast: RealExpr,
     conservative_format: Q | UQ,
@@ -461,6 +501,7 @@ def check_spec_feasibility(
             )
         _check_spec_reachability(ctx)
         _warn_about_domain_errors(spec_ast, ctx)
+        _derive_output_asserts(spec_ast, return_annotation, ctx)
         _check_spec_obligations(ctx)
         return
 
@@ -478,6 +519,7 @@ def check_spec_feasibility(
 
     _check_spec_reachability(ctx)
     _warn_about_domain_errors(spec_ast, ctx)
+    _derive_output_asserts(spec_ast, return_annotation, ctx)
     _check_spec_obligations(ctx)
 
     # TODO: counterexample

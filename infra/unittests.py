@@ -8989,6 +8989,55 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(range_suggestion, search_suggestion)
         self.assertEqual(range_suggestion, UQ(3, 0))
 
+    def test_spec_validation_adds_derived_output_range_check(self):
+        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.spec_validation import check_spec_feasibility
+
+        def spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
+            ctx.assume(x <= ctx.real_val(7))
+            return x + ctx.one()
+
+        contract = ast_nodes._build_spec_contract("derived-output-range", spec)
+        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+
+        with (
+            patch(
+                "zolotone.ast.spec_validation.rival_range_analysis",
+                return_value=(1.0, 8.0),
+            ) as range_analysis,
+        ):
+            check_spec_feasibility(spec_ast, spec_inputs, contract, ctx)
+
+        expected_check = (
+            (spec_ast >= ctx.real_val(1.0))
+            & (spec_ast <= ctx.real_val(8.0))
+        )
+        self.assertEqual(ctx.checks, [expected_check])
+        range_analysis.assert_any_call(spec_ast, ctx)
+
+    def test_derive_output_asserts_adds_boolean_exhaustiveness_check(self):
+        from zolotone.ast.spec_validation import _derive_output_asserts
+
+        for return_annotation in (Bool, Bool()):
+            with self.subTest(return_annotation=return_annotation):
+                ctx = SpecContext("derived-boolean-output")
+                result = ctx.bool("result")
+                with patch(
+                    "zolotone.ast.spec_validation.rival_range_analysis"
+                ) as range_analysis:
+                    output_range = _derive_output_asserts(
+                        result,
+                        return_annotation,
+                        ctx,
+                    )
+
+                self.assertIsNone(output_range)
+                self.assertEqual(
+                    ctx.checks,
+                    [result.eq(ctx.true()) | result.eq(ctx.false())],
+                )
+                range_analysis.assert_not_called()
+
     def test_solver_search_shrinks_rival_bound_using_assumptions(self):
         from zolotone.ast.spec_validation import _output_format_suggestion
 
