@@ -14,7 +14,7 @@ from .case_split import run_equivalence_cases
 from .node import Node
 from .parallel_verification import resolve_max_workers
 from .proofs import SpecRecorder, record_specs
-from ..spec import SpecContext, special_encoding
+from ..spec import SpecContext, SpecNode, special_encoding
 
 
 CLowering = tp.Callable[[list[str], bool], str]
@@ -379,6 +379,8 @@ class composite(Node):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
         self.ctx = SpecContext(name)
+        self.spec_assumes: tuple[SpecNode, ...] = ()
+        self.spec_checks: tuple[SpecNode, ...] = ()
         self.inner_assumes: tuple[Node, ...] = ()
         self.inner_checks: tuple[Node, ...] = ()
         _validate_spec_inputs(spec_contract, args)
@@ -473,12 +475,16 @@ class composite(Node):
     def set_impl_conditions(
         self,
         *,
-        assumes: tp.Iterable[Node],
-        checks: tp.Iterable[Node],
+        assumes: tp.Iterable[tuple[SpecNode, Node]],
+        checks: tp.Iterable[tuple[SpecNode, Node]],
     ) -> None:
         """Attach lowered Boolean preconditions and postconditions."""
-        self.inner_assumes = tuple(assumes)
-        self.inner_checks = tuple(checks)
+        assume_pairs = tuple(assumes)
+        check_pairs = tuple(checks)
+        self.spec_assumes = tuple(spec for spec, _ in assume_pairs)
+        self.spec_checks = tuple(spec for spec, _ in check_pairs)
+        self.inner_assumes = tuple(node for _, node in assume_pairs)
+        self.inner_checks = tuple(node for _, node in check_pairs)
         self._validate_components(self.name)
         self._fingerprint_cache.clear()
     
@@ -544,10 +550,21 @@ class composite(Node):
                 direct_cpp_lowering,
                 self.inner_tree._fingerprint(jittable) if direct_cpp_lowering is None else None,
                 tuple(
-                    assumption._fingerprint(jittable)
-                    for assumption in self.inner_assumes
+                    (str(spec), assumption._fingerprint(jittable))
+                    for spec, assumption in zip(
+                        self.spec_assumes,
+                        self.inner_assumes,
+                        strict=True,
+                    )
                 ),
-                tuple(check._fingerprint(jittable) for check in self.inner_checks),
+                tuple(
+                    (str(spec), check._fingerprint(jittable))
+                    for spec, check in zip(
+                        self.spec_checks,
+                        self.inner_checks,
+                        strict=True,
+                    )
+                ),
             )
         
         return self._cached_fingerprint(jittable, build)

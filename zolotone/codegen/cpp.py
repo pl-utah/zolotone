@@ -22,6 +22,7 @@ class _CppValue:
 class _FunctionContext:
     memo: dict[Node, _CppValue] = field(default_factory=dict)
     statements: list[str] = field(default_factory=list)
+    temp_count: int = 0
 
 
 class _CppEmitter:
@@ -29,6 +30,7 @@ class _CppEmitter:
         self.jittable = jittable
         self._reserved_names = {}
         self._function_cache: dict[tp.Any, str] = {}
+        self._cpp_function_cache: dict[tp.Any, str] = {}
         self._functions: list[str] = []
         self._uses_assertions = False
 
@@ -91,11 +93,18 @@ class _CppEmitter:
             for arg in root.inner_args
         }
 
-        rendered = self._render_function(
+        rendered, cpp_cache_key = self._render_function(
             root=root,
             name=function_name,
             env=env,
         )
+        cached_name = self._cpp_function_cache.get(cpp_cache_key)
+        if cached_name is not None:
+            self._function_cache[cache_key] = cached_name
+            self._reserved_names.pop(function_name, None)
+            return cached_name
+
+        self._cpp_function_cache[cpp_cache_key] = function_name
         self._functions.append(rendered)
         return function_name
 
@@ -104,16 +113,25 @@ class _CppEmitter:
         root: composite | primitive,
         name: str,
         env: dict[Node, _CppValue],
-    ) -> str:
+    ) -> tuple[str, tp.Any]:
         ctx = _FunctionContext()
+        spec_assumes = root.spec_assumes if isinstance(root, composite) else ()
+        spec_checks = root.spec_checks if isinstance(root, composite) else ()
         inner_assumes = root.inner_assumes if isinstance(root, composite) else ()
         inner_checks = root.inner_checks if isinstance(root, composite) else ()
         if inner_assumes or inner_checks:
             self._uses_assertions = True
 
-        for assumption in inner_assumes:
+        for spec, assumption in zip(
+            spec_assumes,
+            inner_assumes,
+            strict=True,
+        ):
             condition = self._lower(assumption, env, ctx)
-            ctx.statements.append(f"assert({condition.expr});  // assume")
+            ctx.statements.append(
+                f"// assume [{self._spec_comment(spec)}]"
+            )
+            ctx.statements.append(f"assert({condition.expr});")
 
         if root.c_lowering is not None:
             result = self._lower_direct_cpp(
@@ -124,15 +142,32 @@ class _CppEmitter:
         else:
             result = self._lower(root.inner_tree, env, ctx)
 
-        for check in inner_checks:
+        for spec, check in zip(
+            spec_checks,
+            inner_checks,
+            strict=True,
+        ):
             condition = self._lower(check, env, ctx)
-            ctx.statements.append(f"assert({condition.expr});  // check")
+            ctx.statements.append(f"// check [{self._spec_comment(spec)}]")
+            ctx.statements.append(f"assert({condition.expr});")
 
         signature = f"static inline {self._signature(name, root.inner_args, root.dtype)}"
 
         body = [*ctx.statements, f"return {result.expr};"]
         indented_body = "\n".join(f"    {line}" for line in body)
-        return "\n".join([signature + f" {{  // {root.name}", indented_body, "}"])
+        rendered = "\n".join(
+            [signature + f" {{  // {root.name}", indented_body, "}"]
+        )
+        cpp_cache_key = (
+            tuple(self._render_type(arg.dtype) for arg in root.inner_args),
+            self._render_type(root.dtype),
+            tuple(body),
+        )
+        return rendered, cpp_cache_key
+
+    @staticmethod
+    def _spec_comment(spec: object) -> str:
+        return " ".join(str(spec).splitlines())
 
     def _should_inline(self, node: Node) -> bool:
         has_conditions = (
@@ -202,7 +237,7 @@ class _CppEmitter:
                 helper_name = self._function_cache.get(node._fingerprint(self.jittable))
                 if helper_name is None:
                     helper_name = self._make_name(node.name)
-                    self.emit_function(
+                    helper_name = self.emit_function(
                         root=node,
                         function_name=helper_name,
                     )
@@ -326,7 +361,8 @@ class _CppEmitter:
         name: str,
         ctx: _FunctionContext,
     ) -> _CppValue:
-        temp_name = self._make_name("tmp")
+        temp_name = "tmp" if ctx.temp_count == 0 else f"tmp_{ctx.temp_count}"
+        ctx.temp_count += 1
         cpp_type = self._render_type(type_)
         ctx.statements.append(f"const {cpp_type} {temp_name} = {expr};  // {name}")
         return _CppValue(expr=temp_name)

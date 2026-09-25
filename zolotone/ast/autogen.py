@@ -291,20 +291,26 @@ def lower_spec_to_impl(
         zip(spec_inputs, lowered_composite.inner_args, strict=True)
     )
     lowered_assumes = tuple(
-        search_lower_spec_to_impl(
+        (
             assumption,
-            spec_input_nodes,
-            Bool(),
+            search_lower_spec_to_impl(
+                assumption,
+                spec_input_nodes,
+                Bool(),
+            ),
         )
         for assumption in spec_ctx.assumes
     )
 
     spec_input_nodes[spec_ast] = lowered_composite.inner_tree
     lowered_checks = tuple(
-        search_lower_spec_to_impl(
+        (
             check,
-            spec_input_nodes,
-            Bool(),
+            search_lower_spec_to_impl(
+                check,
+                spec_input_nodes,
+                Bool(),
+            ),
         )
         for check in spec_ctx.checks
     )

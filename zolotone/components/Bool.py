@@ -15,7 +15,7 @@ def negate(x: Node) -> Node:
 def bool_eq_spec(x: Bool, y: Bool, ctx) -> Bool:
     return x.eq(y)
 
-@Primitive(name="bool_eq", spec=bool_eq_spec)
+@Primitive(name="bool_eq", spec=bool_eq_spec, c_inline=True)
 def bool_eq(x: Node, y: Node) -> Node:
     return basic_equal(x, y, out=Bool())
 
