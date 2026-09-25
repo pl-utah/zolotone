@@ -79,7 +79,7 @@ LOSSLESS_COMPONENTS = (
     q_mul,
     q_abs,
     _q_sign_extend,
-    #q_to_uq, # Can be lossy
+    q_to_uq,
 
     _if_then_else,
     bit_and,

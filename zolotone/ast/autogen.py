@@ -1,10 +1,13 @@
 import itertools
+import math
 import typing as tp
 
 from ..errors import MissingError, ZolotoneError
+from ..rival import rival_range_analysis
 from ..spec.spec_ast import (
     BoolLit,
     BoolVar,
+    RealExpr,
     RealLit,
     RealVar,
     SpecNode,
@@ -22,6 +25,8 @@ from .nodes import (
     _SpecContract,
 )
 from .spec_validation import (
+    _fixed_point_real_bounds,
+    _prove_result_fits,
     _simplify_spec_ast,
     check_spec_feasibility,
     reject_untyped_inputs,
@@ -127,15 +132,60 @@ def _matches_result(
     )
 
 
+def _candidate_output_range_fits(
+    candidate: _Candidate,
+    range_ctx: SpecContext,
+    range_cache: dict[SpecNode, tuple[float, float] | None],
+    fit_cache: dict[tuple[SpecNode, Q | UQ], bool],
+) -> bool:
+    if not isinstance(candidate.spec, RealExpr):
+        return True
+    if not isinstance(candidate.node.dtype, (Q, UQ)):
+        raise NotImplementedError(
+            "Real-valued autogeneration candidate must have a Q or UQ "
+            f"output format, got {candidate.node.dtype!r} from "
+            f"{candidate.node.name!r}"
+        )
+
+    if candidate.spec not in range_cache:
+        range_cache[candidate.spec] = rival_range_analysis(
+            candidate.spec,
+            range_ctx,
+        )
+    output_range = range_cache[candidate.spec]
+    if output_range is not None:
+        lower, upper = output_range
+        dtype_lower, dtype_upper = _fixed_point_real_bounds(candidate.node.dtype)
+        if (
+            math.isfinite(lower)
+            and math.isfinite(upper)
+            and lower >= dtype_lower
+            and upper <= dtype_upper
+        ):
+            return True
+
+    fit_key = (candidate.spec, candidate.node.dtype)
+    if fit_key not in fit_cache:
+        fit_cache[fit_key] = _prove_result_fits(
+            candidate.spec,
+            candidate.node.dtype,
+            range_ctx,
+        )
+    return fit_cache[fit_key]
+
+
 def search_lower_spec_to_impl(
     spec_ast: SpecNode,
     spec_input_nodes: dict[tp.Any, Node],
     return_annotation: object,
+    range_ctx: SpecContext,
 ) -> Node:
     from ..components import LOSSLESS_COMPONENTS
 
     # Lowering leaves first
     subexpressions = _spec_subexpressions(spec_ast)
+    range_cache: dict[SpecNode, tuple[float, float] | None] = {}
+    fit_cache: dict[tuple[SpecNode, Q | UQ], bool] = {}
     candidates = [
         _Candidate(node=node, spec=expr, depth=0)
         for expr, node in spec_input_nodes.items()
@@ -233,15 +283,21 @@ def search_lower_spec_to_impl(
                     spec=matched_spec,
                     depth=depth,
                 )
+                if not _candidate_output_range_fits(
+                    candidate,
+                    range_ctx,
+                    range_cache,
+                    fit_cache,
+                ):
+                    continue
                 state = (candidate.spec, candidate.node.dtype)
                 if state in states:
                     continue
                 states.add(state)
+                if _matches_result(candidate, spec_ast, return_annotation):
+                    return candidate.node
                 generated.append(candidate)
 
-        for candidate in generated:
-            if _matches_result(candidate, spec_ast, return_annotation):
-                return candidate.node
         if not generated:
             raise ZolotoneError(
                 f"Cannot lower specification {spec_ast!r} to "
@@ -276,6 +332,7 @@ def lower_spec_to_impl(
             spec_ast,
             spec_input_nodes,
             contract.annotations["return"],
+            spec_ctx,
         )
 
     input_parameters = list(contract.signature.parameters.values())[:-1]
@@ -290,17 +347,25 @@ def lower_spec_to_impl(
     spec_input_nodes = dict(
         zip(spec_inputs, lowered_composite.inner_args, strict=True)
     )
-    lowered_assumes = tuple(
-        (
-            assumption,
-            search_lower_spec_to_impl(
-                assumption,
-                spec_input_nodes,
-                Bool(),
-            ),
+    lowered_assumes = []
+    prior_assumes = []
+    for assumption in spec_ctx.assumes:
+        range_ctx = spec_ctx.copy(
+            assumes=list(prior_assumes),
+            checks=[],
         )
-        for assumption in spec_ctx.assumes
-    )
+        lowered_assumes.append(
+            (
+                assumption,
+                search_lower_spec_to_impl(
+                    assumption,
+                    spec_input_nodes,
+                    Bool(),
+                    range_ctx,
+                ),
+            )
+        )
+        prior_assumes.append(assumption)
 
     spec_input_nodes[spec_ast] = lowered_composite.inner_tree
     lowered_checks = tuple(
@@ -310,12 +375,13 @@ def lower_spec_to_impl(
                 check,
                 spec_input_nodes,
                 Bool(),
+                spec_ctx,
             ),
         )
         for check in spec_ctx.checks
     )
     lowered_composite.set_impl_conditions(
-        assumes=lowered_assumes,
+        assumes=tuple(lowered_assumes),
         checks=lowered_checks,
     )
 

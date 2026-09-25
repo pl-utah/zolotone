@@ -497,10 +497,14 @@ def check_spec_feasibility(
 ) -> None:
     # Input ranges
     input_parameters = list(contract.signature.parameters.values())[:-1]
+    input_range_assumes = []
     for spec_input, parameter in zip(spec_inputs, input_parameters, strict=True):
         dtype = contract.annotations[parameter.name]
         if isinstance(dtype, (Q, UQ)):
-            ctx.assume(_fixed_point_result_fits(spec_input, dtype, ctx))
+            input_range_assumes.append(
+                _fixed_point_result_fits(spec_input, dtype, ctx)
+            )
+    ctx.assumes[:0] = input_range_assumes
 
     return_annotation = contract.annotations["return"]
     # Output validation
