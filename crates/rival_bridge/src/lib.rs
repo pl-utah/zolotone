@@ -132,10 +132,12 @@ impl RawRivalMachine {
             })
             .collect::<Vec<_>>();
 
-        let outputs = self
-            .range_machine
-            .apply(&rival_rect, None, 1)
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outputs = match self.range_machine.apply(&rival_rect, None, 1) {
+            Ok(outputs) => outputs,
+            // An unsamplable rectangle has no representable output range. Let
+            // the Python range-analysis layer convert this sentinel to None.
+            Err(_) => return Ok((f64::NAN, f64::NAN)),
+        };
         let range = outputs
             .first()
             .ok_or_else(|| PyValueError::new_err("range machine returned no outputs"))?;

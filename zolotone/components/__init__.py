@@ -81,6 +81,8 @@ LOSSLESS_COMPONENTS = (
     negate,
     bool_to_uq,
     uq_to_bool,
+    uq_truncate_msb,
+    q_truncate_msb,
 
     uq_lt,
     uq_gt,
@@ -94,9 +96,6 @@ LOSSLESS_COMPONENTS = (
     uq_min,
     uq_to_q,
     uq_is_zero,
-    _uq_zero_extend,
-    _uq_fraction_extend,
-    uq_truncate_msb,
 
     q_lt,
     q_le,
@@ -109,9 +108,6 @@ LOSSLESS_COMPONENTS = (
     q_sub,
     q_mul,
     q_abs,
-    _q_sign_extend,
-    _q_fraction_extend,
-    q_truncate_msb,
     q_to_uq,
 
     _if_then_else,
@@ -119,4 +115,11 @@ LOSSLESS_COMPONENTS = (
     bit_or,
     bit_xor,
     bit_neg,
+
+    # Format extensions are valid but should be considered only after
+    # operations that may keep the original representation longer.
+    _uq_zero_extend,
+    _uq_fraction_extend,
+    _q_sign_extend,
+    _q_fraction_extend,
 )
