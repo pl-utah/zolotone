@@ -12,23 +12,52 @@ from .Bool import bool_and, bool_eq, bool_or, negate
 from ..ast import Composite, Node
 from ..ast.helpers import _if_then_else_spec, if_then_else
 from ..types import Bool, DataType, Q, UQ
-from .Q import q_to_uq
-from .UQ import uq_add, uq_mul
+from .Q import q_resize, q_to_uq, q_truncate_msb
+from .UQ import uq_add, uq_mul, uq_resize, uq_truncate_msb
 
 
 def _q_sign_extend_spec(x: Q, ctx) -> Q:
     return x
 
+
 @Composite(name="_q_sign_extend", spec=_q_sign_extend_spec)
 def _q_sign_extend(x: Node) -> Node:
     return q_sign_extend(x, n=1)
 
+
+def _q_fraction_extend_spec(x: Q, ctx) -> Q:
+    return x
+
+
+@Composite(name="_q_fraction_extend", spec=_q_fraction_extend_spec)
+def _q_fraction_extend(x: Node) -> Node:
+    return q_resize(
+        x,
+        int_bits=x.dtype.int_bits,
+        frac_bits=x.dtype.frac_bits + 1,
+    )
+
+
 def _uq_zero_extend_spec(x: UQ, ctx) -> UQ:
     return x
+
 
 @Composite(name="_uq_zero_extend", spec=_uq_zero_extend_spec)
 def _uq_zero_extend(x: Node) -> Node:
     return uq_zero_extend(x, n=1)
+
+
+def _uq_fraction_extend_spec(x: UQ, ctx) -> UQ:
+    return x
+
+
+@Composite(name="_uq_fraction_extend", spec=_uq_fraction_extend_spec)
+def _uq_fraction_extend(x: Node) -> Node:
+    return uq_resize(
+        x,
+        int_bits=x.dtype.int_bits,
+        frac_bits=x.dtype.frac_bits + 1,
+    )
 
 
 def _if_then_else_component_spec(
@@ -66,6 +95,8 @@ LOSSLESS_COMPONENTS = (
     uq_to_q,
     uq_is_zero,
     _uq_zero_extend,
+    _uq_fraction_extend,
+    uq_truncate_msb,
 
     q_lt,
     q_le,
@@ -79,6 +110,8 @@ LOSSLESS_COMPONENTS = (
     q_mul,
     q_abs,
     _q_sign_extend,
+    _q_fraction_extend,
+    q_truncate_msb,
     q_to_uq,
 
     _if_then_else,

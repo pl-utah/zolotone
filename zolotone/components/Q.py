@@ -175,7 +175,7 @@ def q_aligner(x: Node,
     def q_aligner_spec(x: Q, y: Q, ctx) -> Tuple(Q, Q):
         return x, y
 
-    @Primitive(name="q_aligner", spec=q_aligner_spec)
+    @Primitive(name="q_aligner", spec=q_aligner_spec, c_inline=True)
     def impl(x: Node, y: Node) -> Node:
         def align(x):
             # Step 1. Align frac bits
@@ -286,6 +286,22 @@ def q_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
         )
     
     return impl(x)
+
+
+def q_truncate_msb_spec(x: Q, ctx) -> Q:
+    return x
+
+
+@Primitive(name="q_truncate_msb", spec=q_truncate_msb_spec)
+def q_truncate_msb(x: Node) -> Node:
+    if x.dtype.int_bits < 1 or x.dtype.total_bits() < 2:
+        raise ValueError(
+            "q_truncate_msb requires a removable integer bit"
+        )
+    return basic_identity(
+        x=x,
+        out=Q(x.dtype.int_bits - 1, x.dtype.frac_bits),
+    )
 
 
 def q_neg_spec(x: Q, ctx) -> Q:

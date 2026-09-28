@@ -101,7 +101,7 @@ def uq_aligner(x: Node,
     def uq_aligner_spec(x: UQ, y: UQ, ctx) -> Tuple(UQ, UQ):
         return x, y
 
-    @Primitive(name="uq_aligner", spec=uq_aligner_spec)
+    @Primitive(name="uq_aligner", spec=uq_aligner_spec, c_inline=True)
     def impl(x: Node, y: Node) -> Node:
         def align(x):
             int_bits = _int_aggr(x)
@@ -474,6 +474,22 @@ def uq_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
             )
         return basic_identity(x=x, out=out)
     return impl(x)
+
+
+def uq_truncate_msb_spec(x: UQ, ctx) -> UQ:
+    return x
+
+
+@Primitive(name="uq_truncate_msb", spec=uq_truncate_msb_spec)
+def uq_truncate_msb(x: Node) -> Node:
+    if x.dtype.int_bits < 1 or x.dtype.total_bits() < 2:
+        raise ValueError(
+            "uq_truncate_msb requires a removable integer bit"
+        )
+    return basic_identity(
+        x=x,
+        out=UQ(x.dtype.int_bits - 1, x.dtype.frac_bits),
+    )
 
 
 def uq_is_zero_spec(x: UQ, ctx) -> UQ:
