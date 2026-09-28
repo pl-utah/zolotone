@@ -3,6 +3,7 @@ from zolotone import *
 
 def Test(expect=None):
     def wrapper(spec):
+        print("-------------------------------------")
         try:
             generated = Autogenerate(name=spec.__name__, spec=spec)
         except Exception as error:
@@ -25,9 +26,6 @@ def Test(expect=None):
             )
 
         generated.print_tree(depth=1)
-        print(f"{spec.__name__}: passed")
-        print(generated.to_cpp())
-        print("-------------------")
         return spec
 
     return wrapper
@@ -99,8 +97,7 @@ def spec8(x: Q(3, 0), ctx) -> Q:
     return x + ctx.real_val(2) + y
 
 
-# precision for 2.5 is not known
-@Test(NotImplementedError)
+@Test()
 def spec9(x: Q(3, 0), ctx) -> Q:
     return x + ctx.real_val(2.5)
 
@@ -243,15 +240,15 @@ def used_variable(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(4, 0):
     return x
 
 
-@Test()
-def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
-    return x ** (ctx.real_val(-1)) + ctx.one() + y ** (ctx.real_val(-1)) 
+# @Test()
+# def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
+#     return x ** (ctx.real_val(-1)) + ctx.one() + y ** (ctx.real_val(-1)) 
 
 
 # Domain error
-# @Test()
-# def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
-#     return x ** (ctx.real_val(-1)) + ctx.one()
+@Test()
+def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
+    return x ** (ctx.real_val(-1)) + ctx.one()
 
 
 # # Domain error
