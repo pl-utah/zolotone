@@ -8364,7 +8364,7 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
 class TestSpecificationDTypeContracts(unittest.TestCase):
     def test_autogenerate_lowers_float_literals_exactly(self):
-        from zolotone.ast.autogen import _exact_fixed_point_value
+        from zolotone.ast.spec_lowering import _exact_fixed_point_value
 
         positive = _exact_fixed_point_value(3.75)
         negative = _exact_fixed_point_value(-3.75)
@@ -8452,7 +8452,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             Autogenerate("generated_q_to_uq", spec)
 
     def test_autogenerate_uses_q_to_uq_only_for_nonnegative_range(self):
-        from zolotone.ast import autogen as ast_autogen
+        from zolotone.ast import spec_lowering
 
         def nonnegative_spec(x: Q(3, 0), ctx) -> UQ:
             ctx.assume(x >= ctx.zero())
@@ -8471,10 +8471,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ctx.assume(x >= ctx.real_val(-4))
         ctx.assume(x <= ctx.real_val(3))
         with (
-            patch.object(ast_autogen, "MAX_SEARCH_DEPTH", 1),
+            patch.object(spec_lowering, "MAX_SEARCH_DEPTH", 1),
             self.assertRaisesRegex(ZolotoneError, "maximum depth"),
         ):
-            ast_autogen.search_lower_spec_to_impl(
+            spec_lowering.search_lower_spec_to_impl(
                 x,
                 {x: Var("x", Q(3, 0))},
                 UQ,
@@ -8610,19 +8610,23 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
     def test_spec_validation_runs_domain_error_check(self):
         from zolotone.ast.autogen import get_spec_ast
-        from zolotone.ast.spec_validation import check_spec_feasibility
+        from zolotone.ast.spec_validation import (
+            _derive_input_ranges,
+            _warn_about_domain_errors,
+        )
 
         def spec(x: UQ(2, 0), ctx) -> Bool:
             return (x ** ctx.real_val(-1)) > ctx.zero()
 
         contract = ast_nodes._build_spec_contract("domain-pipeline", spec)
         spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+        ctx.assumes[:0] = _derive_input_ranges(spec_inputs, contract, ctx)
 
         with self.assertWarnsRegex(
             UserWarning,
             r"Specification .*domain-pipeline.*result: .*\*\* -1",
         ):
-            check_spec_feasibility(spec_ast, spec_inputs, contract, ctx)
+            _warn_about_domain_errors(spec_ast, ctx)
 
     def test_domain_warning_uses_all_assumptions_for_shared_rects(self):
         from zolotone.ast.spec_validation import _warn_about_domain_errors
@@ -9052,7 +9056,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             uq_truncate_msb(Var("unsigned", UQ(0, 2)))
 
     def test_autogenerate_rejects_unsafe_msb_truncation(self):
-        from zolotone.ast import autogen as ast_autogen
+        from zolotone.ast import spec_lowering
 
         cases = (
             (Q(4, 0), Q(3, 0), -8, 7),
@@ -9066,10 +9070,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 ctx.assume(x <= ctx.real_val(upper))
 
                 with (
-                    patch.object(ast_autogen, "MAX_SEARCH_DEPTH", 1),
+                    patch.object(spec_lowering, "MAX_SEARCH_DEPTH", 1),
                     self.assertRaisesRegex(ZolotoneError, "maximum depth"),
                 ):
-                    ast_autogen.search_lower_spec_to_impl(
+                    spec_lowering.search_lower_spec_to_impl(
                         x,
                         {x: Var("x", input_type)},
                         output_type,
@@ -9269,7 +9273,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
     def test_spec_validation_adds_derived_output_range_check(self):
         from zolotone.ast.autogen import get_spec_ast
-        from zolotone.ast.spec_validation import check_spec_feasibility
+        from zolotone.ast.spec_validation import (
+            _derive_input_ranges,
+            _derive_output_asserts,
+        )
 
         def spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
             ctx.assume(x <= ctx.real_val(7))
@@ -9277,6 +9284,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         contract = ast_nodes._build_spec_contract("derived-output-range", spec)
         spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+        ctx.assumes[:0] = _derive_input_ranges(spec_inputs, contract, ctx)
 
         with (
             patch(
@@ -9284,7 +9292,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 return_value=(1.0, 8.0),
             ) as range_analysis,
         ):
-            check_spec_feasibility(spec_ast, spec_inputs, contract, ctx)
+            _derive_output_asserts(
+                spec_ast,
+                contract.annotations["return"],
+                ctx,
+            )
 
         expected_check = (
             (spec_ast >= ctx.real_val(1.0))
@@ -9403,7 +9415,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(generated.inner_tree.args[0].name, "_q_sign_extend")
 
     def test_autogenerate_rejects_real_candidate_with_non_numeric_dtype(self):
-        from zolotone.ast.autogen import (
+        from zolotone.ast.spec_lowering import (
             _Candidate,
             _candidate_output_range_fits,
         )
@@ -9433,14 +9445,17 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(lowered_assumption.args[0].name, "q_sub")
 
     def test_autogenerate_unsupported_spec_reaches_search_limit(self):
-        from zolotone.ast import autogen as ast_autogen
+        from zolotone.ast import spec_lowering
 
         def spec(x: UQ(2, 0), ctx) -> UQ:
             return x ** ctx.two()
 
-        with patch.object(ast_autogen, "MAX_SEARCH_DEPTH", 2), self.assertRaisesRegex(
-            ZolotoneError,
-            "search reached the maximum depth of 2",
+        with (
+            patch.object(spec_lowering, "MAX_SEARCH_DEPTH", 2),
+            self.assertRaisesRegex(
+                ZolotoneError,
+                "search reached the maximum depth of 2",
+            ),
         ):
             Autogenerate("generated_pow", spec)
 
