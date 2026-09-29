@@ -7,13 +7,17 @@ import typing as tp
 from ..errors import MissingError, ZolotoneError
 from ..rival import rival_range_analysis
 from ..spec.spec_ast import (
+    BoolExpr,
     BoolLit,
     BoolVar,
+    Gt,
+    Lt,
     RealExpr,
     RealLit,
     RealVar,
     SpecNode,
     children,
+    substitute_spec_node,
 )
 from ..spec.spec_context import SpecContext
 from ..types import Bool, Q, UQ, Value
@@ -288,6 +292,112 @@ def search_lower_spec_to_impl(
 
         candidates.extend(generated)
         depth += 1
+
+
+def _make_conditions_bit_precise(
+    conditions: tp.Iterable[BoolExpr],
+    spec_inputs: tuple[tp.Any, ...],
+    contract: _SpecContract,
+    range_ctx: SpecContext,
+) -> tuple[BoolExpr, ...]:
+    """Rewrite strict comparisons using formats selected by lowering."""
+    input_parameters = list(contract.signature.parameters.values())[:-1]
+    spec_input_nodes = dict(
+        zip(
+            spec_inputs,
+            (
+                Var(parameter.name, contract.annotations[parameter.name])
+                for parameter in input_parameters
+            ),
+            strict=True,
+        )
+    )
+
+    rewritten_conditions = []
+    for condition in conditions:
+        pending = [condition]
+        strict_comparisons = []
+        while pending:
+            node = pending.pop()
+            pending.extend(children(node))
+            if isinstance(node, (Lt, Gt)):
+                strict_comparisons.append(node)
+
+        rewritten = condition
+        for comparison in reversed(strict_comparisons):
+            lowered = search_lower_spec_to_impl(
+                comparison,
+                spec_input_nodes,
+                Bool(),
+                range_ctx,
+            )
+            lowered_args = getattr(lowered, "args", ())
+            if len(lowered_args) != 2:
+                continue
+            lhs_dtype = lowered_args[0].dtype
+            rhs_dtype = lowered_args[1].dtype
+            if not isinstance(lhs_dtype, (Q, UQ)) or not isinstance(
+                rhs_dtype,
+                (Q, UQ),
+            ):
+                continue
+
+            frac_bits = max(lhs_dtype.frac_bits, rhs_dtype.frac_bits)
+            quantum = range_ctx.real_val(2.0 ** -frac_bits)
+            if isinstance(comparison, Gt):
+                precise = comparison.lhs >= comparison.rhs + quantum
+            else:
+                precise = comparison.lhs <= comparison.rhs - quantum
+            rewritten = substitute_spec_node(
+                rewritten,
+                comparison,
+                precise.constant_fold(),
+            )
+        rewritten_conditions.append(rewritten)
+    return tuple(rewritten_conditions)
+
+
+def rewrite_strict_conditions(
+    spec_inputs: tuple[tp.Any, ...],
+    contract: _SpecContract,
+    spec_ctx: SpecContext,
+) -> SpecContext:
+    """Rewrite strict assumptions and checks for fixed-point semantics.
+
+    Assumptions are rewritten in context order so each one is lowered using
+    only the preceding precise assumptions. Requirements stay in source form
+    because Z3's continuous-real model cannot exclude gaps between adjacent
+    fixed-point values.
+    """
+    condition_ctx = spec_ctx.copy(
+        assumes=[],
+        checks=[],
+        requirements=[],
+    )
+    # TODO: Global simplification can leave an assumption before a later fact
+    # that would permit a narrower implementation. This ordering is safe, but
+    # may select wider dtypes or fail to lower an otherwise lowerable
+    # assumption. Consider dependency-safe greedy scheduling over the pending
+    # assumptions, using only input ranges and already-established facts.
+    for assumption in spec_ctx.assumes:
+        precise_assumption, = _make_conditions_bit_precise(
+            (assumption,),
+            spec_inputs,
+            contract,
+            condition_ctx,
+        )
+        condition_ctx.assumes.append(precise_assumption)
+
+    precise_checks = _make_conditions_bit_precise(
+        spec_ctx.checks,
+        spec_inputs,
+        contract,
+        condition_ctx,
+    )
+    return spec_ctx.copy(
+        assumes=list(condition_ctx.assumes),
+        checks=list(precise_checks),
+    )
 
 
 def lower_spec_result(

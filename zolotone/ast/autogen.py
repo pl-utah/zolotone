@@ -6,6 +6,7 @@ from .nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
     attach_lowered_conditions,
     lower_spec_result,
+    rewrite_strict_conditions,
 )
 from .spec_validation import (
     _check_output_format,
@@ -13,7 +14,6 @@ from .spec_validation import (
     _check_spec_reachability,
     _derive_input_ranges,
     _derive_output_guards,
-    _lower_user_assumptions,
     _simplify_spec_ast,
     _validate_spec_shape,
     _warn_about_domain_errors,
@@ -59,22 +59,26 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     # Step 3: simplify before making conditions type-precise.
     spec_ast, spec_ctx = _simplify_spec_ast(spec_ast, spec_inputs, spec_ctx)
 
-    # Step 4: convert user assumptions to type-precise semantic predicates.
-    # This is currently a no-op template; it is intentionally before every
-    # validation pass that consumes assumptions as numeric-domain facts.
-    spec_ctx = _lower_user_assumptions(spec_inputs, contract, spec_ctx)
+    # Step 4: rewrite strict assumptions and checks for fixed-point semantics.
+    spec_ctx = rewrite_strict_conditions(
+        spec_inputs,
+        contract,
+        spec_ctx,
+    )
 
+    print(spec_ctx)
+    
     # Step 5: validate the complete, eventually bit-precise specification.
     ## Reachibility with user-provided assumes
-    _check_spec_reachability(spec_ctx)                           # this require bit-precise assumes
+    _check_spec_reachability(spec_ctx)                           # this requires bit-precise assumes
     ## Domain errors given user-provided/derived assumes
-    _warn_about_domain_errors(spec_ast, spec_ctx)                # this require bit-precise assumes
-    ## Prove determinism of "Cases"
-    spec_ctx.validate_requirements()                             # this require bit-precise assumes
+    _warn_about_domain_errors(spec_ast, spec_ctx)                # this requires bit-precise assumes
+    ## Prove exhaustive coverage of "Cases"
+    spec_ctx.validate_requirements()                             # this requires bit-precise assumes
     ## Prove that user-defined asserts are satisfied
-    _check_spec_obligations(spec_ctx)                            # this require bit-precise assumes
+    _check_spec_obligations(spec_ctx)                            # this requires bit-precise assumes
     ## Check that output range fits output format; warn if it can be narrowed
-    _check_output_format(spec_ast, return_annotation, spec_ctx)  # this require bit-precise assumes
+    _check_output_format(spec_ast, return_annotation, spec_ctx)  # this requires bit-precise assumes
 
     # Step 6: lower the result before deriving implementation guards.
     lowered_composite = lower_spec_result(

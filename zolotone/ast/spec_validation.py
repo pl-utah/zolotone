@@ -539,30 +539,6 @@ def _derive_input_ranges(
     return tuple(input_range_assumes)
 
 
-def _lower_user_assumptions(
-    spec_inputs: tuple[tp.Any, ...],
-    contract: _SpecContract,
-    ctx: SpecContext,
-) -> SpecContext:
-    """Replace simplified user assumptions with type-precise predicates.
-
-    This is deliberately an identity transform for now.  Its position in the
-    pipeline is intentional: the specification and its conditions have
-    already been simplified, while all domain-sensitive validation is still
-    pending.  A later implementation will rewrite the user-authored portion
-    of ``ctx.assumes`` from the concrete formats of ``spec_inputs`` and leave
-    synthesized input-range facts intact.
-
-    This is semantic condition lowering, not lowering to implementation
-    nodes; implementation predicates are still attached by
-    ``attach_lowered_conditions`` after the result has been selected.
-    """
-    # Keep the future transform's complete type-level inputs in the signature.
-    # The no-op template must preserve today's context and behavior exactly.
-    del spec_inputs, contract
-    return ctx
-
-
 def _validate_spec_shape(
     spec_ast: SpecNode,
     return_annotation: object,
