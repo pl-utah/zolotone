@@ -8628,6 +8628,27 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             _warn_about_domain_errors(spec_ast, ctx)
 
+    def test_lower_user_assumptions_is_an_identity_template(self):
+        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.spec_validation import (
+            _derive_input_ranges,
+            _lower_user_assumptions,
+        )
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            ctx.assume(x > ctx.zero())
+            return x
+
+        contract = ast_nodes._build_spec_contract("lower-assumptions", spec)
+        _spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+        ctx.assumes[:0] = _derive_input_ranges(spec_inputs, contract, ctx)
+
+        self.assertIs(
+            _lower_user_assumptions(spec_inputs, contract, ctx),
+            ctx,
+        )
+        self.assertEqual(len(ctx.assumes), 2)
+
     def test_domain_warning_uses_all_assumptions_for_shared_rects(self):
         from zolotone.ast.spec_validation import _warn_about_domain_errors
 
