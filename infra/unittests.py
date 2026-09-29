@@ -1273,6 +1273,38 @@ class TestEgglogRewriteRules(unittest.TestCase):
 
 
 class TestCppLowering(unittest.TestCase):
+    def test_identical_cpp_helpers_are_emitted_once(self):
+        def spec(a: UQ, b: UQ, c: UQ, d: UQ, ctx) -> Bool:
+            del ctx
+            return a.eq(b) & c.eq(d)
+
+        @Composite(name="duplicate_helpers", spec=spec)
+        def duplicate_helpers(a, b, c, d):
+            first_helper = uq_aligner(a, b, None, max)
+            second_helper = uq_aligner(c, d, None, max)
+            # Exercise helper emission even though uq_aligner is normally inlined.
+            first_helper.c_inline = False
+            second_helper.c_inline = False
+            return bool_and(
+                uq_eq(first_helper[0], first_helper[1]),
+                uq_eq(second_helper[0], second_helper[1]),
+            )
+
+        source = duplicate_helpers(
+            Var("a", UQ(3, 0)),
+            Var("b", UQ(3, 0)),
+            Var("c", UQ(4, 0)),
+            Var("d", UQ(4, 0)),
+        ).to_cpp("duplicate_helpers")
+
+        self.assertEqual(
+            source.count(
+                "static inline std::array<uint64_t, 2> uq_aligner"
+            ),
+            1,
+        )
+        self.assertEqual(source.count("uq_aligner("), 3)
+
     def test_jittable_entry_asserts_widened_inputs_without_masking(self):
         bool_source = negate(Var("value", Bool())).to_cpp("check_bool")
 
@@ -1762,7 +1794,7 @@ class TestBasicOperators(unittest.TestCase):
         self.assertIn(uq_to_bool, LOSSLESS_COMPONENTS)
         self.assertIn(uq_add, LOSSLESS_COMPONENTS)
         self.assertIn(uq_mul, LOSSLESS_COMPONENTS)
-        self.assertNotIn(q_to_uq, LOSSLESS_COMPONENTS)
+        self.assertIn(q_to_uq, LOSSLESS_COMPONENTS)
         self.assertNotIn(uq_resize, LOSSLESS_COMPONENTS)
 
     def test_output_dtype_is_metadata_not_a_graph_input(self):
@@ -6707,6 +6739,23 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(bounds, (-2.0, 4.0))
 
+    def test_rival_range_analysis_treats_unsamplable_rect_as_unavailable(self):
+        ctx = SpecContext("rival-unsamplable-range")
+        x = ctx.real("x")
+        machine = Mock()
+        machine.apply_range.return_value = (math.nan, math.nan)
+
+        with (
+            patch(
+                "zolotone.rival.get_rival_rects",
+                return_value=[[(0.0, 0.0)]],
+            ),
+            patch("zolotone.rival.build_range_machine", return_value=machine),
+        ):
+            bounds = rival_range_analysis(x ** ctx.real_val(-1), ctx)
+
+        self.assertIsNone(bounds)
+
     def test_rival_range_analysis_returns_numeric_output_interval(self):
         ctx = SpecContext("rival-native-output-range")
         x = ctx.real("x")
@@ -7166,6 +7215,19 @@ class TestRivalTranslation(unittest.TestCase):
         trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.assumes, [x >= one, x <= upper])
+
+    def test_rival_trim_context_drops_bound_implied_by_later_assumption(self):
+        ctx = SpecContext("rival-trim-later-stronger-bound")
+        x = ctx.real("x")
+        zero = ctx.zero()
+        upper = ctx.real_val(15)
+        ctx.assume(x >= zero)
+        ctx.assume(x <= upper)
+        ctx.assume(x > zero)
+
+        trimmed = rival_trim_context(ctx)
+
+        self.assertEqual(trimmed.assumes, [x <= upper, x > zero])
 
     def test_rival_trim_context_keeps_maybe_exprs(self):
         ctx = SpecContext("rival-trim-maybe")
@@ -8331,6 +8393,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(result.dtype, UQ(3, 2))
         self.assertIsInstance(captured["x"], RealExpr)
         self.assertIsInstance(captured["ctx"], SpecContext)
+        source = result.to_cpp("generated_identity")
+        self.assertNotIn("static inline uint8_t uq_ge(", source)
+        self.assertNotIn("static inline uint8_t uq_le(", source)
 
     def test_autogenerate_rejects_non_exact_input_contract(self):
         def spec(x: UQ, ctx) -> UQ:
@@ -8385,6 +8450,36 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             r"result range does not fit UQ<2,0>.*try Q\(3, 0\)",
         ):
             Autogenerate("generated_q_to_uq", spec)
+
+    def test_autogenerate_uses_q_to_uq_only_for_nonnegative_range(self):
+        from zolotone.ast import autogen as ast_autogen
+
+        def nonnegative_spec(x: Q(3, 0), ctx) -> UQ:
+            ctx.assume(x >= ctx.zero())
+            return x
+
+        generated = Autogenerate(
+            "generated_nonnegative_q_to_uq",
+            nonnegative_spec,
+        )
+
+        self.assertEqual(generated.inner_tree.name, "q_to_uq")
+        self.assertEqual(generated.dtype, UQ(2, 0))
+
+        ctx = SpecContext("reject_potentially_negative_q_to_uq")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.real_val(-4))
+        ctx.assume(x <= ctx.real_val(3))
+        with (
+            patch.object(ast_autogen, "MAX_SEARCH_DEPTH", 1),
+            self.assertRaisesRegex(ZolotoneError, "maximum depth"),
+        ):
+            ast_autogen.search_lower_spec_to_impl(
+                x,
+                {x: Var("x", Q(3, 0))},
+                UQ,
+                ctx,
+            )
 
     def test_autogenerate_rejects_unreachable_assumptions(self):
         def spec(x: UQ(2, 0), ctx) -> Bool:
@@ -8453,6 +8548,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         )
 
         source = generated.to_cpp("lowered_contract")
+        self.assertIn(
+            "// assume [(bool(x_0) or bool(y_1))]",
+            source,
+        )
+        self.assertIn(
+            "// check [(bool(x_0) or (not bool(x_0)))]",
+            source,
+        )
         function_start = source.index(
             "static inline uint8_t lowered_contract(uint8_t arg_0, uint8_t arg_1)"
         )
@@ -8879,6 +8982,100 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(widened.name, "_uq_zero_extend")
         self.assertEqual(widened.inner_tree.name, "uq_zero_extend")
 
+    def test_autogenerate_extends_fractional_formats(self):
+        def signed_spec(x: Q(4, 0), ctx) -> Q(4, 2):
+            del ctx
+            return x
+
+        def unsigned_spec(x: UQ(2, 0), ctx) -> UQ(2, 2):
+            del ctx
+            return x
+
+        signed = Autogenerate("generated_signed_fraction_extend", signed_spec)
+        unsigned = Autogenerate(
+            "generated_unsigned_fraction_extend",
+            unsigned_spec,
+        )
+
+        self.assertEqual(signed.dtype, Q(4, 2))
+        self.assertEqual(signed.inner_tree.name, "_q_fraction_extend")
+        self.assertEqual(unsigned.dtype, UQ(2, 2))
+        self.assertEqual(unsigned.inner_tree.name, "_uq_fraction_extend")
+
+    def test_autogenerate_reformats_signed_literal_with_fractional_bits(self):
+        def spec(x: Q(4, 2), ctx) -> Q(7, 2):
+            del x
+            return -ctx.real_val(26)
+
+        with self.assertWarnsRegex(UserWarning, "unused input variables"):
+            generated = Autogenerate(
+                "generated_fractional_literal",
+                spec,
+            )
+
+        self.assertEqual(generated.dtype, Q(7, 2))
+        self.assertEqual(
+            generated.inner_tree.evaluate(),
+            Q(7, 2).from_bits(408),
+        )
+
+    def test_autogenerate_truncates_proven_redundant_msb(self):
+        def signed_spec(x: Q(4, 0), ctx) -> Q(3, 0):
+            ctx.assume(x >= ctx.real_val(-4))
+            ctx.assume(x <= ctx.real_val(3))
+            return x
+
+        def unsigned_spec(x: UQ(4, 0), ctx) -> UQ(3, 0):
+            ctx.assume(x <= ctx.real_val(7))
+            return x
+
+        signed = Autogenerate("generated_signed_msb_truncation", signed_spec)
+        unsigned = Autogenerate(
+            "generated_unsigned_msb_truncation",
+            unsigned_spec,
+        )
+
+        self.assertEqual(signed.dtype, Q(3, 0))
+        self.assertEqual(signed.inner_tree.name, "q_truncate_msb")
+        signed.args[0].load_value(Q(4, 0).from_bits(15))
+        self.assertEqual(signed.evaluate(), Q(3, 0).from_bits(7))
+
+        self.assertEqual(unsigned.dtype, UQ(3, 0))
+        self.assertEqual(unsigned.inner_tree.name, "uq_truncate_msb")
+        unsigned.args[0].load_value(UQ(4, 0).from_bits(7))
+        self.assertEqual(unsigned.evaluate(), UQ(3, 0).from_bits(7))
+
+    def test_msb_truncation_requires_an_integer_bit(self):
+        with self.assertRaisesRegex(ValueError, "removable integer bit"):
+            q_truncate_msb(Var("signed", Q(0, 2)))
+        with self.assertRaisesRegex(ValueError, "removable integer bit"):
+            uq_truncate_msb(Var("unsigned", UQ(0, 2)))
+
+    def test_autogenerate_rejects_unsafe_msb_truncation(self):
+        from zolotone.ast import autogen as ast_autogen
+
+        cases = (
+            (Q(4, 0), Q(3, 0), -8, 7),
+            (UQ(4, 0), UQ(3, 0), 0, 15),
+        )
+        for input_type, output_type, lower, upper in cases:
+            with self.subTest(input_type=input_type, output_type=output_type):
+                ctx = SpecContext("unsafe-msb-truncation")
+                x = ctx.real("x")
+                ctx.assume(x >= ctx.real_val(lower))
+                ctx.assume(x <= ctx.real_val(upper))
+
+                with (
+                    patch.object(ast_autogen, "MAX_SEARCH_DEPTH", 1),
+                    self.assertRaisesRegex(ZolotoneError, "maximum depth"),
+                ):
+                    ast_autogen.search_lower_spec_to_impl(
+                        x,
+                        {x: Var("x", input_type)},
+                        output_type,
+                        ctx,
+                    )
+
     def test_output_optimization_propagates_range_analysis_failure(self):
         def spec(x: UQ(2, 0), ctx) -> UQ(4, 0):
             del ctx
@@ -9171,6 +9368,69 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertEqual(generated.inner_tree.name, "uq_sub")
         self.assertEqual(generated.dtype, UQ(4, 0))
+
+    def test_autogenerate_rejects_unsigned_intermediate_with_negative_range(self):
+        def result_spec(x: UQ(4, 0), ctx) -> Q:
+            return x - ctx.one()
+
+        def assumption_spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
+            ctx.assume((x - ctx.one()) < ctx.real_val(8))
+            return x
+
+        generated_result = Autogenerate("generated_signed_sub", result_spec)
+        generated_assumption = Autogenerate(
+            "generated_signed_assumption",
+            assumption_spec,
+        )
+
+        self.assertEqual(generated_result.inner_tree.name, "q_sub")
+        lowered_assumption = generated_assumption.inner_assumes[-1]
+        self.assertEqual(lowered_assumption.name, "q_lt")
+        self.assertEqual(lowered_assumption.args[0].name, "q_sub")
+        generated_assumption.inner_args[0].load_value(
+            UQ(4, 0).from_bits(0)
+        )
+        self.assertTrue(lowered_assumption.evaluate().to_python())
+
+    def test_autogenerate_rejects_other_overflowing_component_outputs(self):
+        def spec(x: Q(3, 0), ctx) -> Q:
+            return -x
+
+        generated = Autogenerate("generated_widened_negation", spec)
+
+        self.assertEqual(generated.inner_tree.name, "q_neg")
+        self.assertEqual(generated.inner_tree.dtype, Q(4, 0))
+        self.assertEqual(generated.inner_tree.args[0].name, "_q_sign_extend")
+
+    def test_autogenerate_rejects_real_candidate_with_non_numeric_dtype(self):
+        from zolotone.ast.autogen import (
+            _Candidate,
+            _candidate_output_range_fits,
+        )
+
+        ctx = SpecContext("invalid-real-candidate")
+        candidate = _Candidate(
+            node=Const(Bool().from_bits(1)),
+            spec=ctx.one(),
+            depth=0,
+        )
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "Real-valued autogeneration candidate must have a Q or UQ",
+        ):
+            _candidate_output_range_fits(candidate, ctx, {}, {})
+
+    def test_assumption_cannot_justify_its_own_unsigned_intermediate(self):
+        def spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
+            ctx.assume((x - ctx.one()) >= ctx.zero())
+            return x
+
+        generated = Autogenerate("generated_non_circular_assumption", spec)
+
+        lowered_assumption = generated.inner_assumes[-1]
+        self.assertEqual(lowered_assumption.name, "q_ge")
+        self.assertEqual(lowered_assumption.args[0].name, "q_sub")
 
     def test_autogenerate_unsupported_spec_reaches_search_limit(self):
         from zolotone.ast import autogen as ast_autogen

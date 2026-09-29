@@ -129,7 +129,7 @@ class _CppEmitter:
         ):
             condition = self._lower(assumption, env, ctx)
             ctx.statements.append(
-                f"// assume [{self._spec_comment(spec)}]"
+                f"// assume {self._spec_comment(spec)}"
             )
             ctx.statements.append(f"assert({condition.expr});")
 
@@ -148,7 +148,7 @@ class _CppEmitter:
             strict=True,
         ):
             condition = self._lower(check, env, ctx)
-            ctx.statements.append(f"// check [{self._spec_comment(spec)}]")
+            ctx.statements.append(f"// check {self._spec_comment(spec)}")
             ctx.statements.append(f"assert({condition.expr});")
 
         signature = f"static inline {self._signature(name, root.inner_args, root.dtype)}"
