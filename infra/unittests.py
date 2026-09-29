@@ -8549,11 +8549,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         source = generated.to_cpp("lowered_contract")
         self.assertIn(
-            "// assume [(bool(x_0) or bool(y_1))]",
+            "// assume (bool(x_0) or bool(y_1))",
             source,
         )
         self.assertIn(
-            "// check [(bool(x_0) or (not bool(x_0)))]",
+            "// check (bool(x_0) or (not bool(x_0)))",
             source,
         )
         function_start = source.index(
