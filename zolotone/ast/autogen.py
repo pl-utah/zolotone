@@ -1,17 +1,20 @@
 import itertools
+import math
 import typing as tp
 
 from ..errors import MissingError, ZolotoneError
+from ..rival import rival_range_analysis
 from ..spec.spec_ast import (
     BoolLit,
     BoolVar,
+    RealExpr,
     RealLit,
     RealVar,
     SpecNode,
     children,
 )
 from ..spec.spec_context import SpecContext
-from ..types import Bool, Q, UQ
+from ..types import Bool, Q, UQ, Value
 from .node import Node
 from .nodes import (
     Composite,
@@ -22,6 +25,8 @@ from .nodes import (
     _SpecContract,
 )
 from .spec_validation import (
+    _fixed_point_real_bounds,
+    _prove_result_fits,
     _simplify_spec_ast,
     check_spec_feasibility,
     reject_untyped_inputs,
@@ -36,6 +41,33 @@ class _Candidate(tp.NamedTuple):
 
 
 MAX_SEARCH_DEPTH = 30
+
+
+# TODO: this is not too good
+def _exact_fixed_point_value(value: int | float) -> Value[int]:
+    numerator, denominator = value.as_integer_ratio()
+    if denominator & (denominator - 1):
+        raise NotImplementedError(
+            f"Cannot exactly represent {value!r} as fixed point"
+        )
+
+    if denominator == 1:
+        try:
+            return UQ.from_int(numerator)
+        except ValueError:
+            return Q.from_int(numerator)
+
+    frac_bits = denominator.bit_length() - 1
+    if numerator >= 0:
+        total_bits = max(frac_bits, numerator.bit_length())
+        dtype = UQ(total_bits - frac_bits, frac_bits)
+        raw = numerator
+    else:
+        signed_bits = (abs(numerator) - 1).bit_length() + 1
+        total_bits = max(frac_bits, signed_bits)
+        dtype = Q(total_bits - frac_bits, frac_bits)
+        raw = (1 << total_bits) + numerator
+    return dtype.from_bits(raw)
 
 
 def get_spec_ast(
@@ -100,15 +132,60 @@ def _matches_result(
     )
 
 
+def _candidate_output_range_fits(
+    candidate: _Candidate,
+    range_ctx: SpecContext,
+    range_cache: dict[SpecNode, tuple[float, float] | None],
+    fit_cache: dict[tuple[SpecNode, Q | UQ], bool],
+) -> bool:
+    if not isinstance(candidate.spec, RealExpr):
+        return True
+    if not isinstance(candidate.node.dtype, (Q, UQ)):
+        raise NotImplementedError(
+            "Real-valued autogeneration candidate must have a Q or UQ "
+            f"output format, got {candidate.node.dtype!r} from "
+            f"{candidate.node.name!r}"
+        )
+
+    if candidate.spec not in range_cache:
+        range_cache[candidate.spec] = rival_range_analysis(
+            candidate.spec,
+            range_ctx,
+        )
+    output_range = range_cache[candidate.spec]
+    if output_range is not None:
+        lower, upper = output_range
+        dtype_lower, dtype_upper = _fixed_point_real_bounds(candidate.node.dtype)
+        if (
+            math.isfinite(lower)
+            and math.isfinite(upper)
+            and lower >= dtype_lower
+            and upper <= dtype_upper
+        ):
+            return True
+
+    fit_key = (candidate.spec, candidate.node.dtype)
+    if fit_key not in fit_cache:
+        fit_cache[fit_key] = _prove_result_fits(
+            candidate.spec,
+            candidate.node.dtype,
+            range_ctx,
+        )
+    return fit_cache[fit_key]
+
+
 def search_lower_spec_to_impl(
     spec_ast: SpecNode,
     spec_input_nodes: dict[tp.Any, Node],
     return_annotation: object,
+    range_ctx: SpecContext,
 ) -> Node:
     from ..components import LOSSLESS_COMPONENTS
 
     # Lowering leaves first
     subexpressions = _spec_subexpressions(spec_ast)
+    range_cache: dict[SpecNode, tuple[float, float] | None] = {}
+    fit_cache: dict[tuple[SpecNode, Q | UQ], bool] = {}
     candidates = [
         _Candidate(node=node, spec=expr, depth=0)
         for expr, node in spec_input_nodes.items()
@@ -117,24 +194,11 @@ def search_lower_spec_to_impl(
 
     for expr in subexpressions:
         if isinstance(expr, RealLit):
-            try:
-                literal = _Candidate(
-                    node=Const(UQ.from_int(expr.value)),
-                    spec=expr,
-                    depth=0,
-                )
-            # value is negative
-            except ValueError:
-                literal = _Candidate(
-                    node=Const(Q.from_int(expr.value)),
-                    spec=expr,
-                    depth=0,
-                )
-            # it is not an integer
-            except TypeError:
-                raise NotImplementedError(
-                    "Cannot currently lower floats into a fixed point"
-                )
+            literal = _Candidate(
+                node=Const(_exact_fixed_point_value(expr.value)),
+                spec=expr,
+                depth=0,
+            )
             state = (literal.spec, literal.node.dtype)
         elif isinstance(expr, BoolLit):
             literal = _Candidate(
@@ -219,15 +283,21 @@ def search_lower_spec_to_impl(
                     spec=matched_spec,
                     depth=depth,
                 )
+                if not _candidate_output_range_fits(
+                    candidate,
+                    range_ctx,
+                    range_cache,
+                    fit_cache,
+                ):
+                    continue
                 state = (candidate.spec, candidate.node.dtype)
                 if state in states:
                     continue
                 states.add(state)
+                if _matches_result(candidate, spec_ast, return_annotation):
+                    return candidate.node
                 generated.append(candidate)
 
-        for candidate in generated:
-            if _matches_result(candidate, spec_ast, return_annotation):
-                return candidate.node
         if not generated:
             raise ZolotoneError(
                 f"Cannot lower specification {spec_ast!r} to "
@@ -251,6 +321,7 @@ def lower_spec_to_impl(
     contract: _SpecContract,
     spec_ast: SpecNode,
     spec_inputs: tuple[tp.Any, ...],
+    spec_ctx: SpecContext,
 ) -> Node:
     @Composite(name=name, spec=spec)
     def generated_impl(*impl_inputs: Node) -> Node:
@@ -261,6 +332,7 @@ def lower_spec_to_impl(
             spec_ast,
             spec_input_nodes,
             contract.annotations["return"],
+            spec_ctx,
         )
 
     input_parameters = list(contract.signature.parameters.values())[:-1]
@@ -271,7 +343,49 @@ def lower_spec_to_impl(
         )
         for parameter in input_parameters
     ]
-    return generated_impl(*impl_inputs)
+    lowered_composite = generated_impl(*impl_inputs)
+    spec_input_nodes = dict(
+        zip(spec_inputs, lowered_composite.inner_args, strict=True)
+    )
+    lowered_assumes = []
+    prior_assumes = []
+    for assumption in spec_ctx.assumes:
+        range_ctx = spec_ctx.copy(
+            assumes=list(prior_assumes),
+            checks=[],
+        )
+        lowered_assumes.append(
+            (
+                assumption,
+                search_lower_spec_to_impl(
+                    assumption,
+                    spec_input_nodes,
+                    Bool(),
+                    range_ctx,
+                ),
+            )
+        )
+        prior_assumes.append(assumption)
+
+    spec_input_nodes[spec_ast] = lowered_composite.inner_tree
+    lowered_checks = tuple(
+        (
+            check,
+            search_lower_spec_to_impl(
+                check,
+                spec_input_nodes,
+                Bool(),
+                spec_ctx,
+            ),
+        )
+        for check in spec_ctx.checks
+    )
+    lowered_composite.set_impl_conditions(
+        assumes=tuple(lowered_assumes),
+        checks=lowered_checks,
+    )
+
+    return lowered_composite
 
 
 def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
@@ -287,6 +401,11 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     spec_ast, spec_ctx = _simplify_spec_ast(spec_ast, spec_inputs, spec_ctx)
 
     # Step 3. Spec Exploration
-    lowered_composite = lower_spec_to_impl(name, spec, contract, spec_ast, spec_inputs)
-
-    return lowered_composite
+    return lower_spec_to_impl(
+        name,
+        spec,
+        contract,
+        spec_ast,
+        spec_inputs,
+        spec_ctx=spec_ctx,
+    )

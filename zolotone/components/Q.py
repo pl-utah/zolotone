@@ -77,7 +77,7 @@ def q_lt_spec(x: Q, y: Q, ctx) -> Bool:
     return x < y
 
 
-@Primitive(name="q_lt", spec=q_lt_spec)
+@Primitive(name="q_lt", spec=q_lt_spec, c_inline=True)
 def q_lt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
@@ -95,7 +95,7 @@ def q_le_spec(x: Q, y: Q, ctx) -> Bool:
     return x <= y
 
 
-@Primitive(name="q_le", spec=q_le_spec)
+@Primitive(name="q_le", spec=q_le_spec, c_inline=True)
 def q_le(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
@@ -113,7 +113,7 @@ def q_gt_spec(x: Q, y: Q, ctx) -> Bool:
     return x > y
 
 
-@Primitive(name="q_gt", spec=q_gt_spec)
+@Primitive(name="q_gt", spec=q_gt_spec, c_inline=True)
 def q_gt(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
@@ -131,7 +131,7 @@ def q_ge_spec(x: Q, y: Q, ctx) -> Bool:
     return x >= y
 
 
-@Primitive(name="q_ge", spec=q_ge_spec)
+@Primitive(name="q_ge", spec=q_ge_spec, c_inline=True)
 def q_ge(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_mux_2_1(
@@ -149,7 +149,7 @@ def q_eq_spec(x: Q, y: Q, ctx) -> Bool:
     return x.eq(y)
 
 
-@Primitive(name="q_eq", spec=q_eq_spec)
+@Primitive(name="q_eq", spec=q_eq_spec, c_inline=True)
 def q_eq(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_equal(aligned_x, aligned_y, out=Bool())
@@ -159,7 +159,7 @@ def q_ne_spec(x: Q, y: Q, ctx) -> Bool:
     return x.ne(y)
 
 
-@Primitive(name="q_ne", spec=q_ne_spec)
+@Primitive(name="q_ne", spec=q_ne_spec, c_inline=True)
 def q_ne(x: Node, y: Node) -> Node:
     aligned_x, aligned_y = q_aligner(x, y, max, max)
     return basic_not_equal(aligned_x, aligned_y, out=Bool())
@@ -175,7 +175,7 @@ def q_aligner(x: Node,
     def q_aligner_spec(x: Q, y: Q, ctx) -> Tuple(Q, Q):
         return x, y
 
-    @Primitive(name="q_aligner", spec=q_aligner_spec)
+    @Primitive(name="q_aligner", spec=q_aligner_spec, c_inline=True)
     def impl(x: Node, y: Node) -> Node:
         def align(x):
             # Step 1. Align frac bits
@@ -185,9 +185,9 @@ def q_aligner(x: Node,
             if shift > 0:
                 x = basic_lshift(
                     x,
-                    Const(UQ.from_int(shift)), 
+                    Const(UQ.from_int(shift)),
                     Q(x.dtype.int_bits, frac_bits))
-            
+
             # Step 2. Align integer bits
             shift = int_bits - x.dtype.int_bits
             if shift < 0:
@@ -286,6 +286,22 @@ def q_resize(x: Node, int_bits: int, frac_bits: int) -> Node:
         )
     
     return impl(x)
+
+
+def q_truncate_msb_spec(x: Q, ctx) -> Q:
+    return x
+
+
+@Primitive(name="q_truncate_msb", spec=q_truncate_msb_spec)
+def q_truncate_msb(x: Node) -> Node:
+    if x.dtype.int_bits < 1 or x.dtype.total_bits() < 2:
+        raise ValueError(
+            "q_truncate_msb requires a removable integer bit"
+        )
+    return basic_identity(
+        x=x,
+        out=Q(x.dtype.int_bits - 1, x.dtype.frac_bits),
+    )
 
 
 def q_neg_spec(x: Q, ctx) -> Q:

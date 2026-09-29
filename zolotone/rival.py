@@ -607,6 +607,18 @@ def rival_trim_context(
             bool_var_names,
             resolved_max_rects,
         )
+        # The reverse pass also removes earlier facts implied by later,
+        # stronger facts without an all-pairs implication search.
+        rewritten_assumes = list(
+            reversed(
+                _rewrite_assumptions_from_prior_rects(
+                    list(reversed(rewritten_assumes)),
+                    free_vars,
+                    bool_var_names,
+                    resolved_max_rects,
+                )
+            )
+        )
         ctx = ctx.copy(assumes=rewritten_assumes)
         assumption_rects, assumption_contributes_to_rect = (
             _get_rival_rects_and_contributors(
