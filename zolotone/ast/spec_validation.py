@@ -19,7 +19,7 @@ from ..spec.spec_ast import (
     substitute_spec_node,
     variables,
 )
-from ..spec.spec_context import SpecContext, simplify_ctx
+from ..spec.spec_context import SpecContext, normalize_nnf, simplify_ctx
 from ..types import Bool, DataType, Q, UQ
 from .nodes import _SpecContract
 
@@ -187,6 +187,7 @@ def _simplify_spec_ast(
             for check in ctx.checks
         ]
     )
+    result_ctx = normalize_nnf(result_ctx)
     size_after = _spec_simplification_size(simplified_spec_ast, result_ctx)
     reduction = size_before - size_after
     if reduction > 0:

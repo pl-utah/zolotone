@@ -52,7 +52,7 @@ from zolotone.rival import (
     rival_trim_context,
     to_rival_ir,
 )
-from zolotone.spec.spec_context import simplify_ctx
+from zolotone.spec.spec_context import normalize_nnf, simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
 from examples.arithmetic.fp32_add import fp32_add, spec_fp32_add
 from examples.arithmetic.fp32_mult import fp32_mult
@@ -3043,6 +3043,73 @@ class TestSpecContextLearning(unittest.TestCase):
         feasibility.assert_called_once()
         self.assertEqual(feasibility.call_args.kwargs["checks"], False)
         self.assertEqual(report["status"], "unsat")
+
+    def test_normalize_nnf_normalizes_comparison_complements(self):
+        ctx = SpecContext("nnf-comparisons")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        ctx.assume(~x.eq(y))
+        ctx.assume(~x.ne(y))
+        ctx.assume(~(x < y))
+        ctx.assume(~(x <= y))
+        ctx.assume(~(x > y))
+        ctx.assume(~(x >= y))
+
+        simplified = normalize_nnf(simplify_ctx(ctx)["new_ctx"])
+
+        self.assertEqual(
+            simplified.assumes,
+            [x.ne(y), x.eq(y), x >= y, x > y, x <= y, x < y],
+        )
+
+    def test_normalize_nnf_pushes_not_to_boolean_inputs(self):
+        ctx = SpecContext("nnf-compound")
+        a = ctx.real("a")
+        b = ctx.real("b")
+        c = ctx.real("c")
+        p = ctx.bool("p")
+        q = ctx.bool("q")
+        r = ctx.bool("r")
+        ctx.assume(~((a > b) | (b < c)))
+        ctx.check(~p.eq(q & r))
+
+        simplified = normalize_nnf(simplify_ctx(ctx)["new_ctx"])
+        self.assertEqual(simplified.assumes, [(a <= b) & (b >= c)])
+        self.assertEqual(
+            simplified.checks,
+            [(p & ((~q) | (~r))) | ((~p) & (q & r))],
+        )
+
+        def assert_nnf(expr):
+            if isinstance(expr, Not):
+                self.assertIsInstance(expr.value, BoolVar)
+            for child in children(expr):
+                assert_nnf(child)
+
+        for expr in simplified.assumes + simplified.checks:
+            assert_nnf(expr)
+
+    def test_normalize_nnf_preserves_requirements(self):
+        ctx = SpecContext("nnf-requirements")
+        x = ctx.real("x")
+        requirement = ~(x < ctx.real_val(0.5))
+        ctx.assume(requirement)
+        ctx.require(requirement)
+
+        simplified = normalize_nnf(simplify_ctx(ctx)["new_ctx"])
+
+        self.assertEqual(simplified.assumes, [x >= ctx.real_val(0.5)])
+        self.assertEqual(simplified.requirements, [requirement])
+
+    def test_simplify_ctx_retains_literal_and_double_not_folding(self):
+        ctx = SpecContext("nnf-literals")
+        p = ctx.bool("p")
+        ctx.check(~~p)
+        ctx.check(~ctx.false())
+
+        simplified = simplify_ctx(ctx)["new_ctx"]
+
+        self.assertEqual(simplified.checks, [p])
 
 class TestEgglogFloatLiterals(unittest.TestCase):
     def exact_literal_value(self, expr):
@@ -8743,6 +8810,23 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(len(observed_requirements), 1)
         self.assertIsInstance(observed_requirements[0], Gt)
 
+    def test_autogenerate_normalizes_negated_strict_assumption_before_lowering(self):
+        def spec(x: UQ(1, 0), ctx) -> UQ(1, 0):
+            half = ctx.real_val(0.5)
+            ctx.assume(~(x < half))
+            ctx.check(x >= half)
+            return x
+
+        generated = Autogenerate("negated-strict-assumption", spec)
+
+        self.assertTrue(
+            any(
+                isinstance(assumption, Ge)
+                and assumption.rhs == RealLit(0.5)
+                for assumption in generated.spec_assumes
+            )
+        )
+
     def test_autogenerate_keeps_source_case_coverage_without_lattice_gap(self):
         def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
             return Cases(
@@ -8888,6 +8972,25 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(simplified_ctx.checks, [check])
         self.assertEqual(ctx.assumes, [assumption])
         self.assertEqual(ctx.checks, [check])
+
+    def test_simplify_spec_preserves_boolean_conditions_in_result(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-nnf-result")
+        x = ctx.real("x")
+        y = ctx.real("y")
+        p = ctx.bool("p")
+        q = ctx.bool("q")
+
+        simplified_ast, simplified_ctx = _simplify_spec_ast(
+            If(~(p & q), x, y),
+            (x, y),
+            ctx,
+        )
+
+        self.assertEqual(simplified_ast, If(~(p & q), x, y))
+        self.assertEqual(simplified_ctx.assumes, [])
+        self.assertEqual(simplified_ctx.checks, [])
 
     def test_simplify_spec_retargets_checks_without_folding_them(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast

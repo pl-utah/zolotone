@@ -431,6 +431,19 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
     return current
 
 
+def normalize_nnf(ctx: SpecContext) -> SpecContext:
+    """Normalize assumptions and checks without changing context metadata."""
+    from ..egglog.egraph import _needs_nnf, _normalize_nnf
+
+    def normalize(condition: BoolExpr) -> BoolExpr:
+        return _normalize_nnf(condition) if _needs_nnf(condition) else condition
+
+    return ctx.copy(
+        assumes=[normalize(assume) for assume in ctx.assumes],
+        checks=[normalize(check) for check in ctx.checks],
+    )
+
+
 def simplify_ctx(ctx: SpecContext):
     run_started_at = perf_counter()
     

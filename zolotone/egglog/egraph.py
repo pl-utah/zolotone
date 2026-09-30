@@ -9,6 +9,82 @@ from ..solver.report import build_proof_report, merge_rule_application_counts
 ####################### PRIVATE ############################
 
 
+# These wrappers make normalization directional.  They must never be
+# extractable: a remaining wrapper means a normalization rule is missing or
+# did not reach saturation, rather than silently returning a non-NNF term.
+@function(unextractable=True)
+def _nnf(value: MathBool) -> MathBool: ...
+
+
+@function(unextractable=True)
+def _nnf_neg(value: MathBool) -> MathBool: ...
+
+
+def _nnf_ruleset():
+    """Rules for Boolean negation normal form only.
+
+    Keeping this separate from ``load_rules`` is deliberate: associativity,
+    distributivity, and arithmetic rewrites are neither necessary nor safe
+    while pushing Boolean polarity down through an expression.
+    """
+    from .datatypes import Math
+
+    bool_a, bool_b = vars_("nnf_bool_a nnf_bool_b", MathBool)
+    real_a, real_b = vars_("nnf_real_a nnf_real_b", Math)
+    name = var("nnf_name", String)
+
+    return ruleset(
+        # Positive polarity.
+        rewrite(_nnf(MathBool.True_())).to(MathBool.True_()),
+        rewrite(_nnf(MathBool.False_())).to(MathBool.False_()),
+        rewrite(_nnf(MathBool.Var(name))).to(MathBool.Var(name)),
+        rewrite(_nnf(MathBool.Not(bool_a))).to(_nnf_neg(bool_a)),
+        rewrite(_nnf(MathBool.And(bool_a, bool_b))).to(
+            MathBool.And(_nnf(bool_a), _nnf(bool_b))
+        ),
+        rewrite(_nnf(MathBool.Or(bool_a, bool_b))).to(
+            MathBool.Or(_nnf(bool_a), _nnf(bool_b))
+        ),
+        rewrite(_nnf(MathBool.Eq(bool_a, bool_b))).to(
+            MathBool.Eq(_nnf(bool_a), _nnf(bool_b))
+        ),
+        rewrite(_nnf(Math.Eq(real_a, real_b))).to(Math.Eq(real_a, real_b)),
+        rewrite(_nnf(Math.NotEq(real_a, real_b))).to(Math.NotEq(real_a, real_b)),
+        rewrite(_nnf(Math.Lt(real_a, real_b))).to(Math.Lt(real_a, real_b)),
+        rewrite(_nnf(Math.Le(real_a, real_b))).to(Math.Le(real_a, real_b)),
+        rewrite(_nnf(Math.Gt(real_a, real_b))).to(Math.Gt(real_a, real_b)),
+        rewrite(_nnf(Math.Ge(real_a, real_b))).to(Math.Ge(real_a, real_b)),
+        # Negative polarity.
+        rewrite(_nnf_neg(MathBool.True_())).to(MathBool.False_()),
+        rewrite(_nnf_neg(MathBool.False_())).to(MathBool.True_()),
+        rewrite(_nnf_neg(MathBool.Var(name))).to(MathBool.Not(MathBool.Var(name))),
+        rewrite(_nnf_neg(MathBool.Not(bool_a))).to(_nnf(bool_a)),
+        rewrite(_nnf_neg(MathBool.And(bool_a, bool_b))).to(
+            MathBool.Or(_nnf_neg(bool_a), _nnf_neg(bool_b))
+        ),
+        rewrite(_nnf_neg(MathBool.Or(bool_a, bool_b))).to(
+            MathBool.And(_nnf_neg(bool_a), _nnf_neg(bool_b))
+        ),
+        # !(a == b) is Boolean XOR.  Normalize every operand before exposing
+        # it so Not can only survive directly above a BoolVar.
+        rewrite(_nnf_neg(MathBool.Eq(bool_a, bool_b))).to(
+            MathBool.Or(
+                MathBool.And(_nnf(bool_a), _nnf_neg(bool_b)),
+                MathBool.And(_nnf_neg(bool_a), _nnf(bool_b)),
+            )
+        ),
+        rewrite(_nnf_neg(Math.Eq(real_a, real_b))).to(Math.NotEq(real_a, real_b)),
+        rewrite(_nnf_neg(Math.NotEq(real_a, real_b))).to(Math.Eq(real_a, real_b)),
+        rewrite(_nnf_neg(Math.Lt(real_a, real_b))).to(Math.Ge(real_a, real_b)),
+        rewrite(_nnf_neg(Math.Le(real_a, real_b))).to(Math.Gt(real_a, real_b)),
+        rewrite(_nnf_neg(Math.Gt(real_a, real_b))).to(Math.Le(real_a, real_b)),
+        rewrite(_nnf_neg(Math.Ge(real_a, real_b))).to(Math.Lt(real_a, real_b)),
+    )
+
+
+_NNF_RULESET = _nnf_ruleset()
+
+
 def _create_egraph() -> EGraph:
     egraph = EGraph()
     load_rules(egraph, fold_base_two_powers=False)
@@ -54,6 +130,30 @@ def _egglog_check_ctx(ctx: "SpecContext", iterations=6, scheduler=None):
 def _simplify_expr(expr: "SpecNode", egraph: EGraph):
     from ..spec.spec_utils import from_egglog
     return from_egglog(egraph.extract(expr.to_egglog()))
+
+
+def _normalize_nnf(expr: "BoolExpr") -> "BoolExpr":
+    """Return ``expr`` in negation normal form using only NNF rewrites."""
+    from ..spec.spec_utils import from_egglog
+
+    egraph = EGraph()
+    target = _nnf(expr.to_egglog())
+    egraph.register(target)
+    egraph.run(_NNF_RULESET.saturate())
+    # Extraction may spell exact dyadic literals as powers of two.  This is a
+    # representation detail, not part of Boolean normalization; fold those
+    # literal-only subtrees back so downstream fixed-point lowering retains
+    # its usual literal bounds.
+    return from_egglog(egraph.extract(target)).constant_fold()
+
+
+def _needs_nnf(expr: "BoolExpr") -> bool:
+    """Whether an expression contains a Not that violates the NNF invariant."""
+    from ..spec.spec_ast import BoolVar, Not, children
+
+    if isinstance(expr, Not) and not isinstance(expr.value, BoolVar):
+        return True
+    return any(_needs_nnf(child) for child in children(expr))
 
 
 def _egglog_simplify_ctx(ctx: "SpecContext", egraph: EGraph):
