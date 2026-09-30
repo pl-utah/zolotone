@@ -19,7 +19,7 @@ from ..spec.spec_ast import (
     substitute_spec_node,
     variables,
 )
-from ..spec.spec_context import SpecContext, simplify_ctx
+from ..spec.spec_context import SpecContext, normalize_nnf, simplify_ctx
 from ..types import Bool, DataType, Q, UQ
 from .nodes import _SpecContract
 
@@ -187,6 +187,7 @@ def _simplify_spec_ast(
             for check in ctx.checks
         ]
     )
+    result_ctx = normalize_nnf(result_ctx)
     size_after = _spec_simplification_size(simplified_spec_ast, result_ctx)
     reduction = size_before - size_after
     if reduction > 0:
@@ -221,6 +222,8 @@ def _fixed_point_result_fits(
 
 
 def _prove_result_fits(spec_ast, output_type, ctx):
+    if output_type is Bool or isinstance(output_type, Bool):
+        return True
     if output_type is Q:
         return True
     if output_type is UQ:
@@ -291,10 +294,7 @@ def _domain_nodes(location: str, expression: SpecNode):
     yield location, expression
 
 
-def _warn_about_domain_errors(
-    spec_ast: SpecNode,
-    ctx: SpecContext,
-) -> None:
+def _warn_about_domain_errors(spec_ast: SpecNode, ctx: SpecContext) -> None:
     roots: list[tuple[str, SpecNode]] = [
         (f"assumption {index}", assume)
         for index, assume in enumerate(ctx.assumes, start=1)
@@ -338,12 +338,12 @@ def _warn_about_domain_errors(
         )
 
 
-def _derive_output_asserts(
+def _derive_output_guards(
     spec_ast: SpecNode,
     return_annotation: object,
     ctx: SpecContext,
-) -> None:
-    """Add checks derived from the specification's output type and range."""
+) -> tuple[BoolExpr, ...]:
+    """Return runtime guards derived from the specification output."""
     if return_annotation in (Q, UQ) or isinstance(return_annotation, (Q, UQ)):
         if not isinstance(spec_ast, RealExpr):
             raise TypeError(
@@ -360,21 +360,29 @@ def _derive_output_asserts(
                 f"Could not obtain finite output range, got {output_range} "
                 f"for {spec_ast}"
             )
-        ctx.check(
+        return (
             (spec_ast >= ctx.real_val(lower))
-            & (spec_ast <= ctx.real_val(upper))
+            & (spec_ast <= ctx.real_val(upper)),
         )
-        return
 
     if return_annotation is Bool or isinstance(return_annotation, Bool):
-        ctx.check(
-            spec_ast.eq(ctx.true())
-            | spec_ast.eq(ctx.false())
+        return (
+            spec_ast.eq(ctx.true()) | spec_ast.eq(ctx.false()),
         )
-        return None
 
     raise NotImplementedError(
         f"Output assertions are not implemented for {return_annotation!r}"
+    )
+
+
+def _derive_output_asserts(
+    spec_ast: SpecNode,
+    return_annotation: object,
+    ctx: SpecContext,
+) -> None:
+    """Compatibility helper that appends derived guards as context checks."""
+    ctx.checks.extend(
+        _derive_output_guards(spec_ast, return_annotation, ctx)
     )
 
 
@@ -445,8 +453,10 @@ def _output_format_suggestion(
     return_annotation: object,
     ctx: SpecContext,
 ) -> object | None:
-    """Derive a conservative format with Rival, then shrink it by proof."""
+    """Derive a conservative format with Rival, then shrink it by search."""
     # TODO: provide a counterexample
+    if return_annotation is Bool or isinstance(return_annotation, Bool):
+        return return_annotation
     if return_annotation is UQ:
         if not _prove_result_fits(spec_ast, UQ, ctx):
             return Q
@@ -489,54 +499,11 @@ def _format_output_annotation(annotation: object) -> str:
     return repr(annotation)
 
 
-def check_spec_feasibility(
-    spec_ast: SpecNode,
-    spec_inputs: tuple[tp.Any, ...],
-    contract: _SpecContract,
+def _check_output_format(
+    spec_ast: RealExpr,
+    return_annotation: object,
     ctx: SpecContext,
 ) -> None:
-    # Input ranges
-    input_parameters = list(contract.signature.parameters.values())[:-1]
-    input_range_assumes = []
-    for spec_input, parameter in zip(spec_inputs, input_parameters, strict=True):
-        dtype = contract.annotations[parameter.name]
-        if isinstance(dtype, (Q, UQ)):
-            input_range_assumes.append(
-                _fixed_point_result_fits(spec_input, dtype, ctx)
-            )
-    ctx.assumes[:0] = input_range_assumes
-
-    return_annotation = contract.annotations["return"]
-    # Output validation
-    if return_annotation is Bool or isinstance(return_annotation, Bool):
-        if not isinstance(spec_ast, BoolExpr):
-            raise TypeError(
-                f"Specification returning {return_annotation!r} must produce "
-                f"a Boolean expression, got {type(spec_ast).__name__}"
-            )
-        _check_spec_reachability(ctx)
-        _warn_about_domain_errors(spec_ast, ctx)
-        _derive_output_asserts(spec_ast, return_annotation, ctx)
-        _check_spec_obligations(ctx)
-        return
-
-    if not isinstance(spec_ast, RealExpr):
-        raise TypeError(
-            f"Specification returning {return_annotation!r} must produce "
-            f"a real expression, got {type(spec_ast).__name__}"
-        )
-
-    if return_annotation not in (Q, UQ) and not isinstance(return_annotation, (Q, UQ)):
-        raise NotImplementedError(
-            f"Output format {return_annotation!r} is not supported by "
-            "the feasibility check"
-        )
-
-    _check_spec_reachability(ctx)
-    _warn_about_domain_errors(spec_ast, ctx)
-    _derive_output_asserts(spec_ast, return_annotation, ctx)
-    _check_spec_obligations(ctx)
-
     # TODO: counterexample
     if not _prove_result_fits(spec_ast, return_annotation, ctx):
         suggestion = _output_format_suggestion(spec_ast, return_annotation, ctx)
@@ -554,4 +521,47 @@ def check_spec_feasibility(
             UserWarning,
             stacklevel=3,
         )
-    return
+
+
+def _derive_input_ranges(
+    spec_inputs: tuple[tp.Any, ...],
+    contract: _SpecContract,
+    ctx: SpecContext,
+) -> tuple[BoolExpr, ...]:
+    """Return fixed-point input-domain facts"""
+    input_parameters = list(contract.signature.parameters.values())[:-1]
+    input_range_assumes = []
+    for spec_input, parameter in zip(spec_inputs, input_parameters, strict=True):
+        dtype = contract.annotations[parameter.name]
+        if isinstance(dtype, (Q, UQ)):
+            input_range_assumes.append(
+                _fixed_point_result_fits(spec_input, dtype, ctx)
+            )
+    return tuple(input_range_assumes)
+
+
+def _validate_spec_shape(
+    spec_ast: SpecNode,
+    return_annotation: object,
+) -> None:
+    """Validate the specification result category before semantic analysis."""
+    if return_annotation is Bool or isinstance(return_annotation, Bool):
+        if not isinstance(spec_ast, BoolExpr):
+            raise TypeError(
+                f"Specification returning {return_annotation!r} must produce "
+                f"a Boolean expression, got {type(spec_ast).__name__}"
+            )
+        return
+
+    if return_annotation in (Q, UQ) or isinstance(return_annotation, (Q, UQ)):
+        if not isinstance(spec_ast, RealExpr):
+            raise TypeError(
+                f"Specification returning {return_annotation!r} must produce "
+                f"a real expression, got {type(spec_ast).__name__}"
+            )
+        return
+
+    raise NotImplementedError(
+        f"Output format {return_annotation!r} is not supported by "
+        "autogeneration"
+    )
