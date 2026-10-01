@@ -142,8 +142,10 @@ def _simplify_spec_ast(
     spec: Spec,
 ) -> Spec:
     size_before = _spec_simplification_size(spec.spec_ast, spec.spec_ctx)
-    # Checks are not getting simplified
-    probe_ctx = spec.spec_ctx.copy(checks=[])
+    # Normalize assumptions before simplification so complementary comparison
+    # forms can expose redundant constraints. User checks remain outside the
+    # probe so they are preserved rather than discharged.
+    probe_ctx = normalize_nnf(spec.spec_ctx.copy(checks=[]))
     if isinstance(spec.spec_ast, RealExpr):
         marker = probe_ctx.fresh_real("simplified_spec_result")
     elif isinstance(spec.spec_ast, BoolExpr):

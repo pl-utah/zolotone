@@ -9042,6 +9042,61 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(simplified_spec.spec_ctx.checks, [])
         self.assertEqual(ctx.assumes, [x.eq(ctx.two())])
 
+    def test_simplify_spec_normalizes_before_removing_redundant_assumptions(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-normalized-assumptions")
+        x = ctx.real("x")
+        input_lower_bound = x >= ctx.zero()
+        input_upper_bound = x <= ctx.one()
+        stronger_lower_bound = ~(x < ctx.real_val(0.5))
+        user_check = ~(x < ctx.real_val(0.25))
+        ctx.assume(input_lower_bound & input_upper_bound)
+        ctx.assume(stronger_lower_bound)
+        ctx.check(user_check)
+        ctx.require(stronger_lower_bound)
+
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(x, (x,), ctx)
+        )
+
+        self.assertEqual(
+            simplified_spec.spec_ctx.assumes,
+            [input_upper_bound, x >= ctx.real_val(0.5)],
+        )
+        self.assertEqual(
+            simplified_spec.spec_ctx.checks,
+            [x >= ctx.real_val(0.25)],
+        )
+        self.assertEqual(
+            simplified_spec.spec_ctx.requirements,
+            [stronger_lower_bound],
+        )
+        self.assertEqual(
+            ctx.assumes,
+            [input_lower_bound & input_upper_bound, stronger_lower_bound],
+        )
+        self.assertEqual(ctx.checks, [user_check])
+
+    def test_simplify_spec_keeps_result_marker_with_normalized_contradiction(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-normalized-contradiction")
+        x = ctx.real("x")
+        below = x < ctx.real_val(0.5)
+        ctx.assume(below)
+        ctx.assume(~below)
+
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(x, (x,), ctx)
+        )
+
+        self.assertIs(simplified_spec.spec_ast, x)
+        self.assertEqual(
+            simplified_spec.spec_ctx.assumes,
+            [below, x >= ctx.real_val(0.5)],
+        )
+
     def test_simplify_spec_preserves_user_checks(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
 
