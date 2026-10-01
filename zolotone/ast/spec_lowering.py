@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from fractions import Fraction
 import itertools
 import math
 import typing as tp
@@ -13,7 +14,9 @@ from ..spec.spec_ast import (
     BoolExpr,
     BoolLit,
     BoolVar,
+    Ge,
     Gt,
+    Le,
     Lt,
     RealExpr,
     RealLit,
@@ -300,13 +303,55 @@ def search_lower_spec_to_impl(
         depth += 1
 
 
+def _tighten_literal_comparison(
+    comparison: Lt | Le | Gt | Ge,
+    spec_input_nodes: dict[tp.Any, Node],
+) -> Le | Ge | None:
+    """Snap a var–literal bound to the input's fixed-point lattice."""
+    lhs = comparison.lhs.constant_fold()
+    rhs = comparison.rhs.constant_fold()
+    operator = type(comparison)
+    if isinstance(lhs, RealLit):
+        lhs, rhs = rhs, lhs
+        operator = {Lt: Gt, Le: Ge, Gt: Lt, Ge: Le}[operator]
+    input_node = spec_input_nodes.get(lhs)
+    if (
+        not isinstance(lhs, RealVar)
+        or not isinstance(rhs, RealLit)
+        or input_node is None
+        or not isinstance(input_node.dtype, (Q, UQ))
+    ):
+        return None
+
+    scale = 1 << input_node.dtype.frac_bits
+    scaled = Fraction(rhs.value) * scale
+    if operator is Ge:
+        bound = math.ceil(scaled)
+    elif operator is Gt:
+        bound = math.floor(scaled) + 1
+    elif operator is Le:
+        bound = math.floor(scaled)
+    else:
+        bound = math.ceil(scaled) - 1
+
+    exact = Fraction(bound, scale)
+    if exact.denominator == 1:
+        literal = RealLit(exact.numerator)
+    elif Fraction(float(exact)) == exact:
+        literal = RealLit(float(exact))
+    else:
+        # Keep bounds beyond float precision exact as a dyadic expression.
+        literal = RealLit(bound) * (RealLit(2) ** RealLit(-input_node.dtype.frac_bits))
+    return Ge(lhs, literal) if operator in (Gt, Ge) else Le(lhs, literal)
+
+
 def _make_conditions_bit_precise(
     conditions: tp.Iterable[BoolExpr],
     spec_inputs: tuple[tp.Any, ...],
     contract: _SpecContract,
     range_ctx: SpecContext,
 ) -> tuple[BoolExpr, ...]:
-    """Rewrite strict comparisons using formats selected by lowering."""
+    """Tighten var–literal bounds and lower other strict comparisons."""
     input_parameters = list(contract.signature.parameters.values())[:-1]
     spec_input_nodes = dict(
         zip(
@@ -322,15 +367,22 @@ def _make_conditions_bit_precise(
     rewritten_conditions = []
     for condition in conditions:
         pending = [condition]
-        strict_comparisons = []
+        comparisons = []
         while pending:
             node = pending.pop()
             pending.extend(children(node))
-            if isinstance(node, (Lt, Gt)):
-                strict_comparisons.append(node)
+            if isinstance(node, (Lt, Le, Gt, Ge)):
+                comparisons.append(node)
 
         rewritten = condition
-        for comparison in reversed(strict_comparisons):
+        for comparison in reversed(comparisons):
+            precise = _tighten_literal_comparison(comparison, spec_input_nodes)
+            if precise is not None:
+                rewritten = substitute_spec_node(rewritten, comparison, precise)
+                continue
+            if not isinstance(comparison, (Lt, Gt)):
+                continue
+
             lowered = search_lower_spec_to_impl(
                 comparison,
                 spec_input_nodes,
@@ -366,7 +418,7 @@ def _make_conditions_bit_precise(
 def rewrite_strict_conditions(
     spec: Spec,
 ) -> Spec:
-    """Rewrite strict assumptions and checks for fixed-point semantics.
+    """Tighten assumptions and checks for fixed-point semantics.
 
     Assumptions are rewritten in context order so each one is lowered using
     only the preceding precise assumptions. Requirements stay in source form
@@ -378,9 +430,6 @@ def rewrite_strict_conditions(
         checks=[],
         requirements=[],
     )
-    # TODO: This lowering can produce wider types that neccessary.
-    # But only wider integer bits though, fractional bits are as tight as possible
-    # So, this code cannot be used for general lowering, but for computing quantums it is okay
     for assumption in spec.spec_ctx.assumes:
         precise_assumption, = _make_conditions_bit_precise(
             (assumption,),

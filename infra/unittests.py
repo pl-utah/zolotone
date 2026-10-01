@@ -8783,7 +8783,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             _warn_about_domain_errors(current_spec)
 
-    def test_make_conditions_bit_precise_lowers_each_condition(self):
+    def test_literal_comparison_does_not_need_lowering(self):
         from zolotone.ast.autogen import get_spec
         from zolotone.ast.spec_lowering import _make_conditions_bit_precise
         from zolotone.ast.spec_validation import add_input_ranges
@@ -8809,11 +8809,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     current_spec.contract,
                     ctx,
                 ),
-                user_assumptions,
+                (current_spec.spec_inputs[0] >= ctx.one(),),
             )
 
-        lower.assert_called_once()
-        self.assertIs(lower.call_args.args[0], user_assumptions[0])
+        lower.assert_not_called()
 
     def test_lowered_strict_comparison_rewrites_to_inclusive_form(self):
         from zolotone.ast.autogen import get_spec
@@ -8866,11 +8865,151 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         )
 
         x, = spec_inputs
-        half = ctx.real_val(0.5)
         self.assertEqual(
             rewritten,
-            ((x <= ctx.real_val(1.5)) & (ctx.two() >= x + half),),
+            ((x <= ctx.real_val(1.5)) & (x <= ctx.real_val(1.5)),),
         )
+
+    def test_folded_literal_comparisons_tighten_in_both_directions(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import _make_conditions_bit_precise
+
+        def spec(x: UQ(3, 0), ctx) -> UQ(3, 0):
+            half = ctx.real_val(0.25) + ctx.real_val(0.25)
+            ctx.assume(x >= half)
+            ctx.assume(half <= x)
+            return x
+
+        current_spec = get_spec("tight-folded-literal-bound", spec)
+        ctx = current_spec.spec_ctx
+        rewritten = _make_conditions_bit_precise(
+            ctx.assumes,
+            current_spec.spec_inputs,
+            current_spec.contract,
+            ctx,
+        )
+        x, = current_spec.spec_inputs
+        self.assertEqual(rewritten, (x >= ctx.one(), x >= ctx.one()))
+
+    def test_inclusive_relational_comparisons_remain_in_source_form(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import _make_conditions_bit_precise
+        from zolotone.ast.spec_validation import add_input_ranges
+
+        def spec(x: UQ(3, 0), y: UQ(3, 0), ctx) -> UQ(3, 0):
+            half = ctx.real_val(0.5)
+            ctx.assume((x >= y + half) & (x <= y + half))
+            return x
+
+        source_spec = get_spec("tight-relational-bound", spec)
+        user_assumptions = tuple(source_spec.spec_ctx.assumes)
+        current_spec = add_input_ranges(source_spec)
+        with patch("zolotone.ast.spec_lowering.search_lower_spec_to_impl") as lower:
+            rewritten, = _make_conditions_bit_precise(
+                user_assumptions,
+                current_spec.spec_inputs,
+                current_spec.contract,
+                current_spec.spec_ctx,
+            )
+        lower.assert_not_called()
+        x, y = current_spec.spec_inputs
+        ctx = current_spec.spec_ctx
+        half = ctx.real_val(0.5)
+        self.assertEqual(rewritten, (x >= y + half) & (x <= y + half))
+
+    def test_literal_bounds_are_tight_and_equivalent_on_fixed_point_inputs(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import _make_conditions_bit_precise
+
+        formats = (UQ(2, 0), Q(2, 0), UQ(2, 1), Q(2, 1), UQ(2, 3), Q(2, 3))
+        for dtype in formats:
+            def spec(x: dtype, ctx) -> dtype:
+                return x
+
+            current_spec = get_spec("tight-literal-bound", spec)
+            x, = current_spec.spec_inputs
+            scale = 1 << dtype.frac_bits
+            lattice = [raw / scale for raw in range(-32, 33)]
+            values = [
+                dtype.to_python(raw)
+                for raw in range(1 << dtype.total_bits())
+            ]
+            for value in (-2, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 2):
+                for operator in (Lt, Le, Gt, Ge):
+                    for flipped in (False, True):
+                        with self.subTest(
+                            dtype=dtype, value=value, operator=operator, flipped=flipped,
+                        ):
+                            literal = RealLit(value)
+                            original = (
+                                operator(literal, x) if flipped else operator(x, literal)
+                            )
+                            rewritten, = _make_conditions_bit_precise(
+                                (original,),
+                                current_spec.spec_inputs,
+                                current_spec.contract,
+                                current_spec.spec_ctx,
+                            )
+
+                            def accepts(candidate):
+                                args = (value, candidate) if flipped else (candidate, value)
+                                return original.fold()(*args)
+
+                            allowed = [
+                                candidate for candidate in lattice if accepts(candidate)
+                            ]
+                            lower_bound = (operator in (Gt, Ge)) != flipped
+                            expected = min(allowed) if lower_bound else max(allowed)
+                            self.assertEqual(
+                                rewritten,
+                                (Ge if lower_bound else Le)(x, RealLit(expected)),
+                            )
+                            for candidate in values:
+                                self.assertEqual(
+                                    accepts(candidate),
+                                    rewritten.fold()(candidate, rewritten.rhs.value),
+                                )
+
+    def test_literal_bounds_preserve_precision_beyond_float_width(self):
+        from zolotone.ast.spec_lowering import _tighten_literal_comparison
+
+        ctx = SpecContext("exact-literal-bounds")
+        x = ctx.real("x")
+        for dtype, value, expected in (
+            (UQ(55, 0), 2**53, Fraction(2**53 + 1)),
+            (UQ(1, 54), 0.5, Fraction(1, 2) + Fraction(1, 2**54)),
+        ):
+            with self.subTest(dtype=dtype):
+                rewritten = _tighten_literal_comparison(
+                    x > RealLit(value), {x: Var("x", dtype)},
+                )
+                self.assertIsInstance(rewritten, Ge)
+                self.assertEqual(
+                    z3.simplify(rewritten.rhs.to_z3({})).as_fraction(),
+                    expected,
+                )
+
+    def test_strict_literal_comparisons_tighten_to_inclusive_bounds(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import _make_conditions_bit_precise
+        from zolotone.ast.spec_validation import add_input_ranges
+
+        def spec(x: UQ(3, 0), ctx) -> UQ(3, 0):
+            ctx.assume((x > ctx.real_val(0.25)) & (x < ctx.real_val(0.75)))
+            return x
+
+        source_spec = get_spec("tight-strict-literal-bound", spec)
+        user_assumptions = tuple(source_spec.spec_ctx.assumes)
+        current_spec = add_input_ranges(source_spec)
+        rewritten, = _make_conditions_bit_precise(
+            user_assumptions,
+            current_spec.spec_inputs,
+            current_spec.contract,
+            current_spec.spec_ctx,
+        )
+        x, = current_spec.spec_inputs
+        ctx = current_spec.spec_ctx
+        self.assertEqual(rewritten, (x >= ctx.one()) & (x <= ctx.zero()))
 
     def test_autogenerate_rewrites_simplified_assumptions_and_checks(self):
         observed_requirements = []
@@ -8912,9 +9051,48 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertTrue(
             any(
                 isinstance(assumption, Ge)
-                and assumption.rhs == RealLit(0.5)
+                and assumption.rhs == RealLit(1.0)
                 for assumption in generated.spec_assumes
             )
+        )
+
+    def test_inclusive_checks_tighten_without_changing_requirements(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import rewrite_strict_conditions
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            half = ctx.real_val(0.5)
+            ctx.assume(x >= half)
+            ctx.check(x <= half)
+            ctx.require(x >= half)
+            return x
+
+        rewritten = rewrite_strict_conditions(get_spec("tight-inclusive-check", spec))
+        x, = rewritten.spec_inputs
+        ctx = rewritten.spec_ctx
+        self.assertEqual(ctx.assumes, [x >= ctx.one()])
+        self.assertEqual(ctx.checks, [x <= ctx.zero()])
+        self.assertEqual(ctx.requirements, [x >= ctx.real_val(0.5)])
+
+    def test_tightened_inclusive_bound_prevents_reciprocal_domain_warning(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import rewrite_strict_conditions
+        from zolotone.ast.spec_validation import add_input_ranges, _warn_about_domain_errors
+
+        def spec(x: UQ(1, 0), ctx) -> UQ(3, 0):
+            ctx.assume(x >= ctx.real_val(0.5))
+            return (x - ctx.real_val(0.75)) ** ctx.real_val(-1)
+
+        source_spec = add_input_ranges(get_spec("tight-reciprocal-domain", spec))
+        with self.assertWarnsRegex(UserWarning, "domain error"):
+            _warn_about_domain_errors(source_spec)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _warn_about_domain_errors(rewrite_strict_conditions(source_spec))
+
+        self.assertFalse(
+            any("domain error" in str(warning.message) for warning in caught)
         )
 
     def test_autogenerate_keeps_source_case_coverage_without_lattice_gap(self):
