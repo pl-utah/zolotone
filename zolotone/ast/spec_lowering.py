@@ -1,5 +1,8 @@
 """Lower validated specification expressions into implementation nodes."""
 
+from __future__ import annotations
+
+from dataclasses import replace
 import itertools
 import math
 import typing as tp
@@ -30,6 +33,9 @@ from .nodes import (
     _SpecContract,
 )
 from .spec_validation import _fixed_point_real_bounds, _prove_result_fits
+
+if tp.TYPE_CHECKING:
+    from .autogen import Spec
 
 
 class _Candidate(tp.NamedTuple):
@@ -358,10 +364,8 @@ def _make_conditions_bit_precise(
 
 
 def rewrite_strict_conditions(
-    spec_inputs: tuple[tp.Any, ...],
-    contract: _SpecContract,
-    spec_ctx: SpecContext,
-) -> SpecContext:
+    spec: Spec,
+) -> Spec:
     """Rewrite strict assumptions and checks for fixed-point semantics.
 
     Assumptions are rewritten in context order so each one is lowered using
@@ -369,62 +373,58 @@ def rewrite_strict_conditions(
     because Z3's continuous-real model cannot exclude gaps between adjacent
     fixed-point values.
     """
-    condition_ctx = spec_ctx.copy(
+    condition_ctx = spec.spec_ctx.copy(
         assumes=[],
         checks=[],
         requirements=[],
     )
-    # TODO: Global simplification can leave an assumption before a later fact
-    # that would permit a narrower implementation. This ordering is safe, but
-    # may select wider dtypes or fail to lower an otherwise lowerable
-    # assumption. Consider dependency-safe greedy scheduling over the pending
-    # assumptions, using only input ranges and already-established facts.
-    for assumption in spec_ctx.assumes:
+    # TODO: This lowering can produce wider types that neccessary.
+    # But only wider integer bits though, fractional bits are as tight as possible
+    # So, this code cannot be used for general lowering, but for computing quantums it is okay
+    for assumption in spec.spec_ctx.assumes:
         precise_assumption, = _make_conditions_bit_precise(
             (assumption,),
-            spec_inputs,
-            contract,
+            spec.spec_inputs,
+            spec.contract,
             condition_ctx,
         )
         condition_ctx.assumes.append(precise_assumption)
 
     precise_checks = _make_conditions_bit_precise(
-        spec_ctx.checks,
-        spec_inputs,
-        contract,
+        spec.spec_ctx.checks,
+        spec.spec_inputs,
+        spec.contract,
         condition_ctx,
     )
-    return spec_ctx.copy(
-        assumes=list(condition_ctx.assumes),
-        checks=list(precise_checks),
+    return replace(
+        spec,
+        spec_ctx=spec.spec_ctx.copy(
+            assumes=list(condition_ctx.assumes),
+            checks=list(precise_checks),
+        ),
     )
 
 
 def lower_spec_result(
-    name: str,
-    spec: tp.Callable[..., tp.Any],
-    contract: _SpecContract,
-    spec_ast: SpecNode,
-    spec_inputs: tuple[tp.Any, ...],
-    spec_ctx: SpecContext,
+    spec: Spec,
 ) -> Node:
-    @Composite(name=name, spec=spec)
+    @Composite(name=spec.name, spec=spec.function)
     def generated_impl(*impl_inputs: Node) -> Node:
         spec_input_nodes = dict(
-            zip(spec_inputs, impl_inputs, strict=True)
+            zip(spec.spec_inputs, impl_inputs, strict=True)
         )
         return search_lower_spec_to_impl(
-            spec_ast,
+            spec.spec_ast,
             spec_input_nodes,
-            contract.annotations["return"],
-            spec_ctx,
+            spec.return_annotation,
+            spec.spec_ctx,
         )
 
-    input_parameters = list(contract.signature.parameters.values())[:-1]
+    input_parameters = list(spec.contract.signature.parameters.values())[:-1]
     impl_inputs = [
         Var(
             name=parameter.name,
-            dtype=contract.annotations[parameter.name],
+            dtype=spec.annotations[parameter.name],
         )
         for parameter in input_parameters
     ]
@@ -433,18 +433,16 @@ def lower_spec_result(
 
 def attach_lowered_conditions(
     lowered_composite: Node,
-    spec_ast: SpecNode,
-    spec_inputs: tuple[tp.Any, ...],
-    spec_ctx: SpecContext,
+    spec: Spec,
 ) -> None:
     """Lower and attach specification assumptions and runtime checks."""
     spec_input_nodes = dict(
-        zip(spec_inputs, lowered_composite.inner_args, strict=True)
+        zip(spec.spec_inputs, lowered_composite.inner_args, strict=True)
     )
     lowered_assumes = []
     prior_assumes = []
-    for assumption in spec_ctx.assumes:
-        range_ctx = spec_ctx.copy(
+    for assumption in spec.spec_ctx.assumes:
+        range_ctx = spec.spec_ctx.copy(
             assumes=list(prior_assumes),
             checks=[],
         )
@@ -461,7 +459,7 @@ def attach_lowered_conditions(
         )
         prior_assumes.append(assumption)
 
-    spec_input_nodes[spec_ast] = lowered_composite.inner_tree
+    spec_input_nodes[spec.spec_ast] = lowered_composite.inner_tree
     lowered_checks = tuple(
         (
             check,
@@ -469,10 +467,10 @@ def attach_lowered_conditions(
                 check,
                 spec_input_nodes,
                 Bool(),
-                spec_ctx,
+                spec.spec_ctx,
             ),
         )
-        for check in spec_ctx.checks
+        for check in spec.spec_ctx.checks
     )
     lowered_composite.set_impl_conditions(
         assumes=tuple(lowered_assumes),

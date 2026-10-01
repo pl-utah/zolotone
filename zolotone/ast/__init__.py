@@ -1,7 +1,7 @@
 from .helpers import Copy, if_then_else
 from .node import Node
 from ..solver.report import StdoutVerificationObserver
-from .autogen import Autogenerate
+from .autogen import Autogenerate, Spec
 from .nodes import (
     Composite,
     Const,
@@ -14,6 +14,7 @@ from .proofs import context
 __all__ = [
     "Node",
     "Autogenerate",
+    "Spec",
     "Composite",
     "Primitive",
     "Op",
