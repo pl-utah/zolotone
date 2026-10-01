@@ -14,10 +14,12 @@ from ..spec.spec_ast import (
     BoolExpr,
     BoolLit,
     BoolVar,
+    Eq,
     Ge,
     Gt,
     Le,
     Lt,
+    NotEq,
     RealExpr,
     RealLit,
     RealVar,
@@ -304,16 +306,16 @@ def search_lower_spec_to_impl(
 
 
 def _tighten_literal_comparison(
-    comparison: Lt | Le | Gt | Ge,
+    comparison: Lt | Le | Gt | Ge | Eq | NotEq,
     spec_input_nodes: dict[tp.Any, Node],
-) -> Le | Ge | None:
-    """Snap a var–literal bound to the input's fixed-point lattice."""
+) -> BoolExpr | None:
+    """Tighten a var–literal comparison using its representable input values."""
     lhs = comparison.lhs.constant_fold()
     rhs = comparison.rhs.constant_fold()
     operator = type(comparison)
     if isinstance(lhs, RealLit):
         lhs, rhs = rhs, lhs
-        operator = {Lt: Gt, Le: Ge, Gt: Lt, Ge: Le}[operator]
+        operator = {Lt: Gt, Le: Ge, Gt: Lt, Ge: Le, Eq: Eq, NotEq: NotEq}[operator]
     input_node = spec_input_nodes.get(lhs)
     if (
         not isinstance(lhs, RealVar)
@@ -325,6 +327,13 @@ def _tighten_literal_comparison(
 
     scale = 1 << input_node.dtype.frac_bits
     scaled = Fraction(rhs.value) * scale
+    if operator in (Eq, NotEq):
+        signed = isinstance(input_node.dtype, Q)
+        magnitude = 1 << (input_node.dtype.total_bits() - int(signed))
+        minimum = -magnitude if signed else 0
+        if scaled.denominator != 1 or not minimum <= scaled < magnitude:
+            return BoolLit(operator is NotEq)
+        return None
     if operator is Ge:
         bound = math.ceil(scaled)
     elif operator is Gt:
@@ -371,7 +380,7 @@ def _make_conditions_bit_precise(
         while pending:
             node = pending.pop()
             pending.extend(children(node))
-            if isinstance(node, (Lt, Le, Gt, Ge)):
+            if isinstance(node, (Lt, Le, Gt, Ge, Eq, NotEq)):
                 comparisons.append(node)
 
         rewritten = condition
@@ -379,6 +388,8 @@ def _make_conditions_bit_precise(
             precise = _tighten_literal_comparison(comparison, spec_input_nodes)
             if precise is not None:
                 rewritten = substitute_spec_node(rewritten, comparison, precise)
+                if isinstance(precise, BoolLit):
+                    rewritten = rewritten.constant_fold()
                 continue
             if not isinstance(comparison, (Lt, Gt)):
                 continue

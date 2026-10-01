@@ -135,7 +135,8 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 
-    # Step 4: rewrite strict assumptions and checks for fixed-point semantics.
+    # Step 4: tighten comparisons and resolve unrepresentable equalities in
+    # normalized/simplified assumptions and checks for fixed-point semantics.
     current_spec = rewrite_strict_conditions(current_spec)
 
     print(current_spec)

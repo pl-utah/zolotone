@@ -8650,6 +8650,50 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             Autogenerate("generated_unreachable", spec)
 
+    def test_autogenerate_rejects_unrepresentable_equalities_after_simplification(self):
+        conditions = (
+            lambda x, half: x.eq(half),
+            lambda x, half: ~x.ne(half),
+            lambda x, half: half.eq(x),
+            lambda x, half: ~half.ne(x),
+            lambda x, half: ~~x.eq(half),
+        )
+        for kind, message in (
+            ("assume", "unreachable.*no input satisfies"),
+            ("check", "check that does not hold"),
+        ):
+            for index, condition in enumerate(conditions):
+                with self.subTest(kind=kind, condition=index):
+                    def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+                        half = ctx.real_val(0.25) + ctx.real_val(0.25)
+                        getattr(ctx, kind)(condition(x, half))
+                        return x
+
+                    with self.assertRaisesRegex(InfeasibleError, message):
+                        Autogenerate("unrepresentable-equality", spec)
+
+    def test_autogenerate_accepts_tautological_disequalities(self):
+        for kind in ("assume", "check"):
+            for negated in (False, True):
+                with self.subTest(kind=kind, negated=negated):
+                    def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+                        half = ctx.real_val(0.5)
+                        condition = ~x.eq(half) if negated else x.ne(half)
+                        getattr(ctx, kind)(condition)
+                        return x
+
+                    generated = Autogenerate("tautological-disequality", spec)
+                    self.assertEqual(generated.dtype, UQ(2, 0))
+
+    def test_autogenerate_keeps_valid_branch_beside_impossible_equality(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            ctx.assume(x.eq(ctx.real_val(0.5)) | x.eq(ctx.one()))
+            ctx.check(x.eq(ctx.one()))
+            return x
+
+        generated = Autogenerate("partly-unreachable-disjunction", spec)
+        self.assertEqual(generated.dtype, UQ(2, 0))
+
     def test_autogenerate_uses_z3_when_reachability_is_unknown(self):
         def spec(x: UQ(2, 0), y: UQ(2, 0), ctx) -> Bool:
             ctx.assume((x * (y + ctx.one())).ne((x * y) + x))
@@ -8988,6 +9032,32 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     z3.simplify(rewritten.rhs.to_z3({})).as_fraction(),
                     expected,
                 )
+
+    def test_literal_equalities_respect_the_grid_and_format_range(self):
+        from zolotone.ast.spec_lowering import _tighten_literal_comparison
+
+        x = RealVar("x")
+        for dtype in (UQ(2, 0), Q(2, 0), UQ(2, 1), Q(2, 1), Q(0, 2)):
+            representable = {
+                dtype.to_python(raw) for raw in range(1 << dtype.total_bits())
+            }
+            for value in (-3, -2, -0.75, -0.5, 0, 0.25, 0.5, 1, 1.5, 3, 4):
+                for operator in (Eq, NotEq):
+                    for flipped in (False, True):
+                        with self.subTest(
+                            dtype=dtype, value=value, operator=operator, flipped=flipped,
+                        ):
+                            literal = RealLit(value)
+                            comparison = (
+                                operator(literal, x) if flipped else operator(x, literal)
+                            )
+                            rewritten = _tighten_literal_comparison(
+                                comparison, {x: Var("x", dtype)},
+                            )
+                            if value in representable:
+                                self.assertIsNone(rewritten)
+                            else:
+                                self.assertEqual(rewritten, BoolLit(operator is NotEq))
 
     def test_strict_literal_comparisons_tighten_to_inclusive_bounds(self):
         from zolotone.ast.autogen import get_spec
