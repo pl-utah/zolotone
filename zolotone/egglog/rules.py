@@ -140,7 +140,15 @@ def rewrite_rules():
         ("bool_eq_5", ((~bool_var).eq(true)).eq(~bool_var)),
         ("bool_eq_6", ((~bool_var).eq(false)).eq(bool_var)),
         ("bool_eq_7",  ((bool_var & bool_var_q) | ((~bool_var) & (~bool_var_q))).eq(bool_var.eq(bool_var_q))),
-        ("bool_eq_15", (~(bool_var.eq(bool_var_q))).eq((bool_var & ~bool_var_q) | ((~bool_var) & bool_var_q))),
+        ("bool_eq_15", (~(bool_var.eq(bool_var_q))).eq(bool_var.ne(bool_var_q))),
+
+        ("bool_ne_1", (bool_var.ne(true)).eq(~bool_var)),
+        ("bool_ne_2", (true.ne(bool_var)).eq(~bool_var)),
+        ("bool_ne_3", (bool_var.ne(false)).eq(bool_var)),
+        ("bool_ne_4", (false.ne(bool_var)).eq(bool_var)),
+        ("bool_ne_5", (bool_var.ne(bool_var)).eq(false)),
+        ("bool_ne_6", (bool_var.ne(~bool_var)).eq(true)),
+        ("bool_ne_7", ((~bool_var).ne(bool_var)).eq(true)),
         
         ("bool_demorgan_1", (~(bool_var & bool_var_q)).eq((~bool_var) | (~bool_var_q))),
         ("bool_demorgan_2", ((~bool_var) | (~bool_var_q)).eq(~(bool_var & bool_var_q))),
@@ -346,6 +354,7 @@ def _lower_expr(node: SpecNode) -> Expr:
         Add,
         And,
         BoolEq,
+        BoolNe,
         BoolLit,
         BoolVar,
         Eq,
@@ -413,6 +422,8 @@ def _lower_expr(node: SpecNode) -> Expr:
         return MathBool.Not(_lower_expr(node.value))
     if isinstance(node, BoolEq):
         return MathBool.Eq(_lower_expr(node.lhs), _lower_expr(node.rhs))
+    if isinstance(node, BoolNe):
+        return MathBool.NotEq(_lower_expr(node.lhs), _lower_expr(node.rhs))
     if isinstance(node, And):
         return MathBool.And(_lower_expr(node.lhs), _lower_expr(node.rhs))
     if isinstance(node, Or):

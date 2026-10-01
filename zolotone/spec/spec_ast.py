@@ -334,9 +334,8 @@ class BoolExpr(SpecNode):
     def eq(self, other: "BoolExpr") -> "BoolExpr":
         return BoolEq(self, other)
 
-    # this should be BoolNe
     def ne(self, other: "BoolExpr") -> "BoolExpr":
-        return BoolEq(~self, other)
+        return BoolNe(self, other)
     
     def or_(self, other: "BoolExpr") -> "BoolExpr":
         return Or(self, other)
@@ -957,6 +956,36 @@ class BoolEq(BoolExpr):
     def __str__(self):
         return f"({self.lhs} == {self.rhs})"
 
+
+@dataclass(frozen=True)
+class BoolNe(BoolExpr):
+    lhs: BoolExpr
+    rhs: BoolExpr
+
+    def __post_init__(self):
+        BoolExpr._coerce_bool_expr(self.lhs)
+        BoolExpr._coerce_bool_expr(self.rhs)
+
+    def to_egglog(self):
+        return MathBool.NotEq(self.lhs.to_egglog(), self.rhs.to_egglog())
+
+    def to_z3(self, env):
+        return self.lhs.to_z3(env=env) != self.rhs.to_z3(env=env)
+
+    def to_dreal(self, env):
+        lhs = self.lhs.to_dreal(env=env)
+        rhs = self.rhs.to_dreal(env=env)
+        return dreal.Or(
+            dreal.And(lhs, dreal.Not(rhs)),
+            dreal.And(dreal.Not(lhs), rhs),
+        )
+
+    def fold(self):
+        return lambda lhs, rhs: lhs != rhs
+
+    def __str__(self):
+        return f"({self.lhs} != {self.rhs})"
+
     
 @dataclass(frozen=True)
 class Not(BoolExpr):
@@ -1209,6 +1238,22 @@ def _shortcut_fold(
         # False == x -> ~x
         if isinstance(rhs, BoolLit):
             return lhs if rhs.value else Not(lhs)
+        return None
+
+    if isinstance(node, BoolNe):
+        lhs, rhs = folded_args
+        # x != x -> False
+        if identical_nodes(lhs, rhs):
+            return BoolLit(False)
+        # ~x != x -> True
+        if _are_complements(lhs, rhs):
+            return BoolLit(True)
+        # x != True -> ~x; x != False -> x
+        if isinstance(lhs, BoolLit):
+            return Not(rhs) if lhs.value else rhs
+        # True != x -> ~x; False != x -> x
+        if isinstance(rhs, BoolLit):
+            return Not(lhs) if rhs.value else lhs
         return None
 
     if isinstance(node, NotEq):

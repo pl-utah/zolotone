@@ -1789,6 +1789,7 @@ class TestBasicOperators(unittest.TestCase):
 
         self.assertIn(bool_and, LOSSLESS_COMPONENTS)
         self.assertIn(bool_eq, LOSSLESS_COMPONENTS)
+        self.assertIn(bool_ne, LOSSLESS_COMPONENTS)
         self.assertIn(bool_or, LOSSLESS_COMPONENTS)
         self.assertIn(bool_to_uq, LOSSLESS_COMPONENTS)
         self.assertIn(uq_to_bool, LOSSLESS_COMPONENTS)
@@ -3077,7 +3078,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(simplified.assumes, [(a <= b) & (b >= c)])
         self.assertEqual(
             simplified.checks,
-            [(p & ((~q) | (~r))) | ((~p) & (q & r))],
+            [p.ne(q & r)],
         )
 
         def assert_nnf(expr):
@@ -3331,6 +3332,18 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         expr = ((RealLit(2) + RealLit(3)) * RealLit(4)).eq(RealLit(20))
 
         self.assertEqual(expr.constant_fold(), BoolLit(True))
+
+    def test_boolean_inequality_round_trips_and_folds(self):
+        p = BoolVar("p")
+        q = BoolVar("q")
+        inequality = p.ne(q)
+
+        self.assertIsInstance(inequality, BoolNe)
+        self.assertEqual(from_egglog(inequality.to_egglog()), inequality)
+        self.assertEqual(p.ne(BoolLit(True)).constant_fold(), ~p)
+        self.assertEqual(p.ne(BoolLit(False)).constant_fold(), p)
+        self.assertEqual(p.ne(p).constant_fold(), BoolLit(False))
+        self.assertEqual(p.ne(~p).constant_fold(), BoolLit(True))
 
     def test_substitution_bottom_up_fold_matches_recursive_refold(self):
         x = RealVar("x")
@@ -8913,6 +8926,15 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertIsInstance(generated.inner_tree, Var)
         self.assertEqual(generated.dtype, UQ(2, 0))
+
+    def test_autogenerate_lowers_boolean_inequality(self):
+        def bool_inequality_spec(x: Bool(), y: Bool(), ctx) -> Bool:
+            del ctx
+            return x.ne(y)
+
+        generated = Autogenerate("generated_bool_inequality", bool_inequality_spec)
+
+        self.assertEqual(generated.inner_tree.name, "bool_ne")
 
     def test_simplify_spec_uses_assumptions_to_prune_output(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
