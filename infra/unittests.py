@@ -1,6 +1,7 @@
 import unittest
 import contextlib
 import io
+import inspect
 import json
 import os
 import pickle
@@ -105,6 +106,43 @@ from infra.compile_cpp import jit_compile, nonjit_compile
 from infra import docker_run_designs
 from infra import make_designs_html
 from infra import run_designs as design_runner
+
+
+def _spec_state(
+    spec_ast,
+    spec_inputs,
+    spec_ctx,
+    return_annotation=Q,
+):
+    """Build a complete Spec for focused validation unit tests."""
+    input_parameters = [
+        inspect.Parameter(f"input_{index}", inspect.Parameter.POSITIONAL_ONLY)
+        for index, _ in enumerate(spec_inputs)
+    ]
+    signature = inspect.Signature(
+        [
+            *input_parameters,
+            inspect.Parameter("ctx", inspect.Parameter.POSITIONAL_ONLY),
+        ],
+        return_annotation=return_annotation,
+    )
+    annotations = {parameter.name: Q for parameter in input_parameters}
+    annotations["return"] = return_annotation
+    contract = ast_nodes._SpecContract(
+        signature=signature,
+        annotations=annotations,
+        display_name=spec_ctx.name,
+    )
+    return Spec(
+        name=spec_ctx.name,
+        function=lambda *args: None,
+        annotations=contract.annotations,
+        signature=contract.signature,
+        display_name=contract.display_name,
+        spec_ast=spec_ast,
+        spec_inputs=tuple(spec_inputs),
+        spec_ctx=spec_ctx,
+    )
 
 
 def _flat_trace_tool(ctx, timeout_ms):
@@ -1789,6 +1827,7 @@ class TestBasicOperators(unittest.TestCase):
 
         self.assertIn(bool_and, LOSSLESS_COMPONENTS)
         self.assertIn(bool_eq, LOSSLESS_COMPONENTS)
+        self.assertIn(bool_ne, LOSSLESS_COMPONENTS)
         self.assertIn(bool_or, LOSSLESS_COMPONENTS)
         self.assertIn(bool_to_uq, LOSSLESS_COMPONENTS)
         self.assertIn(uq_to_bool, LOSSLESS_COMPONENTS)
@@ -3077,7 +3116,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(simplified.assumes, [(a <= b) & (b >= c)])
         self.assertEqual(
             simplified.checks,
-            [(p & ((~q) | (~r))) | ((~p) & (q & r))],
+            [p.ne(q & r)],
         )
 
         def assert_nnf(expr):
@@ -3331,6 +3370,18 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         expr = ((RealLit(2) + RealLit(3)) * RealLit(4)).eq(RealLit(20))
 
         self.assertEqual(expr.constant_fold(), BoolLit(True))
+
+    def test_boolean_inequality_round_trips_and_folds(self):
+        p = BoolVar("p")
+        q = BoolVar("q")
+        inequality = p.ne(q)
+
+        self.assertIsInstance(inequality, BoolNe)
+        self.assertEqual(from_egglog(inequality.to_egglog()), inequality)
+        self.assertEqual(p.ne(BoolLit(True)).constant_fold(), ~p)
+        self.assertEqual(p.ne(BoolLit(False)).constant_fold(), p)
+        self.assertEqual(p.ne(p).constant_fold(), BoolLit(False))
+        self.assertEqual(p.ne(~p).constant_fold(), BoolLit(True))
 
     def test_substitution_bottom_up_fold_matches_recursive_refold(self):
         x = RealVar("x")
@@ -8464,6 +8515,54 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertNotIn("static inline uint8_t uq_ge(", source)
         self.assertNotIn("static inline uint8_t uq_le(", source)
 
+    def test_autogenerate_resolves_output_family_before_deriving_guards(self):
+        from zolotone.ast import autogen
+
+        for input_dtype, annotation in (
+            (Q(3, 2), Q),
+            (UQ(3, 2), UQ),
+            (Q(3, 2), Q(3, 2)),
+            (UQ(3, 2), UQ(3, 2)),
+        ):
+            with self.subTest(input_dtype=input_dtype, annotation=annotation):
+                def spec(x: input_dtype, ctx) -> annotation:
+                    return x
+
+                with (
+                    patch.object(
+                        autogen, "lower_spec_result", wraps=autogen.lower_spec_result
+                    ) as lower,
+                    patch.object(
+                        autogen, "add_output_guards", wraps=autogen.add_output_guards
+                    ) as guards,
+                    patch.object(
+                        autogen,
+                        "attach_lowered_conditions",
+                        wraps=autogen.attach_lowered_conditions,
+                    ) as attach,
+                ):
+                    result = Autogenerate(name="resolved_identity", spec=spec)
+
+                self.assertEqual(result.dtype, input_dtype)
+                original_spec = lower.call_args.args[0]
+                self.assertIs(original_spec.return_annotation, annotation)
+                self.assertIs(original_spec.signature.return_annotation, annotation)
+                self.assertIs(spec.__annotations__["return"], annotation)
+                for downstream_spec in (
+                    guards.call_args.args[0],
+                    attach.call_args.args[1],
+                ):
+                    self.assertEqual(downstream_spec.return_annotation, result.dtype)
+                    self.assertEqual(
+                        downstream_spec.contract.annotations["return"], result.dtype
+                    )
+                    self.assertEqual(
+                        downstream_spec.contract.signature.return_annotation,
+                        result.dtype,
+                    )
+                    if annotation is not Q and annotation is not UQ:
+                        self.assertIs(downstream_spec.return_annotation, annotation)
+
     def test_autogenerate_rejects_non_exact_input_contract(self):
         def spec(x: UQ, ctx) -> UQ:
             return x
@@ -8474,18 +8573,58 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ):
             Autogenerate(name="generic_identity", spec=spec)
 
-    def test_get_spec_ast_returns_original_input_types(self):
-        from zolotone.ast.autogen import get_spec_ast
+    def test_get_spec_preserves_original_input_types(self):
+        from zolotone.ast.autogen import get_spec
 
         def spec(x: UQ(2, 3), y: Q(4, 1), ctx) -> Q:
             del ctx
             return x + y
 
-        contract = ast_nodes._build_spec_contract("typed_add", spec)
-        spec_ast, spec_inputs, _spec_ctx = get_spec_ast(spec, contract)
+        current_spec = get_spec("typed_add", spec)
 
-        self.assertIsInstance(spec_ast, Add)
-        self.assertEqual(spec_inputs, (spec_ast.lhs, spec_ast.rhs))
+        self.assertIsInstance(current_spec.spec_ast, Add)
+        self.assertEqual(
+            current_spec.spec_inputs,
+            (current_spec.spec_ast.lhs, current_spec.spec_ast.rhs),
+        )
+
+    def test_get_spec_collects_and_formats_elaborated_specification(self):
+        from zolotone.ast.autogen import get_spec
+
+        def spec(x: UQ(2, 0), ctx) -> Q(4, 1):
+            ctx.assume(x >= ctx.one())
+            ctx.check(x <= ctx.real_val(3))
+            ctx.require(x >= ctx.zero())
+            return -x
+
+        current_spec = get_spec("formatted", spec)
+
+        self.assertEqual(current_spec.annotations["x"], UQ(2, 0))
+        self.assertEqual(current_spec.return_annotation, Q(4, 1))
+        self.assertEqual(current_spec.spec_inputs, (current_spec.spec_ast.value,))
+        self.assertIsInstance(current_spec.spec_ctx, SpecContext)
+        self.assertEqual(
+            str(current_spec),
+            "\n".join(
+                [
+                    "Specification 'formatted' "
+                    "(TestSpecificationDTypeContracts."
+                    "test_get_spec_collects_and_formats_elaborated_specification."
+                    "<locals>.spec)",
+                    "  signature: (x: UQ<2,0>) -> Q<4,1>",
+                    "  result: (-real(x_0))",
+                    "",
+                    "  assumes:",
+                    "    (real(x_0) >= 1)",
+                    "",
+                    "  checks:",
+                    "    (real(x_0) <= 3)",
+                    "",
+                    "  requirements:",
+                    "    (real(x_0) >= 0)",
+                ]
+            ),
+        )
 
     def test_autogenerate_searches_through_converters(self):
         def mixed_add_spec(x: UQ(2, 0), y: Q(3, 0), ctx) -> Q:
@@ -8558,6 +8697,50 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             r"generated_unreachable.*unreachable.*no input satisfies",
         ):
             Autogenerate("generated_unreachable", spec)
+
+    def test_autogenerate_rejects_unrepresentable_equalities_after_simplification(self):
+        conditions = (
+            lambda x, half: x.eq(half),
+            lambda x, half: ~x.ne(half),
+            lambda x, half: half.eq(x),
+            lambda x, half: ~half.ne(x),
+            lambda x, half: ~~x.eq(half),
+        )
+        for kind, message in (
+            ("assume", "unreachable.*no input satisfies"),
+            ("check", "check that does not hold"),
+        ):
+            for index, condition in enumerate(conditions):
+                with self.subTest(kind=kind, condition=index):
+                    def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+                        half = ctx.real_val(0.25) + ctx.real_val(0.25)
+                        getattr(ctx, kind)(condition(x, half))
+                        return x
+
+                    with self.assertRaisesRegex(InfeasibleError, message):
+                        Autogenerate("unrepresentable-equality", spec)
+
+    def test_autogenerate_accepts_tautological_disequalities(self):
+        for kind in ("assume", "check"):
+            for negated in (False, True):
+                with self.subTest(kind=kind, negated=negated):
+                    def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+                        half = ctx.real_val(0.5)
+                        condition = ~x.eq(half) if negated else x.ne(half)
+                        getattr(ctx, kind)(condition)
+                        return x
+
+                    generated = Autogenerate("tautological-disequality", spec)
+                    self.assertEqual(generated.dtype, UQ(2, 0))
+
+    def test_autogenerate_keeps_valid_branch_beside_impossible_equality(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            ctx.assume(x.eq(ctx.real_val(0.5)) | x.eq(ctx.one()))
+            ctx.check(x.eq(ctx.one()))
+            return x
+
+        generated = Autogenerate("partly-unreachable-disjunction", spec)
+        self.assertEqual(generated.dtype, UQ(2, 0))
 
     def test_autogenerate_uses_z3_when_reachability_is_unknown(self):
         def spec(x: UQ(2, 0), y: UQ(2, 0), ctx) -> Bool:
@@ -8648,8 +8831,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             r"Specification 'domain-result'.*result: \(real\(x\) \*\* -1\)",
         ):
             _warn_about_domain_errors(
-                reciprocal + ctx.one(),
-                ctx,
+                _spec_state(reciprocal + ctx.one(), (x,), ctx)
             )
 
     def test_domain_warning_prunes_parent_error_expressions(self):
@@ -8666,7 +8848,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            _warn_about_domain_errors(result, ctx)
+            _warn_about_domain_errors(_spec_state(result, (x, y), ctx))
 
         messages = [str(warning.message) for warning in caught]
         self.assertEqual(len(messages), 2)
@@ -8676,38 +8858,36 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertNotIn(str(result), "\n".join(messages))
 
     def test_spec_validation_runs_domain_error_check(self):
-        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.autogen import get_spec
         from zolotone.ast.spec_validation import (
-            _derive_input_ranges,
+            add_input_ranges,
             _warn_about_domain_errors,
         )
 
         def spec(x: UQ(2, 0), ctx) -> Bool:
             return (x ** ctx.real_val(-1)) > ctx.zero()
 
-        contract = ast_nodes._build_spec_contract("domain-pipeline", spec)
-        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
-        ctx.assumes[:0] = _derive_input_ranges(spec_inputs, contract, ctx)
+        current_spec = add_input_ranges(get_spec("domain-pipeline", spec))
 
         with self.assertWarnsRegex(
             UserWarning,
             r"Specification .*domain-pipeline.*result: .*\*\* -1",
         ):
-            _warn_about_domain_errors(spec_ast, ctx)
+            _warn_about_domain_errors(current_spec)
 
-    def test_make_conditions_bit_precise_lowers_each_condition(self):
-        from zolotone.ast.autogen import get_spec_ast
+    def test_literal_comparison_does_not_need_lowering(self):
+        from zolotone.ast.autogen import get_spec
         from zolotone.ast.spec_lowering import _make_conditions_bit_precise
-        from zolotone.ast.spec_validation import _derive_input_ranges
+        from zolotone.ast.spec_validation import add_input_ranges
 
         def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
             ctx.assume(x > ctx.zero())
             return x
 
-        contract = ast_nodes._build_spec_contract("lower-assumptions", spec)
-        _spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
-        user_assumptions = tuple(ctx.assumes)
-        ctx.assumes[:0] = _derive_input_ranges(spec_inputs, contract, ctx)
+        current_spec = get_spec("lower-assumptions", spec)
+        user_assumptions = tuple(current_spec.spec_ctx.assumes)
+        current_spec = add_input_ranges(current_spec)
+        ctx = current_spec.spec_ctx
 
         self.assertEqual(len(ctx.assumes), 2)
 
@@ -8717,18 +8897,17 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             self.assertEqual(
                 _make_conditions_bit_precise(
                     user_assumptions,
-                    spec_inputs,
-                    contract,
+                    current_spec.spec_inputs,
+                    current_spec.contract,
                     ctx,
                 ),
-                user_assumptions,
+                (current_spec.spec_inputs[0] >= ctx.one(),),
             )
 
-        lower.assert_called_once()
-        self.assertIs(lower.call_args.args[0], user_assumptions[0])
+        lower.assert_not_called()
 
     def test_lowered_strict_comparison_rewrites_to_inclusive_form(self):
-        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.autogen import get_spec
         from zolotone.ast.spec_lowering import _make_conditions_bit_precise
 
         def spec(
@@ -8740,14 +8919,15 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             ctx.assume((x > y) & (x < z))
             return x
 
-        contract = ast_nodes._build_spec_contract("rewrite-strict-comparison", spec)
-        _spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+        current_spec = get_spec("rewrite-strict-comparison", spec)
+        spec_inputs = current_spec.spec_inputs
+        ctx = current_spec.spec_ctx
         user_assumptions = tuple(ctx.assumes)
 
         rewritten = _make_conditions_bit_precise(
             user_assumptions,
             spec_inputs,
-            contract,
+            current_spec.contract,
             ctx,
         )
 
@@ -8758,29 +8938,196 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         )
 
     def test_strict_comparison_uses_finest_operand_quantum(self):
-        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.autogen import get_spec
         from zolotone.ast.spec_lowering import _make_conditions_bit_precise
 
         def spec(x: UQ(2, 1), ctx) -> UQ(2, 1):
             ctx.assume((x < ctx.two()) & (ctx.two() > x))
             return x
 
-        contract = ast_nodes._build_spec_contract("rewrite-aligned-comparison", spec)
-        _spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+        current_spec = get_spec("rewrite-aligned-comparison", spec)
+        spec_inputs = current_spec.spec_inputs
+        ctx = current_spec.spec_ctx
 
         rewritten = _make_conditions_bit_precise(
             tuple(ctx.assumes),
             spec_inputs,
-            contract,
+            current_spec.contract,
             ctx,
         )
 
         x, = spec_inputs
-        half = ctx.real_val(0.5)
         self.assertEqual(
             rewritten,
-            ((x <= ctx.real_val(1.5)) & (ctx.two() >= x + half),),
+            ((x <= ctx.real_val(1.5)) & (x <= ctx.real_val(1.5)),),
         )
+
+    def test_folded_literal_comparisons_tighten_in_both_directions(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import _make_conditions_bit_precise
+
+        def spec(x: UQ(3, 0), ctx) -> UQ(3, 0):
+            half = ctx.real_val(0.25) + ctx.real_val(0.25)
+            ctx.assume(x >= half)
+            ctx.assume(half <= x)
+            return x
+
+        current_spec = get_spec("tight-folded-literal-bound", spec)
+        ctx = current_spec.spec_ctx
+        rewritten = _make_conditions_bit_precise(
+            ctx.assumes,
+            current_spec.spec_inputs,
+            current_spec.contract,
+            ctx,
+        )
+        x, = current_spec.spec_inputs
+        self.assertEqual(rewritten, (x >= ctx.one(), x >= ctx.one()))
+
+    def test_inclusive_relational_comparisons_remain_in_source_form(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import _make_conditions_bit_precise
+        from zolotone.ast.spec_validation import add_input_ranges
+
+        def spec(x: UQ(3, 0), y: UQ(3, 0), ctx) -> UQ(3, 0):
+            half = ctx.real_val(0.5)
+            ctx.assume((x >= y + half) & (x <= y + half))
+            return x
+
+        source_spec = get_spec("tight-relational-bound", spec)
+        user_assumptions = tuple(source_spec.spec_ctx.assumes)
+        current_spec = add_input_ranges(source_spec)
+        with patch("zolotone.ast.spec_lowering.search_lower_spec_to_impl") as lower:
+            rewritten, = _make_conditions_bit_precise(
+                user_assumptions,
+                current_spec.spec_inputs,
+                current_spec.contract,
+                current_spec.spec_ctx,
+            )
+        lower.assert_not_called()
+        x, y = current_spec.spec_inputs
+        ctx = current_spec.spec_ctx
+        half = ctx.real_val(0.5)
+        self.assertEqual(rewritten, (x >= y + half) & (x <= y + half))
+
+    def test_literal_bounds_are_tight_and_equivalent_on_fixed_point_inputs(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import _make_conditions_bit_precise
+
+        formats = (UQ(2, 0), Q(2, 0), UQ(2, 1), Q(2, 1), UQ(2, 3), Q(2, 3))
+        for dtype in formats:
+            def spec(x: dtype, ctx) -> dtype:
+                return x
+
+            current_spec = get_spec("tight-literal-bound", spec)
+            x, = current_spec.spec_inputs
+            scale = 1 << dtype.frac_bits
+            lattice = [raw / scale for raw in range(-32, 33)]
+            values = [
+                dtype.to_python(raw)
+                for raw in range(1 << dtype.total_bits())
+            ]
+            for value in (-2, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 2):
+                for operator in (Lt, Le, Gt, Ge):
+                    for flipped in (False, True):
+                        with self.subTest(
+                            dtype=dtype, value=value, operator=operator, flipped=flipped,
+                        ):
+                            literal = RealLit(value)
+                            original = (
+                                operator(literal, x) if flipped else operator(x, literal)
+                            )
+                            rewritten, = _make_conditions_bit_precise(
+                                (original,),
+                                current_spec.spec_inputs,
+                                current_spec.contract,
+                                current_spec.spec_ctx,
+                            )
+
+                            def accepts(candidate):
+                                args = (value, candidate) if flipped else (candidate, value)
+                                return original.fold()(*args)
+
+                            allowed = [
+                                candidate for candidate in lattice if accepts(candidate)
+                            ]
+                            lower_bound = (operator in (Gt, Ge)) != flipped
+                            expected = min(allowed) if lower_bound else max(allowed)
+                            self.assertEqual(
+                                rewritten,
+                                (Ge if lower_bound else Le)(x, RealLit(expected)),
+                            )
+                            for candidate in values:
+                                self.assertEqual(
+                                    accepts(candidate),
+                                    rewritten.fold()(candidate, rewritten.rhs.value),
+                                )
+
+    def test_literal_bounds_preserve_precision_beyond_float_width(self):
+        from zolotone.ast.spec_lowering import _tighten_literal_comparison
+
+        ctx = SpecContext("exact-literal-bounds")
+        x = ctx.real("x")
+        for dtype, value, expected in (
+            (UQ(55, 0), 2**53, Fraction(2**53 + 1)),
+            (UQ(1, 54), 0.5, Fraction(1, 2) + Fraction(1, 2**54)),
+        ):
+            with self.subTest(dtype=dtype):
+                rewritten = _tighten_literal_comparison(
+                    x > RealLit(value), {x: Var("x", dtype)},
+                )
+                self.assertIsInstance(rewritten, Ge)
+                self.assertEqual(
+                    z3.simplify(rewritten.rhs.to_z3({})).as_fraction(),
+                    expected,
+                )
+
+    def test_literal_equalities_respect_the_grid_and_format_range(self):
+        from zolotone.ast.spec_lowering import _tighten_literal_comparison
+
+        x = RealVar("x")
+        for dtype in (UQ(2, 0), Q(2, 0), UQ(2, 1), Q(2, 1), Q(0, 2)):
+            representable = {
+                dtype.to_python(raw) for raw in range(1 << dtype.total_bits())
+            }
+            for value in (-3, -2, -0.75, -0.5, 0, 0.25, 0.5, 1, 1.5, 3, 4):
+                for operator in (Eq, NotEq):
+                    for flipped in (False, True):
+                        with self.subTest(
+                            dtype=dtype, value=value, operator=operator, flipped=flipped,
+                        ):
+                            literal = RealLit(value)
+                            comparison = (
+                                operator(literal, x) if flipped else operator(x, literal)
+                            )
+                            rewritten = _tighten_literal_comparison(
+                                comparison, {x: Var("x", dtype)},
+                            )
+                            if value in representable:
+                                self.assertIsNone(rewritten)
+                            else:
+                                self.assertEqual(rewritten, BoolLit(operator is NotEq))
+
+    def test_strict_literal_comparisons_tighten_to_inclusive_bounds(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import _make_conditions_bit_precise
+        from zolotone.ast.spec_validation import add_input_ranges
+
+        def spec(x: UQ(3, 0), ctx) -> UQ(3, 0):
+            ctx.assume((x > ctx.real_val(0.25)) & (x < ctx.real_val(0.75)))
+            return x
+
+        source_spec = get_spec("tight-strict-literal-bound", spec)
+        user_assumptions = tuple(source_spec.spec_ctx.assumes)
+        current_spec = add_input_ranges(source_spec)
+        rewritten, = _make_conditions_bit_precise(
+            user_assumptions,
+            current_spec.spec_inputs,
+            current_spec.contract,
+            current_spec.spec_ctx,
+        )
+        x, = current_spec.spec_inputs
+        ctx = current_spec.spec_ctx
+        self.assertEqual(rewritten, (x >= ctx.one()) & (x <= ctx.zero()))
 
     def test_autogenerate_rewrites_simplified_assumptions_and_checks(self):
         observed_requirements = []
@@ -8822,9 +9169,48 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertTrue(
             any(
                 isinstance(assumption, Ge)
-                and assumption.rhs == RealLit(0.5)
+                and assumption.rhs == RealLit(1.0)
                 for assumption in generated.spec_assumes
             )
+        )
+
+    def test_inclusive_checks_tighten_without_changing_requirements(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import rewrite_strict_conditions
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            half = ctx.real_val(0.5)
+            ctx.assume(x >= half)
+            ctx.check(x <= half)
+            ctx.require(x >= half)
+            return x
+
+        rewritten = rewrite_strict_conditions(get_spec("tight-inclusive-check", spec))
+        x, = rewritten.spec_inputs
+        ctx = rewritten.spec_ctx
+        self.assertEqual(ctx.assumes, [x >= ctx.one()])
+        self.assertEqual(ctx.checks, [x <= ctx.zero()])
+        self.assertEqual(ctx.requirements, [x >= ctx.real_val(0.5)])
+
+    def test_tightened_inclusive_bound_prevents_reciprocal_domain_warning(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.ast.spec_lowering import rewrite_strict_conditions
+        from zolotone.ast.spec_validation import add_input_ranges, _warn_about_domain_errors
+
+        def spec(x: UQ(1, 0), ctx) -> UQ(3, 0):
+            ctx.assume(x >= ctx.real_val(0.5))
+            return (x - ctx.real_val(0.75)) ** ctx.real_val(-1)
+
+        source_spec = add_input_ranges(get_spec("tight-reciprocal-domain", spec))
+        with self.assertWarnsRegex(UserWarning, "domain error"):
+            _warn_about_domain_errors(source_spec)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _warn_about_domain_errors(rewrite_strict_conditions(source_spec))
+
+        self.assertFalse(
+            any("domain error" in str(warning.message) for warning in caught)
         )
 
     def test_autogenerate_keeps_source_case_coverage_without_lattice_gap(self):
@@ -8851,16 +9237,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             r"assumption 1: .*\*\* -1.*x in \[-inf, inf\]",
         ):
             _warn_about_domain_errors(
-                ctx.one(),
-                ctx,
+                _spec_state(ctx.one(), (x,), ctx)
             )
 
         ctx.assume(x >= ctx.one())
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             _warn_about_domain_errors(
-                ctx.one(),
-                ctx,
+                _spec_state(ctx.one(), (x,), ctx)
             )
         self.assertEqual(caught, [])
 
@@ -8879,8 +9263,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
                 with self.assertWarnsRegex(UserWarning, expected_location):
                     _warn_about_domain_errors(
-                        ctx.one(),
-                        ctx,
+                        _spec_state(ctx.one(), (x,), ctx)
                     )
 
     def test_domain_warning_evaluates_each_if_branch_node(self):
@@ -8900,8 +9283,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             r"result: \(real\(x\) \*\* -1\); ranges: x in \[0\.0, 0\.0\]",
         ):
             _warn_about_domain_errors(
-                result,
-                ctx,
+                _spec_state(result, (x,), ctx)
             )
 
     def test_autogenerate_prefers_depth_zero_identity(self):
@@ -8913,6 +9295,15 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertIsInstance(generated.inner_tree, Var)
         self.assertEqual(generated.dtype, UQ(2, 0))
+
+    def test_autogenerate_lowers_boolean_inequality(self):
+        def bool_inequality_spec(x: Bool(), y: Bool(), ctx) -> Bool:
+            del ctx
+            return x.ne(y)
+
+        generated = Autogenerate("generated_bool_inequality", bool_inequality_spec)
+
+        self.assertEqual(generated.inner_tree.name, "bool_ne")
 
     def test_simplify_spec_uses_assumptions_to_prune_output(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
@@ -8926,12 +9317,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             x ** ctx.two(),
         )
 
-        simplified_ast, _simplified_ctx = _simplify_spec_ast(
-            spec_ast,
-            (x,),
-            ctx,
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(spec_ast, (x,), ctx)
         )
-        self.assertEqual(simplified_ast, x)
+        self.assertEqual(simplified_spec.spec_ast, x)
 
     def test_simplify_spec_returns_simplified_assumptions(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
@@ -8940,16 +9329,69 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         x = ctx.real("x")
         ctx.assume(x.eq(ctx.two()))
 
-        simplified_ast, simplified_ctx = _simplify_spec_ast(
-            x + ctx.one(),
-            (x,),
-            ctx,
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(x + ctx.one(), (x,), ctx)
         )
 
-        self.assertEqual(simplified_ast, RealLit(3))
-        self.assertEqual(simplified_ctx.assumes, [x.eq(ctx.two())])
-        self.assertEqual(simplified_ctx.checks, [])
+        self.assertEqual(simplified_spec.spec_ast, RealLit(3))
+        self.assertEqual(simplified_spec.spec_ctx.assumes, [x.eq(ctx.two())])
+        self.assertEqual(simplified_spec.spec_ctx.checks, [])
         self.assertEqual(ctx.assumes, [x.eq(ctx.two())])
+
+    def test_simplify_spec_normalizes_before_removing_redundant_assumptions(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-normalized-assumptions")
+        x = ctx.real("x")
+        input_lower_bound = x >= ctx.zero()
+        input_upper_bound = x <= ctx.one()
+        stronger_lower_bound = ~(x < ctx.real_val(0.5))
+        user_check = ~(x < ctx.real_val(0.25))
+        ctx.assume(input_lower_bound & input_upper_bound)
+        ctx.assume(stronger_lower_bound)
+        ctx.check(user_check)
+        ctx.require(stronger_lower_bound)
+
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(x, (x,), ctx)
+        )
+
+        self.assertEqual(
+            simplified_spec.spec_ctx.assumes,
+            [input_upper_bound, x >= ctx.real_val(0.5)],
+        )
+        self.assertEqual(
+            simplified_spec.spec_ctx.checks,
+            [x >= ctx.real_val(0.25)],
+        )
+        self.assertEqual(
+            simplified_spec.spec_ctx.requirements,
+            [stronger_lower_bound],
+        )
+        self.assertEqual(
+            ctx.assumes,
+            [input_lower_bound & input_upper_bound, stronger_lower_bound],
+        )
+        self.assertEqual(ctx.checks, [user_check])
+
+    def test_simplify_spec_keeps_result_marker_with_normalized_contradiction(self):
+        from zolotone.ast.spec_validation import _simplify_spec_ast
+
+        ctx = SpecContext("simplify-spec-normalized-contradiction")
+        x = ctx.real("x")
+        below = x < ctx.real_val(0.5)
+        ctx.assume(below)
+        ctx.assume(~below)
+
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(x, (x,), ctx)
+        )
+
+        self.assertIs(simplified_spec.spec_ast, x)
+        self.assertEqual(
+            simplified_spec.spec_ctx.assumes,
+            [below, x >= ctx.real_val(0.5)],
+        )
 
     def test_simplify_spec_preserves_user_checks(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
@@ -8961,15 +9403,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ctx.assume(assumption)
         ctx.check(check)
 
-        simplified_ast, simplified_ctx = _simplify_spec_ast(
-            x + ctx.zero(),
-            (x,),
-            ctx,
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(x + ctx.zero(), (x,), ctx)
         )
 
-        self.assertEqual(simplified_ast, RealLit(1))
-        self.assertEqual(simplified_ctx.assumes, [assumption])
-        self.assertEqual(simplified_ctx.checks, [check])
+        self.assertEqual(simplified_spec.spec_ast, RealLit(1))
+        self.assertEqual(simplified_spec.spec_ctx.assumes, [assumption])
+        self.assertEqual(simplified_spec.spec_ctx.checks, [check])
         self.assertEqual(ctx.assumes, [assumption])
         self.assertEqual(ctx.checks, [check])
 
@@ -8982,15 +9422,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         p = ctx.bool("p")
         q = ctx.bool("q")
 
-        simplified_ast, simplified_ctx = _simplify_spec_ast(
-            If(~(p & q), x, y),
-            (x, y),
-            ctx,
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(If(~(p & q), x, y), (x, y), ctx)
         )
 
-        self.assertEqual(simplified_ast, If(~(p & q), x, y))
-        self.assertEqual(simplified_ctx.assumes, [])
-        self.assertEqual(simplified_ctx.checks, [])
+        self.assertEqual(simplified_spec.spec_ast, If(~(p & q), x, y))
+        self.assertEqual(simplified_spec.spec_ctx.assumes, [])
+        self.assertEqual(simplified_spec.spec_ctx.checks, [])
 
     def test_simplify_spec_retargets_checks_without_folding_them(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
@@ -9001,15 +9439,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         literal = ctx.real_val(1.5)
         ctx.check(spec_ast.eq(literal))
 
-        simplified_ast, simplified_ctx = _simplify_spec_ast(
-            spec_ast,
-            (x,),
-            ctx,
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(spec_ast, (x,), ctx)
         )
 
-        self.assertIs(simplified_ast, x)
-        self.assertEqual(simplified_ctx.checks, [x.eq(literal)])
-        self.assertIs(simplified_ctx.checks[0].rhs, literal)
+        self.assertIs(simplified_spec.spec_ast, x)
+        self.assertEqual(simplified_spec.spec_ctx.checks, [x.eq(literal)])
+        self.assertIs(simplified_spec.spec_ctx.checks[0].rhs, literal)
 
     def test_simplify_spec_warns_about_node_count_reduction(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
@@ -9022,15 +9458,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             r"Specification simplify-spec-size simplification "
             r"reduced node count by 2: 3 -> 1",
         ):
-            simplified_ast, simplified_ctx = _simplify_spec_ast(
-                x + ctx.zero(),
-                (x,),
-                ctx,
+            simplified_spec = _simplify_spec_ast(
+                _spec_state(x + ctx.zero(), (x,), ctx)
             )
 
-        self.assertEqual(simplified_ast, x)
-        self.assertEqual(simplified_ctx.assumes, [])
-        self.assertEqual(simplified_ctx.checks, [])
+        self.assertEqual(simplified_spec.spec_ast, x)
+        self.assertEqual(simplified_spec.spec_ctx.assumes, [])
+        self.assertEqual(simplified_spec.spec_ctx.checks, [])
 
     def test_simplify_spec_does_not_warn_when_node_count_is_unchanged(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
@@ -9040,16 +9474,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            simplified_ast, simplified_ctx = _simplify_spec_ast(
-                x,
-                (x,),
-                ctx,
+            simplified_spec = _simplify_spec_ast(
+                _spec_state(x, (x,), ctx)
             )
 
         self.assertEqual(caught, [])
-        self.assertEqual(simplified_ast, x)
-        self.assertEqual(simplified_ctx.assumes, [])
-        self.assertEqual(simplified_ctx.checks, [])
+        self.assertEqual(simplified_spec.spec_ast, x)
+        self.assertEqual(simplified_spec.spec_ctx.assumes, [])
+        self.assertEqual(simplified_spec.spec_ctx.checks, [])
 
     def test_reject_undeclared_variables_checks_assumptions(self):
         from zolotone.ast.spec_validation import reject_undeclared_variables
@@ -9063,7 +9495,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             MissingError,
             "Undeclared variables.*internal",
         ):
-            reject_undeclared_variables(x, (x,), ctx)
+            reject_undeclared_variables(_spec_state(x, (x,), ctx))
 
     def test_reject_undeclared_variables_finds_variables_in_checks(self):
         from zolotone.ast.spec_validation import reject_undeclared_variables
@@ -9077,7 +9509,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             MissingError,
             "Undeclared variables.*internal",
         ):
-            reject_undeclared_variables(x, (x,), ctx)
+            reject_undeclared_variables(_spec_state(x, (x,), ctx))
 
     def test_autogenerate_rejects_undeclared_assumption_variables(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
@@ -9098,12 +9530,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         x = ctx.real("x")
         y = ctx.real("y")
 
-        reject_undeclared_variables(x + ctx.one(), (x,), ctx)
+        reject_undeclared_variables(
+            _spec_state(x + ctx.one(), (x,), ctx)
+        )
         with self.assertRaisesRegex(
             MissingError,
             "Undeclared variables.*real\\(y\\)",
         ):
-            reject_undeclared_variables(x + y, (x,), ctx)
+            reject_undeclared_variables(_spec_state(x + y, (x,), ctx))
 
     def test_reject_undeclared_variables_warns_about_unused_inputs(self):
         from zolotone.ast.spec_validation import reject_undeclared_variables
@@ -9116,7 +9550,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             UserWarning,
             "Specification 'unused-input-warning'.*real\\(unused\\)",
         ):
-            reject_undeclared_variables(used, (used, unused), ctx)
+            reject_undeclared_variables(
+                _spec_state(used, (used, unused), ctx)
+            )
 
     def test_input_relevance_follows_transitive_condition_dependencies(self):
         from zolotone.ast.spec_validation import reject_undeclared_variables
@@ -9132,24 +9568,25 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with self.assertWarnsRegex(UserWarning, r"real\(unused\)"):
             reject_undeclared_variables(
-                result,
-                (result, assumed, transitive, unused),
-                ctx,
+                _spec_state(
+                    result,
+                    (result, assumed, transitive, unused),
+                    ctx,
+                )
             )
 
     def test_generated_input_assumptions_do_not_hide_unused_inputs(self):
-        from zolotone.ast.autogen import get_spec_ast
+        from zolotone.ast.autogen import get_spec
         from zolotone.ast.spec_validation import reject_undeclared_variables
 
         def spec(x: UQ(4, 0), y: UQ(1, 0), ctx) -> UQ(5, 0):
             ctx.assume(y.eq(ctx.one()))
             return x
 
-        contract = ast_nodes._build_spec_contract("unused-variable", spec)
-        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
+        current_spec = get_spec("unused-variable", spec)
 
         with self.assertWarnsRegex(UserWarning, r"unused input variables: real\(y_1\)"):
-            reject_undeclared_variables(spec_ast, spec_inputs, ctx)
+            reject_undeclared_variables(current_spec)
 
     def test_simplify_spec_extracts_literal_results_from_carrier(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
@@ -9157,12 +9594,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         real_ctx = SpecContext("simplify-spec-real-literal")
         x = real_ctx.real("x")
         real_ctx.assume(x.eq(real_ctx.two()))
-        simplified_ast, _simplified_ctx = _simplify_spec_ast(
-            x,
-            (x,),
-            real_ctx,
+        simplified_spec = _simplify_spec_ast(
+            _spec_state(x, (x,), real_ctx)
         )
-        self.assertEqual(simplified_ast, RealLit(2))
+        self.assertEqual(simplified_spec.spec_ast, RealLit(2))
 
         for value in (False, True):
             with self.subTest(value=value):
@@ -9171,12 +9606,15 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 bool_ctx.assume(
                     predicate.eq(bool_ctx.bool_val(value))
                 )
-                simplified_ast, _simplified_ctx = _simplify_spec_ast(
-                    predicate,
-                    (predicate,),
-                    bool_ctx,
+                simplified_spec = _simplify_spec_ast(
+                    _spec_state(
+                        predicate,
+                        (predicate,),
+                        bool_ctx,
+                        Bool,
+                    )
                 )
-                self.assertEqual(simplified_ast, BoolLit(value))
+                self.assertEqual(simplified_spec.spec_ast, BoolLit(value))
 
     def test_autogenerate_simplifies_spec_before_lowering(self):
         def spec(x: UQ(3, 0), ctx) -> UQ:
@@ -9501,20 +9939,20 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(range_suggestion, search_suggestion)
         self.assertEqual(range_suggestion, UQ(3, 0))
 
-    def test_spec_validation_adds_derived_output_range_check(self):
-        from zolotone.ast.autogen import get_spec_ast
+    def test_spec_validation_derives_output_range_guard(self):
+        from zolotone.ast.autogen import get_spec
         from zolotone.ast.spec_validation import (
-            _derive_input_ranges,
-            _derive_output_asserts,
+            _derive_output_guards,
+            add_input_ranges,
         )
 
         def spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
             ctx.assume(x <= ctx.real_val(7))
             return x + ctx.one()
 
-        contract = ast_nodes._build_spec_contract("derived-output-range", spec)
-        spec_ast, spec_inputs, ctx = get_spec_ast(spec, contract)
-        ctx.assumes[:0] = _derive_input_ranges(spec_inputs, contract, ctx)
+        current_spec = add_input_ranges(get_spec("derived-output-range", spec))
+        spec_ast = current_spec.spec_ast
+        ctx = current_spec.spec_ctx
 
         with (
             patch(
@@ -9522,21 +9960,18 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 return_value=(1.0, 8.0),
             ) as range_analysis,
         ):
-            _derive_output_asserts(
-                spec_ast,
-                contract.annotations["return"],
-                ctx,
-            )
+            output_guards = _derive_output_guards(current_spec)
 
         expected_check = (
             (spec_ast >= ctx.real_val(1.0))
             & (spec_ast <= ctx.real_val(8.0))
         )
-        self.assertEqual(ctx.checks, [expected_check])
+        self.assertEqual(output_guards, (expected_check,))
+        self.assertEqual(current_spec.spec_ctx.checks, [])
         range_analysis.assert_any_call(spec_ast, ctx)
 
-    def test_derive_output_asserts_adds_boolean_exhaustiveness_check(self):
-        from zolotone.ast.spec_validation import _derive_output_asserts
+    def test_derive_output_guards_adds_boolean_exhaustiveness_check(self):
+        from zolotone.ast.spec_validation import _derive_output_guards
 
         for return_annotation in (Bool, Bool()):
             with self.subTest(return_annotation=return_annotation):
@@ -9545,16 +9980,18 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 with patch(
                     "zolotone.ast.spec_validation.rival_range_analysis"
                 ) as range_analysis:
-                    output_range = _derive_output_asserts(
-                        result,
-                        return_annotation,
-                        ctx,
+                    output_guards = _derive_output_guards(
+                        _spec_state(
+                            result,
+                            (result,),
+                            ctx,
+                            return_annotation,
+                        )
                     )
 
-                self.assertIsNone(output_range)
                 self.assertEqual(
-                    ctx.checks,
-                    [result.eq(ctx.true()) | result.eq(ctx.false())],
+                    output_guards,
+                    (result.eq(ctx.true()) | result.eq(ctx.false()),),
                 )
                 range_analysis.assert_not_called()
 

@@ -1,4 +1,4 @@
-from .basics import basic_and, basic_equal, basic_invert, basic_or
+from .basics import basic_and, basic_equal, basic_invert, basic_not_equal, basic_or
 from ..types import *
 from ..ast import *
 from ..egglog import *
@@ -18,6 +18,14 @@ def bool_eq_spec(x: Bool, y: Bool, ctx) -> Bool:
 @Primitive(name="bool_eq", spec=bool_eq_spec, c_inline=True)
 def bool_eq(x: Node, y: Node) -> Node:
     return basic_equal(x, y, out=Bool())
+
+
+def bool_ne_spec(x: Bool, y: Bool, ctx) -> Bool:
+    return x.ne(y)
+
+@Primitive(name="bool_ne", spec=bool_ne_spec, c_inline=True)
+def bool_ne(x: Node, y: Node) -> Node:
+    return basic_not_equal(x, y, out=Bool())
 
 
 def bool_and_spec(x: Bool, y: Bool, ctx) -> Bool:

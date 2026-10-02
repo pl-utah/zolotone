@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import replace
 import math
 import typing as tp
 import warnings
@@ -22,6 +25,9 @@ from ..spec.spec_ast import (
 from ..spec.spec_context import SpecContext, normalize_nnf, simplify_ctx
 from ..types import Bool, DataType, Q, UQ
 from .nodes import _SpecContract
+
+if tp.TYPE_CHECKING:
+    from .autogen import Spec
 
 
 FEASIBILITY_SCHEDULE = [
@@ -79,13 +85,15 @@ def _spec_simplification_size(spec_ast: SpecNode, ctx: SpecContext) -> int:
 
 
 def reject_undeclared_variables(
-    spec_ast: SpecNode,
-    spec_inputs: tuple[tp.Any, ...],
-    ctx: SpecContext,
+    spec: Spec,
 ) -> None:
-    input_variables = _spec_value_variables(spec_inputs)
-    specification_variables = variables(spec_ast)
-    for expressions in (ctx.assumes, ctx.checks, ctx.requirements):
+    input_variables = _spec_value_variables(spec.spec_inputs)
+    specification_variables = variables(spec.spec_ast)
+    for expressions in (
+        spec.spec_ctx.assumes,
+        spec.spec_ctx.checks,
+        spec.spec_ctx.requirements,
+    ):
         for expression in expressions:
             specification_variables.update(variables(expression))
     undeclared_variables = specification_variables - input_variables
@@ -97,10 +105,14 @@ def reject_undeclared_variables(
             f"Undeclared variables in specification: {rendered}"
         )
 
-    relevant_variables = variables(spec_ast)
+    relevant_variables = variables(spec.spec_ast)
     condition_variables = [
         variables(conjunct)
-        for expressions in (ctx.assumes, ctx.checks, ctx.requirements)
+        for expressions in (
+            spec.spec_ctx.assumes,
+            spec.spec_ctx.checks,
+            spec.spec_ctx.requirements,
+        )
         for expression in expressions
         for conjunct in _condition_conjuncts(expression)
     ]
@@ -119,31 +131,32 @@ def reject_undeclared_variables(
             sorted(str(variable) for variable in unused_variables)
         )
         warnings.warn(
-            f"Specification {ctx.name!r} has unused input variables: {rendered}",
+            f"Specification {spec.spec_ctx.name!r} has unused input variables: "
+            f"{rendered}",
             UserWarning,
             stacklevel=3,
         )
 
 
 def _simplify_spec_ast(
-    spec_ast: SpecNode,
-    spec_inputs: tuple[tp.Any, ...],
-    ctx: SpecContext,
-) -> tuple[SpecNode, SpecContext]:
-    size_before = _spec_simplification_size(spec_ast, ctx)
-    # Checks are not getting simplified
-    probe_ctx = ctx.copy(checks=[])
-    if isinstance(spec_ast, RealExpr):
+    spec: Spec,
+) -> Spec:
+    size_before = _spec_simplification_size(spec.spec_ast, spec.spec_ctx)
+    # Normalize assumptions before simplification so complementary comparison
+    # forms can expose redundant constraints. User checks remain outside the
+    # probe so they are preserved rather than discharged.
+    probe_ctx = normalize_nnf(spec.spec_ctx.copy(checks=[]))
+    if isinstance(spec.spec_ast, RealExpr):
         marker = probe_ctx.fresh_real("simplified_spec_result")
-    elif isinstance(spec_ast, BoolExpr):
+    elif isinstance(spec.spec_ast, BoolExpr):
         marker = probe_ctx.fresh_bool("simplified_spec_result")
     else:
         raise TypeError(
             "Specification simplification expects a real or Boolean "
-            f"expression, got {type(spec_ast).__name__}"
+            f"expression, got {type(spec.spec_ast).__name__}"
         )
 
-    probe_ctx.check(spec_ast.eq(marker))
+    probe_ctx.check(spec.spec_ast.eq(marker))
     simplified_ctx = simplify_ctx(probe_ctx)["new_ctx"]
     simplified_checks = simplified_ctx.checks
     if len(simplified_checks) != 1:
@@ -181,10 +194,10 @@ def _simplify_spec_ast(
         checks=[
             substitute_spec_node(
                 check,
-                spec_ast,
+                spec.spec_ast,
                 simplified_spec_ast,
             )
-            for check in ctx.checks
+            for check in spec.spec_ctx.checks
         ]
     )
     result_ctx = normalize_nnf(result_ctx)
@@ -196,12 +209,16 @@ def _simplify_spec_ast(
         size_change = f"increased node count by {-reduction}"
     if reduction != 0:
         warnings.warn(
-            f"Specification {ctx.name} simplification {size_change}: "
+            f"Specification {spec.spec_ctx.name} simplification {size_change}: "
             f"{size_before} -> {size_after}",
             UserWarning,
             stacklevel=3,
         )
-    return simplified_spec_ast, result_ctx
+    return replace(
+        spec,
+        spec_ast=simplified_spec_ast,
+        spec_ctx=result_ctx,
+    )
 
 
 def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[float, float]:
@@ -241,13 +258,13 @@ def _prove_result_fits(spec_ast, output_type, ctx):
     return status == "unsat"
 
 
-def _check_spec_reachability(ctx: SpecContext) -> None:
-    report = simplify_ctx(ctx.copy(checks=[]))
+def _check_spec_reachability(spec: Spec) -> None:
+    report = simplify_ctx(spec.spec_ctx.copy(checks=[]))
     feasibility_status = report.get("feasibility_status", "unknown")
 
     if feasibility_status == "not feasible":
         raise InfeasibleError(
-            f"Specification {ctx.name!r} is unreachable: "
+            f"Specification {spec.spec_ctx.name!r} is unreachable: "
             "no input satisfies its assumptions"
         )
     if feasibility_status == "feasible":
@@ -264,28 +281,33 @@ def _check_spec_reachability(ctx: SpecContext) -> None:
     )
     if status == "unsat":
         raise InfeasibleError(
-            f"Specification {ctx.name!r} is unreachable: "
+            f"Specification {spec.spec_ctx.name!r} is unreachable: "
             "no input satisfies its assumptions"
         )
     elif status != "sat":
         raise ZolotoneError(
-            f"Could not determine whether specification {ctx.name!r} has a reachable input"
+            "Could not determine whether specification "
+            f"{spec.spec_ctx.name!r} has a reachable input"
         )
 
 
-def _check_spec_obligations(ctx: SpecContext) -> None:
-    if not ctx.checks:
+def _check_spec_obligations(spec: Spec) -> None:
+    if not spec.spec_ctx.checks:
         return
 
     status, _proof_trace = check_equivalence(
-        ctx,
+        spec.spec_ctx,
         schedule=FEASIBILITY_SCHEDULE,
     )
     if status == "unsat":
         return
     if status == "sat":
-        raise InfeasibleError(f"Specification {ctx.name!r} has a check that does not hold")
-    raise ZolotoneError(f"Could not prove all checks in specification {ctx.name!r}")
+        raise InfeasibleError(
+            f"Specification {spec.spec_ctx.name!r} has a check that does not hold"
+        )
+    raise ZolotoneError(
+        f"Could not prove all checks in specification {spec.spec_ctx.name!r}"
+    )
 
 
 def _domain_nodes(location: str, expression: SpecNode):
@@ -294,19 +316,19 @@ def _domain_nodes(location: str, expression: SpecNode):
     yield location, expression
 
 
-def _warn_about_domain_errors(spec_ast: SpecNode, ctx: SpecContext) -> None:
+def _warn_about_domain_errors(spec: Spec) -> None:
     roots: list[tuple[str, SpecNode]] = [
         (f"assumption {index}", assume)
-        for index, assume in enumerate(ctx.assumes, start=1)
+        for index, assume in enumerate(spec.spec_ctx.assumes, start=1)
     ]
-    roots.append(("result", spec_ast))
+    roots.append(("result", spec.spec_ast))
     roots.extend(
         (f"check {index}", check)
-        for index, check in enumerate(ctx.checks, start=1)
+        for index, check in enumerate(spec.spec_ctx.checks, start=1)
     )
     roots.extend(
         (f"requirement {index}", requirement)
-        for index, requirement in enumerate(ctx.requirements, start=1)
+        for index, requirement in enumerate(spec.spec_ctx.requirements, start=1)
     )
     tagged_nodes = [
         tagged_node
@@ -315,7 +337,7 @@ def _warn_about_domain_errors(spec_ast: SpecNode, ctx: SpecContext) -> None:
     ]
     findings = rival_domain_errors(
         [expression for _, expression in tagged_nodes],
-        ctx.assumes,
+        spec.spec_ctx.assumes,
     )
     if not findings:
         return
@@ -331,7 +353,7 @@ def _warn_about_domain_errors(spec_ast: SpecNode, ctx: SpecContext) -> None:
             )
         ) or "no input variables"
         warnings.warn(
-            f"Specification {ctx.name!r} may trigger a domain error in "
+            f"Specification {spec.spec_ctx.name!r} may trigger a domain error in "
             f"{location}: {culprit}; ranges: {ranges}",
             UserWarning,
             stacklevel=3,
@@ -339,50 +361,44 @@ def _warn_about_domain_errors(spec_ast: SpecNode, ctx: SpecContext) -> None:
 
 
 def _derive_output_guards(
-    spec_ast: SpecNode,
-    return_annotation: object,
-    ctx: SpecContext,
+    spec: Spec,
 ) -> tuple[BoolExpr, ...]:
     """Return runtime guards derived from the specification output."""
-    if return_annotation in (Q, UQ) or isinstance(return_annotation, (Q, UQ)):
-        if not isinstance(spec_ast, RealExpr):
+    if spec.return_annotation in (Q, UQ) or isinstance(
+        spec.return_annotation,
+        (Q, UQ),
+    ):
+        if not isinstance(spec.spec_ast, RealExpr):
             raise TypeError(
                 "Numeric output assertions require a real expression, got "
-                f"{type(spec_ast).__name__}"
+                f"{type(spec.spec_ast).__name__}"
             )
-        output_range = rival_range_analysis(spec_ast, ctx)
+        output_range = rival_range_analysis(spec.spec_ast, spec.spec_ctx)
         if output_range is None:
-            raise ZolotoneError(f"Could not obtain output range for: {spec_ast}")
+            raise ZolotoneError(
+                f"Could not obtain output range for: {spec.spec_ast}"
+            )
 
         lower, upper = output_range
         if not math.isfinite(lower) or not math.isfinite(upper):
             raise ZolotoneError(
                 f"Could not obtain finite output range, got {output_range} "
-                f"for {spec_ast}"
+                f"for {spec.spec_ast}"
             )
         return (
-            (spec_ast >= ctx.real_val(lower))
-            & (spec_ast <= ctx.real_val(upper)),
+            (spec.spec_ast >= spec.spec_ctx.real_val(lower))
+            & (spec.spec_ast <= spec.spec_ctx.real_val(upper)),
         )
 
-    if return_annotation is Bool or isinstance(return_annotation, Bool):
+    if spec.return_annotation is Bool or isinstance(spec.return_annotation, Bool):
         return (
-            spec_ast.eq(ctx.true()) | spec_ast.eq(ctx.false()),
+            spec.spec_ast.eq(spec.spec_ctx.true())
+            | spec.spec_ast.eq(spec.spec_ctx.false()),
         )
 
     raise NotImplementedError(
-        f"Output assertions are not implemented for {return_annotation!r}"
-    )
-
-
-def _derive_output_asserts(
-    spec_ast: SpecNode,
-    return_annotation: object,
-    ctx: SpecContext,
-) -> None:
-    """Compatibility helper that appends derived guards as context checks."""
-    ctx.checks.extend(
-        _derive_output_guards(spec_ast, return_annotation, ctx)
+        "Output assertions are not implemented for "
+        f"{spec.return_annotation!r}"
     )
 
 
@@ -500,68 +516,102 @@ def _format_output_annotation(annotation: object) -> str:
 
 
 def _check_output_format(
-    spec_ast: RealExpr,
-    return_annotation: object,
-    ctx: SpecContext,
+    spec: Spec,
 ) -> None:
     # TODO: counterexample
-    if not _prove_result_fits(spec_ast, return_annotation, ctx):
-        suggestion = _output_format_suggestion(spec_ast, return_annotation, ctx)
-        message = f"Specification result range does not fit {return_annotation!r}"
+    if not _prove_result_fits(
+        spec.spec_ast,
+        spec.return_annotation,
+        spec.spec_ctx,
+    ):
+        suggestion = _output_format_suggestion(
+            spec.spec_ast,
+            spec.return_annotation,
+            spec.spec_ctx,
+        )
+        message = (
+            "Specification result range does not fit "
+            f"{spec.return_annotation!r}"
+        )
         if suggestion is not None:
             message += f"; try {_format_output_annotation(suggestion)} as the output format instead"
         else:
             message += "; could not find a fixed-point format that would fit the range"
         raise InfeasibleError(message)
 
-    suggestion = _output_format_suggestion(spec_ast, return_annotation, ctx)
-    if suggestion != return_annotation:
+    suggestion = _output_format_suggestion(
+        spec.spec_ast,
+        spec.return_annotation,
+        spec.spec_ctx,
+    )
+    if suggestion != spec.return_annotation:
         warnings.warn(
-            f"Output type {return_annotation} is wider than necessary; consider {suggestion}",
+            f"Output type {spec.return_annotation} is wider than necessary; "
+            f"consider {suggestion}",
             UserWarning,
             stacklevel=3,
         )
 
 
-def _derive_input_ranges(
-    spec_inputs: tuple[tp.Any, ...],
-    contract: _SpecContract,
-    ctx: SpecContext,
-) -> tuple[BoolExpr, ...]:
-    """Return fixed-point input-domain facts"""
-    input_parameters = list(contract.signature.parameters.values())[:-1]
+def add_input_ranges(spec: Spec) -> Spec:
+    """Prepend fixed-point input-domain facts to a copy of the spec."""
+    input_parameters = list(spec.contract.signature.parameters.values())[:-1]
     input_range_assumes = []
-    for spec_input, parameter in zip(spec_inputs, input_parameters, strict=True):
-        dtype = contract.annotations[parameter.name]
+    for spec_input, parameter in zip(
+        spec.spec_inputs,
+        input_parameters,
+        strict=True,
+    ):
+        dtype = spec.annotations[parameter.name]
         if isinstance(dtype, (Q, UQ)):
             input_range_assumes.append(
-                _fixed_point_result_fits(spec_input, dtype, ctx)
+                _fixed_point_result_fits(spec_input, dtype, spec.spec_ctx)
             )
-    return tuple(input_range_assumes)
+    spec_ctx = spec.spec_ctx.copy()
+    spec_ctx.assumes[:0] = input_range_assumes
+    return replace(spec, spec_ctx=spec_ctx)
 
 
 def _validate_spec_shape(
-    spec_ast: SpecNode,
-    return_annotation: object,
+    spec: Spec,
 ) -> None:
     """Validate the specification result category before semantic analysis."""
-    if return_annotation is Bool or isinstance(return_annotation, Bool):
-        if not isinstance(spec_ast, BoolExpr):
+    if spec.return_annotation is Bool or isinstance(spec.return_annotation, Bool):
+        if not isinstance(spec.spec_ast, BoolExpr):
             raise TypeError(
-                f"Specification returning {return_annotation!r} must produce "
-                f"a Boolean expression, got {type(spec_ast).__name__}"
+                f"Specification returning {spec.return_annotation!r} must produce "
+                f"a Boolean expression, got {type(spec.spec_ast).__name__}"
             )
         return
 
-    if return_annotation in (Q, UQ) or isinstance(return_annotation, (Q, UQ)):
-        if not isinstance(spec_ast, RealExpr):
+    if spec.return_annotation in (Q, UQ) or isinstance(
+        spec.return_annotation,
+        (Q, UQ),
+    ):
+        if not isinstance(spec.spec_ast, RealExpr):
             raise TypeError(
-                f"Specification returning {return_annotation!r} must produce "
-                f"a real expression, got {type(spec_ast).__name__}"
+                f"Specification returning {spec.return_annotation!r} must produce "
+                f"a real expression, got {type(spec.spec_ast).__name__}"
             )
         return
 
     raise NotImplementedError(
-        f"Output format {return_annotation!r} is not supported by "
+        f"Output format {spec.return_annotation!r} is not supported by "
         "autogeneration"
     )
+
+
+def _validate_spec_requirements(spec: Spec) -> None:
+    spec.spec_ctx.validate_requirements()
+
+
+def add_output_guards(spec: Spec) -> Spec:
+    output_guards = _derive_output_guards(spec)
+    guard_spec = replace(
+        spec,
+        spec_ctx=spec.spec_ctx.copy(checks=list(output_guards)),
+    )
+    _check_spec_obligations(guard_spec)
+    spec_ctx = spec.spec_ctx.copy()
+    spec_ctx.checks.extend(output_guards)
+    return replace(spec, spec_ctx=spec_ctx)

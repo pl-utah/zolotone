@@ -252,6 +252,14 @@ def bit_precise_infeasible(x: UQ(4, 0), ctx) -> UQ(4, 0):
 #     return x ** (ctx.real_val(-1)) + ctx.one() + y ** (ctx.real_val(-1)) 
 
 
+# Tightening x >= 0.5 to x >= 1 excludes the reciprocal's singularity.
+@Test()
+def tightened_bound_avoids_domain_error(x: UQ(1, 0), ctx) -> UQ(3, 0):
+    ctx.assume(x >= ctx.real_val(0.5))
+    denominator = x - ctx.real_val(0.75)
+    return denominator ** ctx.real_val(-1)
+
+
 # Domain error
 @Test()
 def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:

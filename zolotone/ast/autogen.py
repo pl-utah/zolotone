@@ -1,7 +1,10 @@
+from dataclasses import dataclass, replace
+import inspect
 import typing as tp
 
-from ..spec.spec_ast import RealExpr, SpecNode
+from ..spec.spec_ast import SpecNode
 from ..spec.spec_context import SpecContext
+from ..types import Q, UQ
 from .nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
     attach_lowered_conditions,
@@ -12,98 +15,159 @@ from .spec_validation import (
     _check_output_format,
     _check_spec_obligations,
     _check_spec_reachability,
-    _derive_input_ranges,
-    _derive_output_guards,
     _simplify_spec_ast,
+    _validate_spec_requirements,
     _validate_spec_shape,
     _warn_about_domain_errors,
+    add_input_ranges,
+    add_output_guards,
     reject_untyped_inputs,
     reject_undeclared_variables,
 )
 
 
-def get_spec_ast(
-    spec: tp.Callable[..., tp.Any],
-    contract: _SpecContract,
-) -> tuple[SpecNode, tuple[tp.Any, ...], SpecContext]:
-    ctx = SpecContext(contract.display_name)
-    input_parameters = list(contract.signature.parameters.values())[:-1]
-    spec_inputs = []
-    for parameter in input_parameters:
-        dtype = contract.annotations[parameter.name]
-        spec_input = dtype.to_spec(
-            name=parameter.name,
-            ctx=ctx,
-        )
-        spec_inputs.append(spec_input)
+def _format_annotation(annotation: object) -> str:
+    if isinstance(annotation, type):
+        return annotation.__name__
+    return repr(annotation)
 
-    spec_ast = spec(*spec_inputs, ctx)
-    return spec_ast, tuple(spec_inputs), ctx
+
+@dataclass(frozen=True)
+class Spec:
+    name: str
+    function: tp.Callable[..., tp.Any]
+    annotations: dict[str, tp.Any]
+    signature: inspect.Signature
+    display_name: str
+    spec_ast: SpecNode
+    spec_inputs: tuple[tp.Any, ...]
+    spec_ctx: SpecContext
+
+    @property
+    def contract(self) -> _SpecContract:
+        return _SpecContract(
+            signature=self.signature,
+            annotations=self.annotations,
+            display_name=self.display_name,
+        )
+
+    @property
+    def return_annotation(self) -> object:
+        return self.annotations["return"]
+
+    def __str__(self) -> str:
+        input_parameters = list(self.signature.parameters.values())[:-1]
+        arguments = ", ".join(
+            f"{parameter.name}: "
+            f"{_format_annotation(self.annotations[parameter.name])}"
+            for parameter in input_parameters
+        )
+        signature = (
+            f"({arguments}) -> {_format_annotation(self.return_annotation)}"
+        )
+
+        def format_section(
+            title: str,
+            expressions: tp.Sequence[SpecNode],
+        ) -> list[str]:
+            if not expressions:
+                return [f"  {title}:", "    <none>"]
+            return [f"  {title}:"] + [
+                f"    {expression}" for expression in expressions
+            ]
+
+        lines = [
+            f"Specification {self.display_name}",
+            f"  signature: {signature}",
+            f"  result: {self.spec_ast}",
+            "",
+        ]
+        lines.extend(format_section("assumes", self.spec_ctx.assumes))
+        lines.append("")
+        lines.extend(format_section("checks", self.spec_ctx.checks))
+        lines.append("")
+        lines.extend(
+            format_section("requirements", self.spec_ctx.requirements)
+        )
+        return "\n".join(lines)
+
+
+def get_spec(
+    name: str,
+    function: tp.Callable[..., tp.Any],
+) -> Spec:
+    contract = _build_spec_contract(name, function)
+    reject_untyped_inputs(contract)
+    spec_ctx = SpecContext(contract.display_name)
+    input_parameters = list(contract.signature.parameters.values())[:-1]
+    spec_inputs = tuple(
+        contract.annotations[parameter.name].to_spec(
+            name=parameter.name,
+            ctx=spec_ctx,
+        )
+        for parameter in input_parameters
+    )
+    spec_ast = function(*spec_inputs, spec_ctx)
+    return Spec(
+        name=name,
+        function=function,
+        annotations=dict(contract.annotations),
+        signature=contract.signature,
+        display_name=contract.display_name,
+        spec_ast=spec_ast,
+        spec_inputs=spec_inputs,
+        spec_ctx=spec_ctx,
+    )
 
 
 def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     # Step 1: Obtain spec AST
-    contract = _build_spec_contract(name, spec)
-    reject_untyped_inputs(contract)
-    spec_ast, spec_inputs, spec_ctx = get_spec_ast(spec, contract)
-    return_annotation = contract.annotations["return"]
+    current_spec = get_spec(name, spec)
+
+    # print(current_spec)
 
     # Step 2: establish the abstract input domain and validate its shape.
-    ## Error on undeclared variables, warn about unused variables
-    reject_undeclared_variables(spec_ast, spec_inputs, spec_ctx)
-    ## Exact ranges of inputs given its types
-    input_ranges = _derive_input_ranges(spec_inputs, contract, spec_ctx)
-    spec_ctx.assumes[:0] = input_ranges
-    ## Catching type errors like RealExpr vs BoolExpr
-    _validate_spec_shape(spec_ast, return_annotation)
+    # Error on undeclared variables, warn about unused variables.
+    reject_undeclared_variables(current_spec)
+    # Add exact input ranges implied by their types.
+    current_spec = add_input_ranges(current_spec)
+    # Catch type errors such as RealExpr versus BoolExpr.
+    _validate_spec_shape(current_spec)
     # Step 3: simplify before making conditions type-precise.
-    spec_ast, spec_ctx = _simplify_spec_ast(spec_ast, spec_inputs, spec_ctx)
+    current_spec = _simplify_spec_ast(current_spec)
 
-    # Step 4: rewrite strict assumptions and checks for fixed-point semantics.
-    spec_ctx = rewrite_strict_conditions(
-        spec_inputs,
-        contract,
-        spec_ctx,
-    )
+    # Step 4: tighten comparisons and resolve unrepresentable equalities in
+    # normalized/simplified assumptions and checks for fixed-point semantics.
+    current_spec = rewrite_strict_conditions(current_spec)
 
-    print(spec_ctx)
-    
     # Step 5: validate the complete, eventually bit-precise specification.
-    ## Reachibility with user-provided assumes
-    _check_spec_reachability(spec_ctx)                           # this requires bit-precise assumes
-    ## Domain errors given user-provided/derived assumes
-    _warn_about_domain_errors(spec_ast, spec_ctx)                # this requires bit-precise assumes
-    ## Prove exhaustive coverage of "Cases"
-    spec_ctx.validate_requirements()                             # this requires bit-precise assumes
-    ## Prove that user-defined asserts are satisfied
-    _check_spec_obligations(spec_ctx)                            # this requires bit-precise assumes
-    ## Check that output range fits output format; warn if it can be narrowed
-    _check_output_format(spec_ast, return_annotation, spec_ctx)  # this requires bit-precise assumes
+    # Every check below requires bit-precise assumptions.
+    _check_spec_reachability(current_spec)
+    _warn_about_domain_errors(current_spec)
+    _validate_spec_requirements(current_spec)
+    _check_spec_obligations(current_spec)
+    _check_output_format(current_spec)
 
     # Step 6: lower the result before deriving implementation guards.
-    lowered_composite = lower_spec_result(
-        name,
-        spec,
-        contract,
-        spec_ast,
-        spec_inputs,
-        spec_ctx=spec_ctx,
-    )
+    lowered_composite = lower_spec_result(current_spec)
+
+    if current_spec.return_annotation is Q or current_spec.return_annotation is UQ:
+        # Resolve family annotations without mutating the user's function.
+        result_dtype = lowered_composite.dtype
+        current_spec = replace(
+            current_spec,
+            annotations={**current_spec.annotations, "return": result_dtype},
+            signature=current_spec.signature.replace(return_annotation=result_dtype),
+        )
+
+    # print(current_spec)
 
     # Step 7: derive guards for the selected implementation result.
-    output_guards = _derive_output_guards(
-        spec_ast,
-        return_annotation,
-        spec_ctx,
-    )
-    _check_spec_obligations(spec_ctx.copy(checks=list(output_guards)))
-    spec_ctx.checks.extend(output_guards)
+    current_spec = add_output_guards(current_spec)
 
     # Step 8: lower and attach assumptions, user checks, and output guards.
-    attach_lowered_conditions(
-        lowered_composite,
-        spec_ast,
-        spec_inputs,
-        spec_ctx,
-    )
+    attach_lowered_conditions(lowered_composite, current_spec)
+
+    # Step 9: lower composite to C++
+    cpp = lowered_composite.to_cpp()
     return lowered_composite

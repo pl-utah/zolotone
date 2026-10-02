@@ -13,6 +13,7 @@ from .spec_ast import (
     Add,
     And,
     BoolEq,
+    BoolNe,
     BoolExpr,
     BoolLit,
     BoolVar,
@@ -158,6 +159,9 @@ def from_egglog(egg_node: Expr) -> RealExpr | BoolExpr:
             if method_name in {"Eq", "BoolEq"}:
                 expect(args, 2, "MathBool.Eq")
                 return BoolEq(parse_bool(args[0]), parse_bool(args[1]))
+            if method_name == "NotEq":
+                expect(args, 2, "MathBool.NotEq")
+                return BoolNe(parse_bool(args[0]), parse_bool(args[1]))
             if method_name == "And":
                 expect(args, 2, "MathBool.And")
                 return And(parse_bool(args[0]), parse_bool(args[1]))

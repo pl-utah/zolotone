@@ -503,7 +503,7 @@ def _rewrite_proven_expressions(
         if isinstance(rewritten, BoolLit):
             return rewritten
 
-        if isinstance(rewritten, (Eq, NotEq, Lt, Le, Gt, Ge, BoolEq)):
+        if isinstance(rewritten, (Eq, NotEq, Lt, Le, Gt, Ge, BoolEq, BoolNe)):
             truth = prove(rewritten)
             return BoolLit(truth) if truth is not None else rewritten
 
@@ -1086,6 +1086,10 @@ def to_rival_ir(node: SpecNode) -> RivalIR:
         return _binary("ge", node.lhs, node.rhs)
     if isinstance(node, BoolEq):
         return _binary("bool_eq", node.lhs, node.rhs)
+    if isinstance(node, BoolNe):
+        # Rival already supports Boolean equality and negation; retain the
+        # compact AST node without requiring a new backend IR operation.
+        return _unary("not", BoolEq(node.lhs, node.rhs))
     if isinstance(node, Not):
         return _unary("not", node.value)
     if isinstance(node, Or):

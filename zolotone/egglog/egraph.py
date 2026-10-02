@@ -48,6 +48,9 @@ def _nnf_ruleset():
         rewrite(_nnf(MathBool.Eq(bool_a, bool_b))).to(
             MathBool.Eq(_nnf(bool_a), _nnf(bool_b))
         ),
+        rewrite(_nnf(MathBool.NotEq(bool_a, bool_b))).to(
+            MathBool.NotEq(_nnf(bool_a), _nnf(bool_b))
+        ),
         rewrite(_nnf(Math.Eq(real_a, real_b))).to(Math.Eq(real_a, real_b)),
         rewrite(_nnf(Math.NotEq(real_a, real_b))).to(Math.NotEq(real_a, real_b)),
         rewrite(_nnf(Math.Lt(real_a, real_b))).to(Math.Lt(real_a, real_b)),
@@ -65,13 +68,12 @@ def _nnf_ruleset():
         rewrite(_nnf_neg(MathBool.Or(bool_a, bool_b))).to(
             MathBool.And(_nnf_neg(bool_a), _nnf_neg(bool_b))
         ),
-        # !(a == b) is Boolean XOR.  Normalize every operand before exposing
-        # it so Not can only survive directly above a BoolVar.
+        # Keep Boolean XOR compact instead of duplicating both operands.
         rewrite(_nnf_neg(MathBool.Eq(bool_a, bool_b))).to(
-            MathBool.Or(
-                MathBool.And(_nnf(bool_a), _nnf_neg(bool_b)),
-                MathBool.And(_nnf_neg(bool_a), _nnf(bool_b)),
-            )
+            MathBool.NotEq(_nnf(bool_a), _nnf(bool_b))
+        ),
+        rewrite(_nnf_neg(MathBool.NotEq(bool_a, bool_b))).to(
+            MathBool.Eq(_nnf(bool_a), _nnf(bool_b))
         ),
         rewrite(_nnf_neg(Math.Eq(real_a, real_b))).to(Math.NotEq(real_a, real_b)),
         rewrite(_nnf_neg(Math.NotEq(real_a, real_b))).to(Math.Eq(real_a, real_b)),
