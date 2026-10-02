@@ -1,9 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import inspect
 import typing as tp
 
 from ..spec.spec_ast import SpecNode
 from ..spec.spec_context import SpecContext
+from ..types import Q, UQ
 from .nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
     attach_lowered_conditions,
@@ -123,7 +124,7 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     # Step 1: Obtain spec AST
     current_spec = get_spec(name, spec)
 
-    print(current_spec)
+    # print(current_spec)
 
     # Step 2: establish the abstract input domain and validate its shape.
     # Error on undeclared variables, warn about unused variables.
@@ -139,8 +140,6 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     # normalized/simplified assumptions and checks for fixed-point semantics.
     current_spec = rewrite_strict_conditions(current_spec)
 
-    print(current_spec)
-
     # Step 5: validate the complete, eventually bit-precise specification.
     # Every check below requires bit-precise assumptions.
     _check_spec_reachability(current_spec)
@@ -151,6 +150,17 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
 
     # Step 6: lower the result before deriving implementation guards.
     lowered_composite = lower_spec_result(current_spec)
+
+    if current_spec.return_annotation is Q or current_spec.return_annotation is UQ:
+        # Resolve family annotations without mutating the user's function.
+        result_dtype = lowered_composite.dtype
+        current_spec = replace(
+            current_spec,
+            annotations={**current_spec.annotations, "return": result_dtype},
+            signature=current_spec.signature.replace(return_annotation=result_dtype),
+        )
+
+    # print(current_spec)
 
     # Step 7: derive guards for the selected implementation result.
     current_spec = add_output_guards(current_spec)

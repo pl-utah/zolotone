@@ -8515,6 +8515,54 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertNotIn("static inline uint8_t uq_ge(", source)
         self.assertNotIn("static inline uint8_t uq_le(", source)
 
+    def test_autogenerate_resolves_output_family_before_deriving_guards(self):
+        from zolotone.ast import autogen
+
+        for input_dtype, annotation in (
+            (Q(3, 2), Q),
+            (UQ(3, 2), UQ),
+            (Q(3, 2), Q(3, 2)),
+            (UQ(3, 2), UQ(3, 2)),
+        ):
+            with self.subTest(input_dtype=input_dtype, annotation=annotation):
+                def spec(x: input_dtype, ctx) -> annotation:
+                    return x
+
+                with (
+                    patch.object(
+                        autogen, "lower_spec_result", wraps=autogen.lower_spec_result
+                    ) as lower,
+                    patch.object(
+                        autogen, "add_output_guards", wraps=autogen.add_output_guards
+                    ) as guards,
+                    patch.object(
+                        autogen,
+                        "attach_lowered_conditions",
+                        wraps=autogen.attach_lowered_conditions,
+                    ) as attach,
+                ):
+                    result = Autogenerate(name="resolved_identity", spec=spec)
+
+                self.assertEqual(result.dtype, input_dtype)
+                original_spec = lower.call_args.args[0]
+                self.assertIs(original_spec.return_annotation, annotation)
+                self.assertIs(original_spec.signature.return_annotation, annotation)
+                self.assertIs(spec.__annotations__["return"], annotation)
+                for downstream_spec in (
+                    guards.call_args.args[0],
+                    attach.call_args.args[1],
+                ):
+                    self.assertEqual(downstream_spec.return_annotation, result.dtype)
+                    self.assertEqual(
+                        downstream_spec.contract.annotations["return"], result.dtype
+                    )
+                    self.assertEqual(
+                        downstream_spec.contract.signature.return_annotation,
+                        result.dtype,
+                    )
+                    if annotation is not Q and annotation is not UQ:
+                        self.assertIs(downstream_spec.return_annotation, annotation)
+
     def test_autogenerate_rejects_non_exact_input_contract(self):
         def spec(x: UQ, ctx) -> UQ:
             return x
