@@ -3094,7 +3094,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(~(x > y))
         ctx.assume(~(x >= y))
 
-        simplified = normalize_nnf(simplify_ctx(ctx)["new_ctx"])
+        simplified = normalize_nnf(ctx)
 
         self.assertEqual(
             simplified.assumes,
@@ -3112,7 +3112,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(~((a > b) | (b < c)))
         ctx.check(~p.eq(q & r))
 
-        simplified = normalize_nnf(simplify_ctx(ctx)["new_ctx"])
+        simplified = normalize_nnf(ctx)
         self.assertEqual(simplified.assumes, [(a <= b) & (b >= c)])
         self.assertEqual(
             simplified.checks,
@@ -3135,10 +3135,86 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(requirement)
         ctx.require(requirement)
 
-        simplified = normalize_nnf(simplify_ctx(ctx)["new_ctx"])
+        simplified = normalize_nnf(ctx)
 
         self.assertEqual(simplified.assumes, [x >= ctx.real_val(0.5)])
         self.assertEqual(simplified.requirements, [requirement])
+
+    def test_normalize_nnf_boolean_rules_preserve_semantics(self):
+        p, q = BoolVar("p"), BoolVar("q")
+        cases = [
+            (~BoolLit(True), BoolLit(False)),
+            (~BoolLit(False), BoolLit(True)),
+            (~~p, p),
+            (~~~p, ~p),
+            (~(p & q), (~p) | (~q)),
+            (~(p | q), (~p) & (~q)),
+            (~p.eq(q), p.ne(q)),
+            (~p.ne(q), p.eq(q)),
+            ((~(p & q)).eq(~~p), ((~p) | (~q)).eq(p)),
+            (~(~(p | q)).ne(~(p & q)), ((~p) & (~q)).eq((~p) | (~q))),
+        ]
+        for expression, expected in cases:
+            with self.subTest(expression=expression):
+                ctx = SpecContext("nnf-boolean-rules")
+                ctx.check(expression)
+                normalized = normalize_nnf(ctx).checks[0]
+                self.assertEqual(normalized, expected)
+                solver = z3.Solver()
+                env = {}
+                solver.add(expression.to_z3(env) != normalized.to_z3(env))
+                self.assertEqual(solver.check(), z3.unsat)
+
+    def test_normalize_nnf_reaches_arithmetic_conditions_without_rewriting_math(self):
+        ctx = SpecContext("nnf-nested-condition")
+        p, q, x = ctx.bool("p"), ctx.bool("q"), ctx.real("x")
+        on_true = x - ctx.real_val(0.5)
+        on_false = x + ctx.real_val(0.25)
+        conditional = If(~(p & q), on_true, on_false)
+        bound = ctx.real_val(4)
+        ctx.check(conditional < bound)
+        ctx.check(~(conditional < bound))
+
+        normalized = normalize_nnf(ctx)
+
+        expected = If((~p) | (~q), on_true, on_false)
+        self.assertEqual(normalized.checks, [expected < bound, expected >= bound])
+        for original, result in zip(ctx.checks, normalized.checks):
+            self.assertIs(result.lhs.on_true, on_true)
+            self.assertIs(result.lhs.on_false, on_false)
+            self.assertIs(result.rhs, bound)
+            solver = z3.Solver()
+            env = {}
+            solver.add(original.to_z3(env) != result.to_z3(env))
+            self.assertEqual(solver.check(), z3.unsat)
+        self.assertIsInstance(conditional.cond, Not)
+
+    def test_normalize_nnf_reuses_shared_nodes_and_preserves_context(self):
+        ctx = SpecContext("nnf-sharing")
+        p, q = ctx.bool("p"), ctx.bool("q")
+        shared = ~(p & q)
+        already_normal = (~p) | q
+        ctx.assume(shared)
+        ctx.check(shared)
+        ctx.check(already_normal)
+        ctx.require(shared)
+        ctx.fresh_real("counter")
+        ctx.spec_cache["sentinel"] = p
+        ctx._spec_cache_valid = False
+
+        normalized = normalize_nnf(ctx)
+
+        self.assertIs(normalized.assumes[0], normalized.checks[0])
+        self.assertIs(normalized.checks[1], already_normal)
+        self.assertIs(normalized.requirements[0], shared)
+        self.assertEqual(normalized.name, ctx.name)
+        self.assertEqual(normalized._sym_counter, ctx._sym_counter)
+        self.assertEqual(normalized.spec_cache, ctx.spec_cache)
+        self.assertEqual(normalized._spec_cache_valid, ctx._spec_cache_valid)
+        self.assertEqual(normalized.case_partitions, ctx.case_partitions)
+        second_pass = normalize_nnf(normalized)
+        for before, after in zip(normalized.checks, second_pass.checks):
+            self.assertIs(before, after)
 
     def test_simplify_ctx_retains_literal_and_double_not_folding(self):
         ctx = SpecContext("nnf-literals")

@@ -433,10 +433,45 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
 
 def normalize_nnf(ctx: SpecContext) -> SpecContext:
     """Normalize assumptions and checks without changing context metadata."""
-    from ..egglog.egraph import _needs_nnf, _normalize_nnf
+    complements = {
+        And: Or, Or: And,
+        Eq: NotEq, NotEq: Eq,
+        Lt: Ge, Le: Gt, Gt: Le, Ge: Lt,
+        BoolEq: BoolNe, BoolNe: BoolEq,
+    }
 
-    def normalize(condition: BoolExpr) -> BoolExpr:
-        return _normalize_nnf(condition) if _needs_nnf(condition) else condition
+    # Cache by identity so distinct but equal nodes retain their identity,
+    # and looking up shared subtrees does not recursively hash their contents.
+    normalized_nodes: dict[tuple[int, bool], SpecNode] = {}
+
+    def normalize(node: SpecNode, negated: bool = False) -> SpecNode:
+        key = (id(node), negated)
+        if key not in normalized_nodes:
+            normalized_nodes[key] = visit(node, negated)
+        return normalized_nodes[key]
+
+    def visit(node: SpecNode, negated: bool) -> SpecNode:
+        if isinstance(node, Not):
+            if not negated and isinstance(node.value, BoolVar):
+                return node
+            return normalize(node.value, not negated)
+        if isinstance(node, BoolLit):
+            return BoolLit(not node.value) if negated else node
+        if isinstance(node, BoolVar):
+            return Not(node) if negated else node
+
+        args = children(node)
+        # Only De Morgan's laws pass negative polarity to the operands.
+        # Comparisons (including Boolean equality) complement their operator;
+        # arithmetic children still need traversal for nested If conditions.
+        negate_args = negated and isinstance(node, (And, Or))
+        normalized = tuple(normalize(arg, negate_args) for arg in args)
+        operator = complements[type(node)] if negated else type(node)
+        if operator is type(node) and all(
+            old is new for old, new in zip(args, normalized)
+        ):
+            return node
+        return operator(*normalized)
 
     return ctx.copy(
         assumes=[normalize(assume) for assume in ctx.assumes],

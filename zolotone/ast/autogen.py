@@ -124,7 +124,7 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
     # Step 1: Obtain spec AST
     current_spec = get_spec(name, spec)
 
-    # print(current_spec)
+    print(current_spec)
 
     # Step 2: establish the abstract input domain and validate its shape.
     # Error on undeclared variables, warn about unused variables.
@@ -160,7 +160,7 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
             signature=current_spec.signature.replace(return_annotation=result_dtype),
         )
 
-    # print(current_spec)
+    print(current_spec)
 
     # Step 7: derive guards for the selected implementation result.
     current_spec = add_output_guards(current_spec)
