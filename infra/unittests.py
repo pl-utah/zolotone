@@ -53,7 +53,7 @@ from zolotone.rival import (
     rival_trim_context,
     to_rival_ir,
 )
-from zolotone.spec.spec_context import normalize_nnf, simplify_ctx
+from zolotone.spec.spec_context import normalize_ctx, simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
 from examples.arithmetic.fp32_add import fp32_add, spec_fp32_add
 from examples.arithmetic.fp32_mult import fp32_mult
@@ -3083,7 +3083,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(feasibility.call_args.kwargs["checks"], False)
         self.assertEqual(report["status"], "unsat")
 
-    def test_normalize_nnf_normalizes_comparison_complements(self):
+    def test_normalize_ctx_normalizes_comparison_complements(self):
         ctx = SpecContext("nnf-comparisons")
         x = ctx.real("x")
         y = ctx.real("y")
@@ -3094,14 +3094,18 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(~(x > y))
         ctx.assume(~(x >= y))
 
-        simplified = normalize_nnf(ctx)
+        simplified = normalize_ctx(ctx)
 
         self.assertEqual(
             simplified.assumes,
-            [x.ne(y), x.eq(y), x >= y, x > y, x <= y, x < y],
+            [
+                (x - y).ne(ctx.zero()), (x - y).eq(ctx.zero()),
+                x - y >= ctx.zero(), x - y > ctx.zero(),
+                x - y <= ctx.zero(), x - y < ctx.zero(),
+            ],
         )
 
-    def test_normalize_nnf_pushes_not_to_boolean_inputs(self):
+    def test_normalize_ctx_pushes_not_to_boolean_inputs(self):
         ctx = SpecContext("nnf-compound")
         a = ctx.real("a")
         b = ctx.real("b")
@@ -3112,8 +3116,10 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.assume(~((a > b) | (b < c)))
         ctx.check(~p.eq(q & r))
 
-        simplified = normalize_nnf(ctx)
-        self.assertEqual(simplified.assumes, [(a <= b) & (b >= c)])
+        simplified = normalize_ctx(ctx)
+        self.assertEqual(
+            simplified.assumes, [(a - b <= ctx.zero()) & (b - c >= ctx.zero())],
+        )
         self.assertEqual(
             simplified.checks,
             [p.ne(q & r)],
@@ -3128,19 +3134,19 @@ class TestSpecContextLearning(unittest.TestCase):
         for expr in simplified.assumes + simplified.checks:
             assert_nnf(expr)
 
-    def test_normalize_nnf_preserves_requirements(self):
+    def test_normalize_ctx_preserves_requirements(self):
         ctx = SpecContext("nnf-requirements")
         x = ctx.real("x")
         requirement = ~(x < ctx.real_val(0.5))
         ctx.assume(requirement)
         ctx.require(requirement)
 
-        simplified = normalize_nnf(ctx)
+        simplified = normalize_ctx(ctx)
 
         self.assertEqual(simplified.assumes, [x >= ctx.real_val(0.5)])
         self.assertEqual(simplified.requirements, [requirement])
 
-    def test_normalize_nnf_boolean_rules_preserve_semantics(self):
+    def test_normalize_ctx_boolean_rules_preserve_semantics(self):
         p, q = BoolVar("p"), BoolVar("q")
         cases = [
             (~BoolLit(True), BoolLit(False)),
@@ -3158,14 +3164,14 @@ class TestSpecContextLearning(unittest.TestCase):
             with self.subTest(expression=expression):
                 ctx = SpecContext("nnf-boolean-rules")
                 ctx.check(expression)
-                normalized = normalize_nnf(ctx).checks[0]
+                normalized = normalize_ctx(ctx).checks[0]
                 self.assertEqual(normalized, expected)
                 solver = z3.Solver()
                 env = {}
                 solver.add(expression.to_z3(env) != normalized.to_z3(env))
                 self.assertEqual(solver.check(), z3.unsat)
 
-    def test_normalize_nnf_reaches_arithmetic_conditions_without_rewriting_math(self):
+    def test_normalize_ctx_reaches_arithmetic_conditions_without_rewriting_branches(self):
         ctx = SpecContext("nnf-nested-condition")
         p, q, x = ctx.bool("p"), ctx.bool("q"), ctx.real("x")
         on_true = x - ctx.real_val(0.5)
@@ -3175,7 +3181,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.check(conditional < bound)
         ctx.check(~(conditional < bound))
 
-        normalized = normalize_nnf(ctx)
+        normalized = normalize_ctx(ctx)
 
         expected = If((~p) | (~q), on_true, on_false)
         self.assertEqual(normalized.checks, [expected < bound, expected >= bound])
@@ -3189,7 +3195,7 @@ class TestSpecContextLearning(unittest.TestCase):
             self.assertEqual(solver.check(), z3.unsat)
         self.assertIsInstance(conditional.cond, Not)
 
-    def test_normalize_nnf_reuses_shared_nodes_and_preserves_context(self):
+    def test_normalize_ctx_reuses_shared_nodes_and_preserves_context(self):
         ctx = SpecContext("nnf-sharing")
         p, q = ctx.bool("p"), ctx.bool("q")
         shared = ~(p & q)
@@ -3202,7 +3208,7 @@ class TestSpecContextLearning(unittest.TestCase):
         ctx.spec_cache["sentinel"] = p
         ctx._spec_cache_valid = False
 
-        normalized = normalize_nnf(ctx)
+        normalized = normalize_ctx(ctx)
 
         self.assertIs(normalized.assumes[0], normalized.checks[0])
         self.assertIs(normalized.checks[1], already_normal)
@@ -3212,7 +3218,7 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(normalized.spec_cache, ctx.spec_cache)
         self.assertEqual(normalized._spec_cache_valid, ctx._spec_cache_valid)
         self.assertEqual(normalized.case_partitions, ctx.case_partitions)
-        second_pass = normalize_nnf(normalized)
+        second_pass = normalize_ctx(normalized)
         for before, after in zip(normalized.checks, second_pass.checks):
             self.assertIs(before, after)
 
@@ -3225,6 +3231,79 @@ class TestSpecContextLearning(unittest.TestCase):
         simplified = simplify_ctx(ctx)["new_ctx"]
 
         self.assertEqual(simplified.checks, [p])
+
+class TestContextNormalization(unittest.TestCase):
+    def test_normalize_ctx_rewrites_comparisons_inside_boolean_expressions(self):
+        ctx = SpecContext("normalize-compound-comparisons")
+        x, y = ctx.real("x"), ctx.real("y")
+        expression = (
+            ((ctx.one() < x + ctx.two()) & (ctx.real_val(4) - y >= ctx.one()))
+            | (x + ctx.one()).eq(y + ctx.real_val(3))
+        ).eq(~(x - ctx.one() <= ctx.zero()))
+        ctx.assume(expression)
+        ctx.check(expression)
+
+        normalized = normalize_ctx(ctx)
+        expected = (
+            ((x > ctx.real_val(-1)) & (y <= ctx.real_val(3)))
+            | (x - y).eq(ctx.two())
+        ).eq(x > ctx.one())
+        self.assertEqual(normalized.assumes, [expected])
+        self.assertIs(normalized.assumes[0], normalized.checks[0])
+        self.assertIs(normalize_ctx(normalized).assumes[0], normalized.assumes[0])
+        solver = z3.Solver()
+        env = {}
+        solver.add(expression.to_z3(env) != normalized.assumes[0].to_z3(env))
+        self.assertEqual(solver.check(), z3.unsat)
+
+    def test_normalize_ctx_moves_additive_constants_and_preserves_semantics(self):
+        x, y = RealVar("x"), RealVar("y")
+        zero, one, two, three = (RealLit(value) for value in range(4))
+        cases = [
+            (x + one > zero, x > -one),
+            (two < x + one, x > one),
+            (three - x >= one, x <= two),
+            (-(x + one) < two, x > RealLit(-3)),
+            ((x + one).eq(y + three), (x - y).eq(two)),
+            ((x - two).ne(one), x.ne(three)),
+            (~(x + one <= zero), x > -one),
+            (x + (two ** three) <= one + two, x <= RealLit(-5)),
+            (abs(x) + two > three, abs(x) > one),
+        ]
+        for expression, expected in cases:
+            with self.subTest(expression=expression):
+                ctx = SpecContext("normalize-comparison")
+                ctx.assume(expression)
+                ctx.check(expression)
+                normalized = normalize_ctx(ctx)
+                self.assertEqual(normalized.assumes, [expected.constant_fold()])
+                self.assertIs(normalized.assumes[0], normalized.checks[0])
+                solver = z3.Solver()
+                env = {}
+                solver.add(expression.to_z3(env) != normalized.assumes[0].to_z3(env))
+                self.assertEqual(solver.check(), z3.unsat)
+                self.assertIs(normalize_ctx(normalized).assumes[0], normalized.assumes[0])
+                self.assertIs(ctx.assumes[0], expression)
+
+    def test_normalize_ctx_traverses_conditions_and_preserves_metadata(self):
+        ctx = SpecContext("normalize-nested")
+        x = ctx.real("x")
+        original = ~(x + ctx.one() <= ctx.zero())
+        ctx.assume(original | (x + ctx.two() >= ctx.real_val(5)))
+        ctx.check(If(original, x, ctx.zero()) >= ctx.zero())
+        ctx.require(original)
+        ctx.fresh_real("counter")
+        ctx.spec_cache["sentinel"] = x
+        normalized = normalize_ctx(ctx)
+        condition = x > ctx.real_val(-1)
+        self.assertEqual(normalized.assumes, [condition | (x >= ctx.real_val(3))])
+        self.assertEqual(normalized.checks, [If(condition, x, ctx.zero()) >= ctx.zero()])
+        self.assertIs(normalized.requirements[0], original)
+        self.assertEqual(normalized.name, ctx.name)
+        self.assertEqual(normalized._sym_counter, ctx._sym_counter)
+        self.assertEqual(normalized.spec_cache, ctx.spec_cache)
+        self.assertEqual(normalized.case_partitions, ctx.case_partitions)
+
 
 class TestEgglogFloatLiterals(unittest.TestCase):
     def exact_literal_value(self, expr):
@@ -7046,6 +7125,29 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [[(1.0, 254.0)]])
 
+    def test_rival_rects_normalize_shifted_bounds_and_negations(self):
+        ctx = SpecContext("rival-shifted-bounds")
+        x = ctx.real("x")
+        ctx.assume(~(x + ctx.one() <= ctx.zero()))
+        ctx.assume(ctx.real_val(4) - x >= ctx.one())
+        self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [[(-1.0, 3.0)]])
+
+    def test_rival_rects_keep_normalized_disjunctions_separate(self):
+        ctx = SpecContext("rival-shifted-disjunction")
+        x = ctx.real("x")
+        ctx.assume((x + ctx.one()).eq(ctx.real_val(3)) | (ctx.real_val(5) - x).eq(ctx.one()))
+        self.assertEqual(get_rival_rects(ctx.assumes, ["x"]), [[(2.0, 2.0)], [(4.0, 4.0)]])
+
+    def test_rival_trim_preserves_source_assumption_used_for_normalized_rect(self):
+        ctx = SpecContext("rival-shifted-contributor")
+        x = ctx.real("x")
+        source = x + ctx.one() >= ctx.zero()
+        ctx.assume(source)
+        ctx.check(x >= ctx.real_val(-1))
+        trimmed = rival_trim_context(ctx)
+        self.assertEqual(trimmed.assumes, [source])
+        self.assertEqual(trimmed.checks, [])
+
     def test_rival_rects_extract_bounds_with_literal_on_lhs(self):
         ctx = SpecContext("rival-rects-reversed")
         x = ctx.real("x")
@@ -9469,7 +9571,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             [below, x >= ctx.real_val(0.5)],
         )
 
-    def test_simplify_spec_preserves_user_checks(self):
+    def test_simplify_spec_preserves_normalized_user_checks(self):
         from zolotone.ast.spec_validation import _simplify_spec_ast
 
         ctx = SpecContext("simplify-spec-checks")
@@ -9485,7 +9587,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertEqual(simplified_spec.spec_ast, RealLit(1))
         self.assertEqual(simplified_spec.spec_ctx.assumes, [assumption])
-        self.assertEqual(simplified_spec.spec_ctx.checks, [check])
+        self.assertEqual(simplified_spec.spec_ctx.checks, [x.eq(ctx.one())])
         self.assertEqual(ctx.assumes, [assumption])
         self.assertEqual(ctx.checks, [check])
 
@@ -10128,8 +10230,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         def result_spec(x: UQ(4, 0), ctx) -> Q:
             return x - ctx.one()
 
-        def assumption_spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
-            ctx.assume((x - ctx.one()) < ctx.real_val(8))
+        def assumption_spec(x: UQ(4, 0), y: UQ(4, 0), ctx) -> UQ(4, 0):
+            # Keep a variable subtraction: constant offsets normalize away.
+            ctx.assume((x - y) < ctx.real_val(8))
             return x
 
         generated_result = Autogenerate("generated_signed_sub", result_spec)
@@ -10144,6 +10247,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(lowered_assumption.args[0].name, "q_sub")
         generated_assumption.inner_args[0].load_value(
             UQ(4, 0).from_bits(0)
+        )
+        generated_assumption.inner_args[1].load_value(
+            UQ(4, 0).from_bits(1)
         )
         self.assertTrue(lowered_assumption.evaluate().to_python())
 
@@ -10177,8 +10283,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             _candidate_output_range_fits(candidate, ctx, {}, {})
 
     def test_assumption_cannot_justify_its_own_unsigned_intermediate(self):
-        def spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
-            ctx.assume((x - ctx.one()) >= ctx.zero())
+        def spec(x: UQ(4, 0), y: UQ(4, 0), ctx) -> UQ(4, 0):
+            ctx.assume((x - y) >= ctx.zero())
             return x
 
         generated = Autogenerate("generated_non_circular_assumption", spec)

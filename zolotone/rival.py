@@ -354,6 +354,13 @@ def _get_rival_rects_and_contributors(
     bool_var_names: set[str],
     max_rects: int,
 ) -> tuple[list[list[tuple[float, float]]], list[bool]]:
+    from .spec.spec_context import SpecContext, normalize_ctx
+
+    # Keep assumption positions intact so contributors still refer to the
+    # caller's source expressions, even when extraction uses normalized ones.
+    normalization_ctx = SpecContext("Rival rectangle assumptions")
+    normalization_ctx.assumes = list(assumes)
+    assumes = normalize_ctx(normalization_ctx).assumes
     domain = _RivalRectDomain.build(free_vars, bool_var_names)
     variable_kind_cache: dict[int, tuple[bool, bool]] = {}
     rects = [domain.new_rect()]
