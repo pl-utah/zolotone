@@ -8824,6 +8824,133 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(signed_sum.inner_tree.args[0].name, "uq_add")
         self.assertEqual(signed_sum.dtype, Q(5, 0))
 
+    def test_lowering_skips_component_construction_when_spec_does_not_match(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_add, uq_mul
+
+        ctx = SpecContext("lowering-spec-before-construction")
+        x, y = ctx.real("x"), ctx.real("y")
+
+        def unrelated_mul(*args):
+            raise AssertionError("Unrelated component was constructed")
+
+        unrelated_mul._spec_contract = uq_mul._spec_contract
+        unrelated_mul._spec_fn = uq_mul._spec_fn
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (unrelated_mul, uq_add)),
+            patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
+        ):
+            lowered = spec_lowering.search_lower_spec_to_impl(
+                x + y,
+                {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
+                UQ,
+                ctx,
+            )
+
+        self.assertEqual(lowered.name, "uq_add")
+
+    def test_lowering_rejects_unsupported_nested_operation_early(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("unsupported-operation")
+        x, y = ctx.real("x"), ctx.real("y")
+
+        def unused_component(*args):
+            raise AssertionError("Component was constructed")
+
+        unused_component._spec_contract = uq_add._spec_contract
+        unused_component._spec_fn = uq_add._spec_fn
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (unused_component,)),
+            self.assertRaisesRegex(MissingError, "Pow"),
+        ):
+            spec_lowering.search_lower_spec_to_impl(
+                x + y ** ctx.real_val(-1),
+                {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
+                UQ,
+                ctx,
+            )
+
+    def test_lowering_accepts_operation_supplied_as_input(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("available-operation")
+        x, y = ctx.real("x"), ctx.real("y")
+        powered = x ** ctx.real_val(-1)
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add,)),
+            patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
+        ):
+            lowered = spec_lowering.search_lower_spec_to_impl(
+                powered + y,
+                {
+                    x: Var("x", UQ(2, 0)),
+                    powered: Var("powered", UQ(2, 0)),
+                    y: Var("y", UQ(2, 0)),
+                },
+                UQ,
+                ctx,
+            )
+        self.assertEqual(lowered.name, "uq_add")
+
+    def test_lowering_accepts_operation_added_by_component_spec(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_mul
+
+        ctx = SpecContext("component-operation")
+        x = ctx.real("x")
+
+        def power_component(*args):
+            return Var("powered", UQ(2, 0))
+
+        power_component._spec_contract = uq_mul._spec_contract
+        power_component._spec_fn = lambda lhs, rhs, ctx: lhs ** rhs
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (power_component,)),
+            patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
+        ):
+            lowered = spec_lowering.search_lower_spec_to_impl(
+                x ** ctx.two(),
+                {x: Var("x", UQ(2, 0))},
+                UQ,
+                ctx,
+            )
+        self.assertEqual(lowered.name, "powered")
+
+    def test_lowering_matches_full_multi_node_component_spec(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_mul
+
+        ctx = SpecContext("multi-node-component")
+        x = ctx.real("x")
+        power = x ** ctx.two()
+        composite = If(power.eq(ctx.zero()), ctx.one(), ctx.zero())
+
+        def composite_component(*args):
+            return Var("composite", UQ(1, 0))
+
+        composite_component._spec_contract = uq_mul._spec_contract
+        composite_component._spec_fn = (
+            lambda lhs, rhs, component_ctx: If(
+                (lhs ** rhs).eq(component_ctx.zero()),
+                component_ctx.one(),
+                component_ctx.zero(),
+            )
+        )
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (composite_component,)),
+            patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
+        ):
+            inputs = {x: Var("x", UQ(2, 0))}
+            with self.assertRaisesRegex(MissingError, "Pow"):
+                spec_lowering.search_lower_spec_to_impl(power, inputs, UQ, ctx)
+            lowered = spec_lowering.search_lower_spec_to_impl(
+                composite, inputs, UQ, ctx,
+            )
+        self.assertEqual(lowered.name, "composite")
+
     def test_autogenerate_rejects_signed_range_for_unsigned_result(self):
         def spec(x: Q(3, 0), ctx) -> UQ(2, 0):
             del ctx
@@ -10293,19 +10420,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(lowered_assumption.name, "q_ge")
         self.assertEqual(lowered_assumption.args[0].name, "q_sub")
 
-    def test_autogenerate_unsupported_spec_reaches_search_limit(self):
-        from zolotone.ast import spec_lowering
-
+    def test_autogenerate_rejects_unsupported_spec_operation_early(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
             return x ** ctx.two()
 
-        with (
-            patch.object(spec_lowering, "MAX_SEARCH_DEPTH", 2),
-            self.assertRaisesRegex(
-                ZolotoneError,
-                "search reached the maximum depth of 2",
-            ),
-        ):
+        with self.assertRaisesRegex(MissingError, "no lossless component spec can produce"):
             Autogenerate("generated_pow", spec)
 
     def test_complete_exact_and_family_contracts_are_accepted(self):

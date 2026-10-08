@@ -361,6 +361,7 @@ def Composite(
                 c_lowering=c_lowering,
             )
         setattr(wrapper2, "_spec_contract", contract)
+        setattr(wrapper2, "_spec_fn", spec)
         return wrapper2
     return wrapper1
 
@@ -590,6 +591,7 @@ def Primitive(
                 c_lowering=c_lowering,
             )
         setattr(wrapper2, "_spec_contract", contract)
+        setattr(wrapper2, "_spec_fn", spec)
         return wrapper2
     return wrapper1
 
