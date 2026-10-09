@@ -8849,28 +8849,33 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertEqual(lowered.name, "uq_add")
 
-    def test_lowering_rejects_unsupported_nested_operation_early(self):
+    def test_lowering_generates_nested_operation_before_constructing_unrelated_components(self):
         from zolotone.ast import spec_lowering
-        from zolotone.components import uq_add
+        from zolotone.components import uq_add, uq_mul
 
         ctx = SpecContext("unsupported-operation")
         x, y = ctx.real("x"), ctx.real("y")
+        ctx.assume(x >= ctx.zero())
+        ctx.assume(x <= ctx.real_val(3))
+        ctx.assume(y >= ctx.one())
+        ctx.assume(y <= ctx.real_val(3))
 
         def unused_component(*args):
             raise AssertionError("Component was constructed")
 
-        unused_component._spec_contract = uq_add._spec_contract
-        unused_component._spec_fn = uq_add._spec_fn
+        unused_component._spec_contract = uq_mul._spec_contract
+        unused_component._spec_fn = uq_mul._spec_fn
         with (
-            patch("zolotone.components.LOSSLESS_COMPONENTS", (unused_component,)),
-            self.assertRaisesRegex(MissingError, "Pow"),
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (unused_component, uq_add)),
         ):
-            spec_lowering.search_lower_spec_to_impl(
+            lowered = spec_lowering.search_lower_spec_to_impl(
                 x + y ** ctx.real_val(-1),
                 {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
                 UQ,
                 ctx,
             )
+        self.assertEqual(lowered.name, "uq_add")
+        self.assertTrue(lowered.args[1].name.startswith("generated_pow_"))
 
     def test_lowering_accepts_operation_supplied_as_input(self):
         from zolotone.ast import spec_lowering
@@ -8944,11 +8949,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
         ):
             inputs = {x: Var("x", UQ(2, 0))}
-            with self.assertRaisesRegex(MissingError, "Pow"):
-                spec_lowering.search_lower_spec_to_impl(power, inputs, UQ, ctx)
+            powered = spec_lowering.search_lower_spec_to_impl(power, inputs, UQ, ctx)
             lowered = spec_lowering.search_lower_spec_to_impl(
                 composite, inputs, UQ, ctx,
             )
+        self.assertTrue(powered.name.startswith("generated_pow_"))
         self.assertEqual(lowered.name, "composite")
 
     def test_lowering_reuses_reachability_matches_with_unhashable_component(self):
@@ -10543,7 +10548,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             NotImplementedError,
             "Real-valued autogeneration candidate must have a Q or UQ",
         ):
-            _candidate_output_range_fits(candidate, ctx, {}, {})
+            _candidate_output_range_fits(candidate, ctx)
 
     def test_assumption_cannot_justify_its_own_unsigned_intermediate(self):
         def spec(x: UQ(4, 0), y: UQ(4, 0), ctx) -> UQ(4, 0):
@@ -10556,12 +10561,12 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(lowered_assumption.name, "q_ge")
         self.assertEqual(lowered_assumption.args[0].name, "q_sub")
 
-    def test_autogenerate_rejects_unsupported_spec_operation_early(self):
+    def test_autogenerate_creates_missing_real_operation(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
             return x ** ctx.two()
 
-        with self.assertRaisesRegex(MissingError, "no lossless component spec can produce"):
-            Autogenerate("generated_pow", spec)
+        generated = Autogenerate("generated_pow", spec)
+        self.assertTrue(generated.inner_tree.name.startswith("generated_pow_"))
 
     def test_complete_exact_and_family_contracts_are_accepted(self):
         def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
@@ -11727,6 +11732,198 @@ class TestSignSpecs(unittest.TestCase):
 
                 self.assertEqual(str(spec), "real(xored_signs_2)")
                 self.assertEqual(report["status"], "unsat", report)
+
+
+class TestMissingPrimitiveRuntime(unittest.TestCase):
+    def test_missing_reciprocal_creates_typed_runtime_primitive(self):
+        from zolotone.ast.autogen import get_spec
+        from zolotone.components import LOSSLESS_COMPONENTS
+
+        def reciprocal(x: UQ(3, 2), ctx) -> UQ:
+            ctx.assume(x >= ctx.real_val(1))
+            return x ** ctx.real_val(-1)
+
+        result = Autogenerate("reciprocal", reciprocal)
+        primitive = result.inner_tree
+        generated_spec = get_spec(primitive.name, primitive.spec)
+
+        self.assertEqual(generated_spec.annotations["x"], UQ(3, 2))
+        self.assertEqual(generated_spec.return_annotation, UQ(1, 2))
+        self.assertEqual(str(generated_spec.spec_ast), "(real(x_0) ** -1)")
+        self.assertEqual(len(generated_spec.spec_ctx.requirements), 1)
+        requirement = str(generated_spec.spec_ctx.requirements[0])
+        self.assertIn("(real(x_0) >= 1.0)", requirement)
+        self.assertIn("(real(x_0) <= 7.75)", requirement)
+        self.assertFalse(
+            any(component._spec_fn is primitive.spec for component in LOSSLESS_COMPONENTS)
+        )
+        self.assertEqual(primitive.dtype, UQ(1, 2))
+        self.assertEqual(primitive.inner_tree.name, "basic_identity")
+
+    def test_missing_component_lowers_a_nested_reachable_input(self):
+        from zolotone.ast.autogen import get_spec
+
+        def nested_reciprocal(x: UQ(2, 2), ctx) -> UQ:
+            return (x + ctx.one()) ** ctx.real_val(-1)
+
+        result = Autogenerate("nested_reciprocal", nested_reciprocal)
+        primitive = result.inner_tree
+        generated_spec = get_spec(primitive.name, primitive.spec)
+
+        self.assertEqual(generated_spec.annotations["x"], UQ(3, 2))
+        self.assertEqual(str(generated_spec.spec_ast), "(real(x_0) ** -1)")
+        self.assertEqual(primitive.args[0].name, "uq_add")
+
+    def test_reciprocal_uses_known_multiplication_as_its_typed_input(self):
+        def reciprocal_of_product(x: UQ(2, 2), ctx) -> UQ:
+            ctx.assume(x >= ctx.real_val(0.5))
+            return (ctx.two() * x) ** ctx.real_val(-1)
+
+        result = Autogenerate("reciprocal_of_product", reciprocal_of_product)
+        self.assertTrue(result.inner_tree.name.startswith("generated_pow_"))
+        self.assertEqual(result.inner_tree.args[0].name, "uq_mul")
+
+    def test_structural_match_without_compatible_dtypes_is_a_typed_gap(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_mul
+
+        ctx = SpecContext("dtype-gap")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.one())
+
+        def incompatible(*args):
+            raise AssertionError("Incompatible component was constructed")
+
+        incompatible._spec_contract = uq_mul._spec_contract
+        incompatible._spec_fn = lambda lhs, rhs, component_ctx: lhs ** rhs
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (incompatible,)):
+            result = spec_lowering.search_lower_spec_to_impl(
+                x ** ctx.real_val(-1), {x: Var("x", UQ(2, 0))}, UQ, ctx
+            )
+        self.assertTrue(result.name.startswith("generated_pow_"))
+
+    def test_failed_known_component_construction_or_range_uses_typed_hole(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_mul
+
+        ctx = SpecContext("construction-and-range-gap")
+        x = ctx.real("x")
+
+        def power_spec(lhs, rhs, component_ctx):
+            return lhs ** rhs
+
+        def invalid(*args):
+            raise TypeError("No implementation for these operands")
+
+        def too_narrow(*args):
+            return Var("too_narrow", UQ(1, 0))
+
+        for component in (invalid, too_narrow):
+            component._spec_contract = uq_mul._spec_contract
+            component._spec_fn = power_spec
+            with (
+                self.subTest(component=component.__name__),
+                patch("zolotone.components.LOSSLESS_COMPONENTS", (component,)),
+            ):
+                result = spec_lowering.search_lower_spec_to_impl(
+                    x ** ctx.two(), {x: Var("x", UQ(2, 0))}, UQ, ctx
+                )
+                self.assertTrue(result.name.startswith("generated_pow_"))
+                self.assertEqual(result.dtype, UQ(4, 0))
+
+    def test_generates_first_typed_frontier_then_uses_known_composition(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("first-typed-frontier")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.one())
+        ctx.assume(x <= ctx.real_val(3))
+
+        def finish_with_reciprocal(lhs, rhs, component_ctx):
+            return lhs + rhs ** component_ctx.real_val(-1)
+
+        def finish_component(*args):
+            return Var("known_result", UQ(5, 0))
+
+        finish_component._spec_contract = uq_add._spec_contract
+        finish_component._spec_fn = finish_with_reciprocal
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (finish_component, uq_add)),
+            patch.object(
+                spec_lowering, "_create_missing_primitive",
+                wraps=spec_lowering._create_missing_primitive,
+            ) as create,
+        ):
+            result = spec_lowering.search_lower_spec_to_impl(
+                (x ** ctx.two()) + (x ** ctx.real_val(-1)),
+                {x: Var("x", UQ(2, 0))},
+                UQ,
+                ctx,
+            )
+
+        self.assertEqual(result.name, "known_result")
+        self.assertEqual(create.call_count, 2)
+        self.assertIn("value=-1", repr(create.call_args_list[0].args[0]))
+        self.assertIn("value=2", repr(create.call_args_list[1].args[0]))
+
+    def test_autogenerate_uses_multiple_runtime_components(self):
+        def two_missing(x: UQ(2, 0), ctx) -> UQ:
+            return (x ** ctx.two()) + ((x + ctx.one()) ** ctx.real_val(-1))
+
+        result = Autogenerate("two_missing", two_missing)
+
+        self.assertEqual(result.inner_tree.name, "uq_add")
+        self.assertEqual(result.dtype, UQ(5, 0))
+        self.assertTrue(
+            all(
+                argument.name.startswith("generated_pow_")
+                for argument in result.inner_tree.args
+            )
+        )
+
+    def test_lowering_generates_component_from_typed_input(self):
+        from zolotone.ast.spec_lowering import search_lower_spec_to_impl
+
+        ctx = SpecContext("direct-lowering")
+        x = ctx.real("x")
+
+        node = search_lower_spec_to_impl(
+            x ** ctx.two(),
+            {x: Var("x", UQ(2, 0))},
+            UQ,
+            ctx,
+        )
+
+        self.assertTrue(node.name.startswith("generated_pow_"))
+        self.assertEqual(node.dtype, UQ(4, 0))
+
+    def test_unbounded_reciprocal_creates_no_component(self):
+        def reciprocal(x: UQ(3, 2), ctx) -> UQ:
+            return x ** ctx.real_val(-1)
+
+        with self.assertRaisesRegex(ZolotoneError, "output range"):
+            Autogenerate("unbounded", reciprocal)
+
+    def test_runtime_component_is_created_only_on_lowering_failure(self):
+        def reciprocal(x: UQ(3, 2), ctx) -> UQ:
+            ctx.assume(x >= ctx.real_val(1))
+            return x ** ctx.real_val(-1)
+
+        def identity(x: UQ(3, 2), ctx) -> UQ:
+            return x
+
+        self.assertEqual(
+            Autogenerate("already_lowerable", identity).dtype,
+            UQ(3, 2),
+        )
+        first = Autogenerate("missing", reciprocal).inner_tree
+        second = Autogenerate("missing", reciprocal).inner_tree
+        self.assertIsNot(first, second)
+        self.assertEqual(
+            first.name,
+            second.name,
+        )
 
 
 if __name__ == "__main__":

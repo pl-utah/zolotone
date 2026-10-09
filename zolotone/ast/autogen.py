@@ -120,7 +120,11 @@ def get_spec(
     )
 
 
-def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
+def Autogenerate(
+    name: str,
+    spec: tp.Callable[..., tp.Any],
+):
+    """Lower a specification, creating missing real Primitives in memory."""
     # Step 1: Obtain spec AST
     current_spec = get_spec(name, spec)
 

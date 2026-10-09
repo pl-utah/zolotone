@@ -119,6 +119,14 @@ Zolotone connects golden specifications to typed implementation models:
    specification produce equivalent results for the same symbolic inputs.
 5. Call `check_spec()` to compare the implementation with its golden model.
 
+Lowering first searches for dtype-compatible, range-valid implementations of
+specification expressions using known components. If a real expression still
+needs a component, lowering creates a typed `Primitive` in memory at the first
+provable typed frontier, then searches known components again. The generated
+node is available in the composite's implementation tree; its identity body is a
+temporary scaffold and it is not registered as a lossless component. This
+first pass supports one typed reachable fixed-point input plus literals.
+
 Proof obligations can be simplified, rewritten with egglog, discharged with
 Z3, and checked with dReal. Floating-point results are split into observable
 classification cases so finite values, zeros, infinities, and NaNs are compared
