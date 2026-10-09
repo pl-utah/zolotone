@@ -15,6 +15,7 @@ from ..spec.spec_ast import (
     BoolLit,
     BoolVar,
     Eq,
+    FPExpr,
     Ge,
     Gt,
     Le,
@@ -112,66 +113,105 @@ def _matching_subexpression(
     )
 
 
-def _reject_unreachable_spec(
+_SpecMatchKey = tuple[int, tuple[SpecNode, ...]]
+
+
+def _probe_input_category(annotation: object) -> type[SpecNode] | None:
+    if annotation is Bool or isinstance(annotation, Bool):
+        return BoolExpr
+    if annotation in (Q, UQ) or isinstance(annotation, (Q, UQ)):
+        return RealExpr
+    if annotation is DataType:  # in case of if statement, annotation is just any type
+        return SpecNode
+    if not (
+        isinstance(annotation, DataType)
+        or isinstance(annotation, type) and issubclass(annotation, DataType)
+    ):
+        return None
+    try:
+        dtype = annotation if isinstance(annotation, DataType) else annotation()
+        sample = dtype.to_spec("probe", SpecContext("lowering input type"))
+        return type(sample) if isinstance(sample, FPExpr) else None
+    except Exception:
+        return None
+
+
+def _find_reachable_spec_matches(
     subexpressions: tuple[SpecNode, ...],
     available: tuple[SpecNode, ...],
     components: tuple[tp.Callable[..., Node], ...],
-) -> None:
-    """Check whether component specs can build the target from available specs."""
+) -> dict[_SpecMatchKey, SpecNode] | None:
+    """Cache structural matches, or defer when the probe is inconclusive."""
+    if any(not isinstance(expr, SpecNode) for expr in available):
+        return None
     root = subexpressions[0]
     reachable = set(available)
+    # Collect info about components
+    component_specs = []
+    for component_index, component in enumerate(components):
+        contract = getattr(component, "_spec_contract", None)
+        spec = getattr(component, "_spec_fn", None)
+        if not isinstance(contract, _SpecContract) or not callable(spec):
+            return None
+
+        categories = tuple(
+            _probe_input_category(contract.annotations[parameter.name])
+            for parameter in list(contract.signature.parameters.values())[:-1]
+        )
+        if any(category is None for category in categories):
+            return None
+        
+        component_specs.append((component_index, spec, contract.display_name, categories))
+
+    matches: dict[_SpecMatchKey, SpecNode] = {}
+    probed: set[_SpecMatchKey] = set()
     probes = 0
-    while root not in reachable:
+    # Loop runs until the limit or a fixed-point
+    while True:
         previous_count = len(reachable)
-        for component in components:
-            contract = getattr(component, "_spec_contract", None)
-            spec = getattr(component, "_spec_fn", None)
-            if not isinstance(contract, _SpecContract) or spec is None:
-                return
-            pools = []
-            for parameter in list(contract.signature.parameters.values())[:-1]:
-                annotation = contract.annotations[parameter.name]
-                if annotation is Bool or isinstance(annotation, Bool):
-                    category = BoolExpr
-                elif annotation in (Q, UQ) or isinstance(annotation, (Q, UQ)):
-                    category = RealExpr
-                elif annotation is DataType:
-                    category = SpecNode
-                else:
-                    return
-                pools.append(tuple(
-                    expr for expr in reachable if isinstance(expr, category)
-                ))
+        for component_index, spec, component_name, categories in component_specs:
+            # Select only expressions that match the category of a component
+            pools = [
+                tuple(expr for expr in reachable if isinstance(expr, category))
+                for category in categories
+            ]
 
             for arguments in itertools.product(*pools):
+                key = (component_index, arguments)
+                if key in probed:
+                    continue
+                probed.add(key)
                 probes += 1
                 if probes > MAX_SPEC_PROBES:
-                    return
+                    return None
                 try:
                     result = spec(
                         *arguments,
-                        SpecContext(f"lowering reachability for {contract.display_name}"),
+                        SpecContext(f"autogen candidate {component_name}"),
                     )
                 except (TypeError, ValueError, NotImplementedError, OverflowError):
                     continue
+                except Exception:
+                    return None
                 matched = _matching_subexpression(result, subexpressions)
-                if matched is not None and matched not in reachable:
+                if matched is not None:
+                    matches[key] = matched
                     reachable.add(matched)
-                    if matched.identical(root):
-                        return
 
         if len(reachable) == previous_count:
-            missing = next(
-                (
-                    expr for expr in reversed(subexpressions)
-                    if expr not in reachable and children(expr)
-                ),
-                root,
-            )
-            raise MissingError(
-                f"Cannot lower {missing!r}: no lossless component spec "
-                "can produce this subexpression"
-            )
+            if root not in reachable:
+                missing = next(
+                    (
+                        expr for expr in reversed(subexpressions)
+                        if expr not in reachable and children(expr)
+                    ),
+                    root,
+                )
+                raise MissingError(
+                    f"Cannot lower {missing!r}: no lossless component spec "
+                    "can produce this subexpression"
+                )
+            return matches
 
 
 def _matches_result(
@@ -235,6 +275,7 @@ def search_lower_spec_to_impl(
 ) -> Node:
     from ..components import LOSSLESS_COMPONENTS
 
+    components = tuple(LOSSLESS_COMPONENTS)
     # Lowering leaves first
     subexpressions = _spec_subexpressions(spec_ast)
     range_cache: dict[SpecNode, tuple[float, float] | None] = {}
@@ -278,16 +319,22 @@ def search_lower_spec_to_impl(
         if _matches_result(candidate, spec_ast, return_annotation):
             return candidate.node
 
-    _reject_unreachable_spec(
+    spec_matches = _find_reachable_spec_matches(
         subexpressions,
         tuple(candidate.spec for candidate in candidates),
-        tuple(LOSSLESS_COMPONENTS),
+        components,
     )
+    component_entries = tuple(enumerate(components))
+    if spec_matches is not None:
+        matched = {component_index for component_index, _ in spec_matches}
+        component_entries = tuple(
+            entry for entry in component_entries if entry[0] in matched
+        )
 
     depth = 1
     while True:
         generated = []
-        for component in LOSSLESS_COMPONENTS:
+        for component_index, component in component_entries:
             component_contract = getattr(component, "_spec_contract", None)
             if not isinstance(component_contract, _SpecContract):
                 raise MissingError(
@@ -318,22 +365,21 @@ def search_lower_spec_to_impl(
                     default=0,
                 ) != depth - 1:
                     continue
-                try:
-                    # Match the mathematical spec before building its implementation.
-                    component_ctx = SpecContext(
-                        f"autogen candidate {component_name}"
+                argument_specs = tuple(argument.spec for argument in arguments)
+                if spec_matches is None:
+                    try:
+                        candidate_spec = component._spec_fn(
+                            *argument_specs,
+                            SpecContext(f"autogen candidate {component_name}"),
+                        )
+                    except (TypeError, ValueError, NotImplementedError, OverflowError):
+                        continue
+                    matched_spec = _matching_subexpression(
+                        candidate_spec,
+                        subexpressions,
                     )
-                    candidate_spec = component._spec_fn(
-                        *(argument.spec for argument in arguments),
-                        component_ctx,
-                    )
-                except (TypeError, ValueError, NotImplementedError, OverflowError):
-                    continue
-
-                matched_spec = _matching_subexpression(
-                    candidate_spec,
-                    subexpressions,
-                )
+                else:
+                    matched_spec = spec_matches.get((component_index, argument_specs))
                 if matched_spec is None:
                     continue
 

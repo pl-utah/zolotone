@@ -8897,10 +8897,12 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
     def test_lowering_accepts_operation_added_by_component_spec(self):
         from zolotone.ast import spec_lowering
-        from zolotone.components import uq_mul
+        from zolotone.components import uq_add, uq_mul
 
         ctx = SpecContext("component-operation")
-        x = ctx.real("x")
+        x, y = ctx.real("x"), ctx.real("y")
+        power = x ** ctx.two()
+        inputs = {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))}
 
         def power_component(*args):
             return Var("powered", UQ(2, 0))
@@ -8908,16 +8910,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         power_component._spec_contract = uq_mul._spec_contract
         power_component._spec_fn = lambda lhs, rhs, ctx: lhs ** rhs
         with (
-            patch("zolotone.components.LOSSLESS_COMPONENTS", (power_component,)),
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (power_component, uq_add)),
             patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
         ):
-            lowered = spec_lowering.search_lower_spec_to_impl(
-                x ** ctx.two(),
-                {x: Var("x", UQ(2, 0))},
-                UQ,
-                ctx,
-            )
-        self.assertEqual(lowered.name, "powered")
+            powered = spec_lowering.search_lower_spec_to_impl(power, inputs, UQ, ctx)
+            lowered = spec_lowering.search_lower_spec_to_impl(power + y, inputs, UQ, ctx)
+        self.assertEqual(powered.name, "powered")
+        self.assertEqual(lowered.name, "uq_add")
+        self.assertEqual(lowered.args[0].name, "powered")
 
     def test_lowering_matches_full_multi_node_component_spec(self):
         from zolotone.ast import spec_lowering
@@ -8950,6 +8950,142 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 composite, inputs, UQ, ctx,
             )
         self.assertEqual(lowered.name, "composite")
+
+    def test_lowering_reuses_reachability_matches_with_unhashable_component(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("reuse-spec-matches")
+        x, y = ctx.real("x"), ctx.real("y")
+        spec_calls = []
+        context_names = []
+
+        def add_spec(lhs, rhs, component_ctx):
+            spec_calls.append((lhs, rhs))
+            context_names.append(component_ctx.name)
+            return lhs + rhs
+
+        class AddComponent:
+            __hash__ = None
+
+            def __call__(self, *args):
+                return Var("sum", UQ(3, 0))
+
+        add_component = AddComponent()
+        add_component._spec_contract = uq_add._spec_contract
+        add_component._spec_fn = add_spec
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (add_component,)),
+            patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
+        ):
+            lowered = spec_lowering.search_lower_spec_to_impl(
+                x + y,
+                {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
+                UQ,
+                ctx,
+            )
+        self.assertEqual(lowered.name, "sum")
+        self.assertEqual(len(spec_calls), len(set(spec_calls)))
+        self.assertEqual(
+            set(context_names),
+            {f"autogen candidate {uq_add._spec_contract.display_name}"},
+        )
+
+    def test_lowering_falls_back_when_spec_probe_limit_is_reached(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("spec-probe-limit")
+        x, y = ctx.real("x"), ctx.real("y")
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add,)),
+            patch.object(spec_lowering, "MAX_SPEC_PROBES", 0),
+            patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
+        ):
+            lowered = spec_lowering.search_lower_spec_to_impl(
+                x + y,
+                {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
+                UQ,
+                ctx,
+            )
+        self.assertEqual(lowered.name, "uq_add")
+
+    def test_lowering_probes_only_matching_fp_format(self):
+        from dataclasses import replace
+        from zolotone.ast import spec_lowering
+        from zolotone.ast.nodes import _build_spec_contract
+        from zolotone.spec.custom_specs.fp16 import fp16
+        from zolotone.spec.custom_specs.fp32 import fp32
+        from zolotone.types import Float16, Float32
+
+        ctx = SpecContext("fp-spec-probe")
+        fp_input = fp32.zero(ctx)
+        target = replace(fp_input, value=fp_input.value + ctx.one())
+        extra_real = ctx.real("extra")
+        probed_types = []
+
+        def fp_spec(value: Float32, component_ctx) -> Float32:
+            probed_types.append(type(value))
+            if not isinstance(value, fp32):
+                return None
+            return replace(value, value=value.value + component_ctx.one())
+
+        def fp_component(*args):
+            return Var("shifted", Float32())
+
+        fp_component._spec_contract = _build_spec_contract("fp_probe", fp_spec)
+        fp_component._spec_fn = fp_spec
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (fp_component,)):
+            lowered = spec_lowering.search_lower_spec_to_impl(
+                target,
+                {
+                    fp_input: Var("fp", Float32()),
+                    fp16.zero(ctx): Var("other_fp", Float16()),
+                    extra_real: Var("extra", UQ(2, 0)),
+                },
+                Float32,
+                ctx,
+            )
+        self.assertEqual(lowered.name, "shifted")
+        self.assertEqual(set(probed_types), {fp32})
+
+    def test_lowering_fp_probe_categories_match_dtype_specs(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.types import (
+            BFloat16, E2M1, E4M3FN, E5M2, E5M2FNUZ,
+            Float16, Float32, UE4M3,
+        )
+
+        for dtype_type in (
+            BFloat16, E2M1, E4M3FN, E5M2, E5M2FNUZ,
+            Float16, Float32, UE4M3,
+        ):
+            with self.subTest(dtype=dtype_type.__name__):
+                dtype = dtype_type()
+                expected = type(dtype.to_spec("value", SpecContext("fp-category")))
+                self.assertIs(spec_lowering._probe_input_category(dtype_type), expected)
+                self.assertIs(spec_lowering._probe_input_category(dtype), expected)
+
+    def test_lowering_reaches_fp_spec_through_generic_conditional(self):
+        from zolotone.ast import spec_lowering
+        from zolotone.components import _if_then_else
+        from zolotone.spec.custom_specs.fp32 import fp32
+        from zolotone.types import Float32
+
+        ctx = SpecContext("fp-conditional")
+        condition = ctx.bool("condition")
+        zero, negative_zero = fp32.zero(ctx), fp32.nzero(ctx)
+        target = _if_then_else._spec_fn(condition, zero, negative_zero, ctx)
+        inputs = {
+            condition: Var("condition", Bool()),
+            zero: Var("zero", Float32()),
+            negative_zero: Var("negative_zero", Float32()),
+        }
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (_if_then_else,)):
+            lowered = spec_lowering.search_lower_spec_to_impl(
+                target, inputs, Float32, ctx,
+            )
+        self.assertEqual(lowered.name, "_if_then_else")
 
     def test_autogenerate_rejects_signed_range_for_unsigned_result(self):
         def spec(x: Q(3, 0), ctx) -> UQ(2, 0):
