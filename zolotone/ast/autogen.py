@@ -164,10 +164,11 @@ def Autogenerate(
             signature=current_spec.signature.replace(return_annotation=result_dtype),
         )
 
-    print(current_spec)
-
     # Step 7: derive guards for the selected implementation result.
     current_spec = add_output_guards(current_spec)
+
+    print(current_spec)
+
 
     # Step 8: lower and attach assumptions, user checks, and output guards.
     attach_lowered_conditions(lowered_composite, current_spec)

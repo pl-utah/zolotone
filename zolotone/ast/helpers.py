@@ -1,7 +1,55 @@
-from ..types import DataType, Tuple
+from ..types import DataType, Q, Tuple, UQ
 from ..spec import BoolExpr, Cases, case, FPExpr, If, RealExpr
 from .node import Node
 from .nodes import Op, Primitive
+
+
+def integer_lookup(
+    x: Node,
+    *,
+    table: tuple[int, ...],
+    lowest_code: int,
+    out: Q | UQ,
+) -> Op:
+    """Look up raw output bits by the input's integer encoding."""
+    input_dtype = x.dtype
+    if not isinstance(input_dtype, (Q, UQ)):
+        raise TypeError("integer lookup input must be Q or UQ")
+
+    def impl(raw: int) -> int:
+        code = input_dtype._scaled_integer(raw) if isinstance(input_dtype, Q) else raw
+        index = code - lowest_code
+        if not 0 <= index < len(table):
+            raise ValueError("integer lookup input is outside its required range")
+        return table[index]
+
+    def sign(value: DataType) -> DataType:
+        return out
+
+    values = ", ".join(map(str, table))
+    code = "static_cast<int64_t>(raw)"
+    if isinstance(input_dtype, Q) and input_dtype.total_bits() != 64:
+        shift = 64 - input_dtype.total_bits()
+        code = f"(static_cast<int64_t>(raw << {shift}) >> {shift})"
+
+    def c_lowering(args: list[str], jittable: bool) -> str:
+        return (
+            "([](uint64_t raw) { "
+            f"static constexpr uint64_t table[] = {{{values}}}; "
+            f"const int64_t code = {code}; "
+            f"return code >= {lowest_code} && "
+            f"static_cast<uint64_t>(code - {lowest_code}) < {len(table)} "
+            f"? table[static_cast<uint64_t>(code - {lowest_code})] : 0; "
+            f"}})({args[0]})"
+        )
+
+    return Op(
+        impl=impl,
+        sign=sign,
+        c_lowering=c_lowering,
+        args=[x],
+        name="integer_lookup",
+    )
 
 
 def Copy(x: Node) -> Node:

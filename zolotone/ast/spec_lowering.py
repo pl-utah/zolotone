@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from fractions import Fraction
-import hashlib
 import itertools
 import math
-import re
 import typing as tp
 
 from ..errors import MissingError, ZolotoneError
@@ -32,11 +30,11 @@ from ..spec.spec_ast import (
 )
 from ..spec.spec_context import SpecContext
 from ..types import Bool, DataType, Q, UQ, Value
+from .missing import _create_missing_primitive as _build_missing_primitive
 from .node import Node
 from .nodes import (
     Composite,
     Const,
-    Primitive,
     Var,
     _annotation_matches,
     _SpecContract,
@@ -44,8 +42,6 @@ from .nodes import (
 from .spec_validation import (
     _fixed_point_real_bounds,
     _fixed_point_result_fits,
-    _output_format_suggestion_with_range_analysis,
-    _output_format_suggestion_with_search,
     _prove_result_fits,
 )
 
@@ -239,68 +235,13 @@ def _create_missing_primitive(
     input_candidate: _Candidate,
     range_ctx: SpecContext,
 ) -> Node:
-    """Prove the format and create a runtime Primitive for a typed frontier."""
-    input_expr = tp.cast(RealExpr, input_candidate.spec)
-    input_dtype = input_candidate.node.dtype
-    if not isinstance(input_dtype, (Q, UQ)):
-        raise MissingError(
-            f"Missing component input {input_expr!r} has no Q or UQ descriptor"
-        )
-
-    # The selected typed operand has valid descriptor bounds.
-    generation_ctx = range_ctx.copy()
-    generation_ctx.assumes.append(
-        _fixed_point_result_fits(input_expr, input_dtype, generation_ctx)
+    """Compatibility wrapper for missing-component construction."""
+    return _build_missing_primitive(
+        missing,
+        tp.cast(RealExpr, input_candidate.spec),
+        input_candidate.node,
+        range_ctx,
     )
-
-    input_range = rival_range_analysis(input_expr, generation_ctx)
-    if input_range is None or not all(math.isfinite(bound) for bound in input_range):
-        raise ZolotoneError(
-            f"Could not obtain a finite input range for component input {input_expr!r}"
-        )
-
-    conservative = _output_format_suggestion_with_range_analysis(
-        missing, input_dtype, generation_ctx
-    )
-    output_dtype = _output_format_suggestion_with_search(
-        missing, conservative, generation_ctx
-    )
-    if output_dtype is None:
-        raise ZolotoneError(
-            f"Could not prove a fixed-point output format for {missing!r}"
-        )
-
-    expression_key = repr(substitute_spec_node(missing, input_expr, RealVar("x")))
-    pattern = re.sub(r"[^a-z0-9]+", "_", type(missing).__name__.lower())
-    dtype_part = (
-        f"{type(input_dtype).__name__.lower()}{input_dtype.int_bits}_{input_dtype.frac_bits}"
-        f"_to_{type(output_dtype).__name__.lower()}{output_dtype.int_bits}_{output_dtype.frac_bits}"
-    )
-    digest = hashlib.sha256(expression_key.encode()).hexdigest()[:10]
-    component_name = f"generated_{pattern}_{dtype_part}_{digest}"
-    lower, upper = input_range
-
-    def generated_spec(x: input_dtype, ctx) -> output_dtype:
-        ctx.require((x >= ctx.real_val(lower)) & (x <= ctx.real_val(upper)))
-        return substitute_spec_node(missing, input_expr, x)
-
-    # This module postpones annotations; bind the exact descriptors now so
-    # Primitive's contract resolver does not look for closure locals globally.
-    generated_spec.__annotations__ = {
-        "x": input_dtype,
-        "return": output_dtype,
-    }
-    generated_spec.__name__ = f"{component_name}_spec"
-    generated_spec.__qualname__ = generated_spec.__name__
-
-    from ..components.basics import basic_identity
-
-    @Primitive(name=component_name, spec=generated_spec)
-    def generated_impl(x: Node) -> Node:
-        # Placeholder body; the selected range does not prove exact arithmetic.
-        return basic_identity(x, out=output_dtype)
-
-    return generated_impl(input_candidate.node)
 
 
 def _missing_frontiers(
