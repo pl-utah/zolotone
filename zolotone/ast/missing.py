@@ -7,6 +7,8 @@ import hashlib
 import math
 import re
 
+import z3
+
 from ..errors import MissingError, ZolotoneError
 from ..rival import build_integer_machine, rival_range_analysis
 from ..spec.spec_ast import RealExpr, RealLit, RealVar, substitute_spec_node
@@ -105,12 +107,26 @@ def _create_missing_primitive(
         input_total_bits=input_dtype.total_bits(),
         output_total_bits=output_dtype.total_bits(),
     )
+    # The range may contain holes (for example, x == -1 or x == 1). Check
+    # reachability against the original assumptions before evaluating a code;
+    # an expression may be undefined at a code that the caller cannot supply.
+    env = {}
+    reachable = z3.Solver()
+    reachable.add(*(assume.to_z3(env) for assume in generation_ctx.assumes))
+    input_term = input_expr.to_z3(env)
     output_mask = (1 << output_dtype.total_bits()) - 1
     try:
-        table = tuple(
-            evaluator.apply(code) & output_mask
-            for code in range(lower_code, upper_code + 1)
-        )
+        entries = []
+        for code in range(lower_code, upper_code + 1):
+            code_is_possible = reachable.check(
+                input_term == z3.RealVal(f"{code}/{scale}")
+            )
+            # A solver "unknown" is not proof that the code is unreachable.
+            # Zero is only a placeholder for a proven unreachable table slot.
+            entries.append(
+                0 if code_is_possible == z3.unsat else evaluator.apply(code) & output_mask
+            )
+        table = tuple(entries)
     except ValueError as exc:
         # Do this before constructing the Primitive: callers must never see a
         # partly populated generated component.
