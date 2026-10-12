@@ -5,7 +5,7 @@ import typing as tp
 from ..spec.spec_ast import SpecNode
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
-from .nodes import _build_spec_contract, _SpecContract
+from ..ast.nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
     attach_lowered_conditions,
     lower_spec_result,

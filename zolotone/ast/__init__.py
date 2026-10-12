@@ -1,7 +1,7 @@
 from .helpers import Copy, if_then_else
 from .node import Node
 from ..solver.report import StdoutVerificationObserver
-from .autogen import Autogenerate, Spec
+from ..autogen import Autogenerate, Spec
 from .nodes import (
     Composite,
     Const,

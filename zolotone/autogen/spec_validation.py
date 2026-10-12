@@ -24,7 +24,7 @@ from ..spec.spec_ast import (
 )
 from ..spec.spec_context import SpecContext, normalize_ctx, simplify_ctx
 from ..types import Bool, DataType, Q, UQ
-from .nodes import _SpecContract
+from ..ast.nodes import _SpecContract
 
 if tp.TYPE_CHECKING:
     from .autogen import Spec

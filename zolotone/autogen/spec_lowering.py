@@ -31,8 +31,8 @@ from ..spec.spec_ast import (
 from ..spec.spec_context import SpecContext
 from ..types import Bool, DataType, Q, UQ, Value
 from .missing import _create_missing_primitive as _build_missing_primitive
-from .node import Node
-from .nodes import (
+from ..ast.node import Node
+from ..ast.nodes import (
     Composite,
     Const,
     Var,

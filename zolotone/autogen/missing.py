@@ -14,9 +14,9 @@ from ..rival import build_integer_machine, rival_range_analysis
 from ..spec.spec_ast import RealExpr, RealLit, RealVar, substitute_spec_node
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
-from .helpers import integer_lookup
-from .node import Node
-from .nodes import Primitive
+from ..ast.helpers import integer_lookup
+from ..ast.node import Node
+from ..ast.nodes import Primitive
 from .spec_validation import (
     _fixed_point_result_fits,
     _output_format_suggestion_with_range_analysis,
