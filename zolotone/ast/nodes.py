@@ -10,9 +10,9 @@ from ..solver.report import (
     StdoutVerificationObserver,
     VerificationObserver,
 )
-from .case_split import run_equivalence_cases
+from ..solver.case_split import run_equivalence_cases
 from .node import Node
-from .parallel_verification import resolve_max_workers
+from ..solver.parallel_verification import resolve_max_workers
 from .proofs import SpecRecorder, record_specs
 from ..spec import SpecContext, SpecNode, special_encoding
 
