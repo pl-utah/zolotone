@@ -10,7 +10,11 @@ import re
 import z3
 
 from ..errors import MissingError, ZolotoneError
-from ..rival import build_integer_machine, rival_range_analysis
+from ..rival import (
+    build_integer_machine,
+    rival_feasibility_check,
+    rival_range_analysis,
+)
 from ..spec.spec_ast import RealExpr, RealLit, RealVar, substitute_spec_node
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
@@ -25,6 +29,29 @@ from .spec_validation import (
 
 
 MAX_GENERATED_TABLE_ENTRIES = 4_096
+
+
+def _code_is_reachable(
+    generation_ctx: SpecContext,
+    input_expr: RealExpr,
+    code: int,
+    scale: int,
+    solver: z3.Solver,
+    input_term: z3.ExprRef,
+) -> bool:
+    code_value = Fraction(code, scale)
+    feasibility_ctx = generation_ctx.copy()
+    feasibility_ctx.assumes.append(input_expr.eq(RealLit(code_value)))
+    status = rival_feasibility_check(feasibility_ctx)
+    if status == "not feasible":
+        return False
+    if status == "feasible":
+        return True
+    if status == "unknown":
+        return solver.check(
+            input_term == z3.RealVal(f"{code}/{scale}")
+        ) != z3.unsat
+    raise ValueError(f"Unexpected feasibility status: {status!r}")
 
 
 def _create_missing_primitive(
@@ -107,9 +134,8 @@ def _create_missing_primitive(
         input_total_bits=input_dtype.total_bits(),
         output_total_bits=output_dtype.total_bits(),
     )
-    # The range may contain holes (for example, x == -1 or x == 1). Check
-    # reachability against the original assumptions before evaluating a code;
-    # an expression may be undefined at a code that the caller cannot supply.
+    # The range may contain holes (for example, x == -1 or x == 1). Use Rival
+    # first and Z3 only when interval analysis cannot decide reachability.
     env = {}
     reachable = z3.Solver()
     reachable.add(*(assume.to_z3(env) for assume in generation_ctx.assumes))
@@ -118,13 +144,16 @@ def _create_missing_primitive(
     try:
         entries = []
         for code in range(lower_code, upper_code + 1):
-            code_is_possible = reachable.check(
-                input_term == z3.RealVal(f"{code}/{scale}")
+            code_is_possible = _code_is_reachable(
+                generation_ctx,
+                input_expr,
+                code,
+                scale,
+                reachable,
+                input_term,
             )
-            # A solver "unknown" is not proof that the code is unreachable.
-            # Zero is only a placeholder for a proven unreachable table slot.
             entries.append(
-                0 if code_is_possible == z3.unsat else evaluator.apply(code) & output_mask
+                evaluator.apply(code) & output_mask if code_is_possible else 0
             )
         table = tuple(entries)
     except ValueError as exc:
@@ -135,7 +164,7 @@ def _create_missing_primitive(
         ) from exc
 
     def generated_spec(x: input_dtype, ctx) -> output_dtype:
-        ctx.require((x >= ctx.real_val(lower)) & (x <= ctx.real_val(upper)))
+        ctx.assume((x >= ctx.real_val(lower)) & (x <= ctx.real_val(upper)))
         return substitute_spec_node(missing, input_expr, x)
 
     # This module postpones annotations; bind the exact descriptors now so

@@ -11947,8 +11947,8 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         with (
             patch("zolotone.components.LOSSLESS_COMPONENTS", (finish_component, uq_add)),
             patch.object(
-                spec_lowering, "_create_missing_primitive",
-                wraps=spec_lowering._create_missing_primitive,
+                spec_lowering, "_build_missing_primitive",
+                wraps=spec_lowering._build_missing_primitive,
             ) as create,
         ):
             result = spec_lowering.search_lower_spec_to_impl(

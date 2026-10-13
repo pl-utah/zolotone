@@ -230,36 +230,40 @@ def _candidate_output_range_fits(
     return _prove_result_fits(candidate.spec, candidate.node.dtype, range_ctx)
 
 
-def _create_missing_primitive(
-    missing: RealExpr,
-    input_candidate: _Candidate,
-    range_ctx: SpecContext,
-) -> Node:
-    """Compatibility wrapper for missing-component construction."""
-    return _build_missing_primitive(
-        missing,
-        tp.cast(RealExpr, input_candidate.spec),
-        input_candidate.node,
-        range_ctx,
-    )
-
-
 def _missing_frontiers(
     subexpressions: tuple[SpecNode, ...],
     candidates: list[_Candidate],
 ) -> tp.Iterator[tuple[RealExpr, _Candidate]]:
-    """Yield expressions whose entire nonliteral boundary is one typed operand."""
+    """Yield unary missing frontiers or report a stuck multi-input frontier."""
     for expression in reversed(subexpressions):
         if not isinstance(expression, RealExpr) or isinstance(expression, RealLit):
             continue
+        expression_has_candidate = any(
+            candidate.spec.identical(expression) for candidate in candidates
+        )
         nonliteral = tuple(
             child for child in children(expression)
             if not isinstance(child, (RealLit, BoolLit))
         )
-        if not nonliteral or not isinstance(nonliteral[0], RealExpr):
+        if not nonliteral:
             continue
+
         input_expr = nonliteral[0]
+        # missing frontiers like x + 1, or x + x are okay, but x + y are not
         if any(not child.identical(input_expr) for child in nonliteral[1:]):
+            if not expression_has_candidate and all(
+                any(candidate.spec.identical(child) for candidate in candidates)
+                for child in nonliteral
+            ):
+                input_names = ", ".join(str(child) for child in nonliteral)
+                raise MissingError(
+                    f"Cannot synthesize missing component for {expression!r}: it "
+                    f"depends on multiple nonliteral inputs ({input_names}); "
+                    "generated missing components currently support only one input"
+                )
+            continue
+
+        if not isinstance(input_expr, RealExpr):
             continue
         for candidate in candidates:
             if (
@@ -269,18 +273,9 @@ def _missing_frontiers(
                 yield expression, candidate
 
 
-def search_lower_spec_to_impl(
-    spec_ast: SpecNode,
-    spec_input_nodes: dict[tp.Any, Node],
-    return_annotation: object,
-    range_ctx: SpecContext,
-) -> Node:
-    """Lower with known components, generating one typed gap at a time."""
-    from ..components import LOSSLESS_COMPONENTS
-
-    components = tuple(LOSSLESS_COMPONENTS)
-    component_contracts = []
-    component_categories = []
+def _component_search_metadata(components):
+    contracts = []
+    categories = []
     for component in components:
         contract = getattr(component, "_spec_contract", None)
         if not isinstance(contract, _SpecContract) or not callable(
@@ -290,17 +285,18 @@ def search_lower_spec_to_impl(
                 f"Autogeneration component {component!r} does not expose "
                 "a specification contract"
             )
-        component_contracts.append(contract)
+        contracts.append(contract)
         parameters = tuple(contract.signature.parameters.values())[:-1]
-        component_categories.append(
+        categories.append(
             tuple(
                 _probe_input_category(contract.annotations[parameter.name])
                 for parameter in parameters
             )
         )
+    return tuple(contracts), tuple(categories)
 
-    # Turn leaves into candidates
-    subexpressions = _spec_subexpressions(spec_ast)
+
+def _initial_candidates(subexpressions, spec_input_nodes):
     sources = [
         _Candidate(node=node, spec=expr, depth=0)
         for expr, node in spec_input_nodes.items()
@@ -321,161 +317,215 @@ def search_lower_spec_to_impl(
         if state not in source_states:
             source_states.add(state)
             sources.append(literal)
+    return sources, source_states
 
-    known_depth_exhausted = False
 
-    def saturate(typed_ctx: SpecContext) -> tuple[_Candidate | None, list[_Candidate]]:
-        nonlocal known_depth_exhausted
-        candidates = list(sources)
-        probe_count = 0
-        states = {(candidate.spec, candidate.node.dtype) for candidate in candidates}
-        for candidate in candidates:
-            if _matches_result(candidate, spec_ast, return_annotation):
-                return candidate, candidates
+def _typed_context(range_ctx: SpecContext, sources: list[_Candidate]) -> SpecContext:
+    typed_ctx = range_ctx.copy()
+    for source in sources:
+        if isinstance(source.spec, RealExpr) and isinstance(source.node.dtype, (Q, UQ)):
+            typed_ctx.assumes.append(
+                _fixed_point_result_fits(source.spec, source.node.dtype, typed_ctx)
+            )
+    return typed_ctx
 
-        prefilter = _prefilter_component_matches(
-            subexpressions,
-            tuple(candidate.spec for candidate in candidates),
-            components,
-            component_contracts,
-            component_categories,
-        )
-        spec_matches = prefilter[0] if prefilter is not None else None
-        relevant_components = (
-            {index for index, _ in spec_matches} if spec_matches is not None else None
-        )
-        possible_specs = prefilter[1] if prefilter is not None else None
-        # If the root is structurally impossible with known components, only
-        # build enough typed nodes to expose every possible missing input.
+
+def _saturate_known_components(
+    spec_ast: SpecNode,
+    return_annotation: object,
+    subexpressions: tuple[SpecNode, ...],
+    sources: list[_Candidate],
+    components,
+    component_contracts,
+    component_categories,
+    typed_ctx: SpecContext,
+) -> tuple[_Candidate | None, list[_Candidate], bool]:
+    candidates = list(sources)
+    probe_count = 0
+    states = {(candidate.spec, candidate.node.dtype) for candidate in candidates}
+    for candidate in candidates:
+        if _matches_result(candidate, spec_ast, return_annotation):
+            return candidate, candidates, False
+
+    prefilter = _prefilter_component_matches(
+        subexpressions,
+        tuple(candidate.spec for candidate in candidates),
+        components,
+        component_contracts,
+        component_categories,
+    )
+    spec_matches = prefilter[0] if prefilter is not None else None
+    relevant_components = (
+        {index for index, _ in spec_matches} if spec_matches is not None else None
+    )
+    possible_specs = prefilter[1] if prefilter is not None else None
+    if (
+        possible_specs is not None
+        and spec_ast not in possible_specs
+        and possible_specs.issubset(candidate.spec for candidate in candidates)
+    ):
+        return None, candidates, False
+
+    for depth in range(1, MAX_SEARCH_DEPTH + 1):
+        generated: list[_Candidate] = []
+        for index, (component, contract) in enumerate(
+            zip(components, component_contracts, strict=True)
+        ):
+            if relevant_components is not None and index not in relevant_components:
+                continue
+            parameters = tuple(contract.signature.parameters.values())[:-1]
+            pools = [
+                tuple(
+                    candidate for candidate in candidates
+                    if _annotation_matches(
+                        candidate.node.dtype,
+                        contract.annotations[parameter.name],
+                    )
+                    and (
+                        component_categories[index][position] is None
+                        or isinstance(
+                            candidate.spec,
+                            component_categories[index][position],
+                        )
+                    )
+                )
+                for position, parameter in enumerate(parameters)
+            ]
+            if any(not pool for pool in pools):
+                continue
+            for arguments in itertools.product(*pools):
+                if max((arg.depth for arg in arguments), default=0) != depth - 1:
+                    continue
+                argument_specs = tuple(arg.spec for arg in arguments)
+                if spec_matches is not None:
+                    matched = spec_matches.get((index, argument_specs))
+                else:
+                    if probe_count >= MAX_TYPED_SPEC_PROBES:
+                        raise ZolotoneError(
+                            f"Cannot lower {spec_ast!r}: component spec probe "
+                            f"limit of {MAX_TYPED_SPEC_PROBES} was reached"
+                        )
+                    probe_count += 1
+                    try:
+                        result = component._spec_fn(
+                            *argument_specs,
+                            SpecContext(f"autogen candidate {contract.display_name}"),
+                        )
+                    except (TypeError, ValueError, NotImplementedError, OverflowError):
+                        result = None
+                    matched = _matching_subexpression(result, subexpressions)
+                if matched is None:
+                    continue
+                try:
+                    node = component(*(arg.node for arg in arguments))
+                except (TypeError, ValueError, NotImplementedError, OverflowError):
+                    continue
+                candidate = _Candidate(node=node, spec=matched, depth=depth)
+                try:
+                    fits = _candidate_output_range_fits(candidate, typed_ctx)
+                except (NotImplementedError, ZolotoneError):
+                    fits = False
+                if not fits:
+                    continue
+                state = (matched, node.dtype)
+                if state in states:
+                    continue
+                states.add(state)
+                if _matches_result(candidate, spec_ast, return_annotation):
+                    return candidate, candidates + generated, False
+                generated.append(candidate)
+        if not generated:
+            return None, candidates, False
+        candidates.extend(generated)
         if (
             possible_specs is not None
             and spec_ast not in possible_specs
             and possible_specs.issubset(candidate.spec for candidate in candidates)
         ):
-            return None, candidates
+            return None, candidates, False
+    return None, candidates, True
 
-        for depth in range(1, MAX_SEARCH_DEPTH + 1):
-            generated: list[_Candidate] = []
-            for index, (component, contract) in enumerate(
-                zip(components, component_contracts, strict=True)
-            ):
-                if relevant_components is not None and index not in relevant_components:
-                    continue
-                parameters = tuple(contract.signature.parameters.values())[:-1]
-                pools = [
-                    tuple(
-                        candidate for candidate in candidates
-                        if _annotation_matches(
-                            candidate.node.dtype,
-                            contract.annotations[parameter.name],
-                        )
-                        and (
-                            component_categories[index][position] is None
-                            or isinstance(
-                                candidate.spec, component_categories[index][position]
-                            )
-                        )
-                    )
-                    for position, parameter in enumerate(parameters)
-                ]
-                if any(not pool for pool in pools):
-                    continue
-                for arguments in itertools.product(*pools):
-                    if max((arg.depth for arg in arguments), default=0) != depth - 1:
-                        continue
-                    argument_specs = tuple(arg.spec for arg in arguments)
-                    if spec_matches is not None:
-                        matched = spec_matches.get((index, argument_specs))
-                    else:
-                        if probe_count >= MAX_TYPED_SPEC_PROBES:
-                            # TODO: we can generate missing lossy component here. it can be a truncation really
-                            raise ZolotoneError(
-                                f"Cannot lower {spec_ast!r}: component spec probe "
-                                f"limit of {MAX_TYPED_SPEC_PROBES} was reached"
-                            )
-                        probe_count += 1
-                        try:
-                            result = component._spec_fn(
-                                *argument_specs,
-                                SpecContext(f"autogen candidate {contract.display_name}"),
-                            )
-                        except (TypeError, ValueError, NotImplementedError, OverflowError):
-                            result = None
-                        matched = _matching_subexpression(result, subexpressions)
-                    if matched is None:
-                        continue
-                    try:
-                        node = component(*(arg.node for arg in arguments))
-                    except (TypeError, ValueError, NotImplementedError, OverflowError):
-                        continue
-                    candidate = _Candidate(
-                        node=node,
-                        spec=matched,
-                        depth=depth,
-                    )
-                    try:
-                        fits = _candidate_output_range_fits(candidate, typed_ctx)
-                    except (NotImplementedError, ZolotoneError):
-                        fits = False
-                    if not fits:
-                        continue
-                    state = (matched, node.dtype)
-                    if state in states:
-                        continue
-                    states.add(state)
-                    if _matches_result(candidate, spec_ast, return_annotation):
-                        return candidate, candidates + generated
-                    generated.append(candidate)
-            if not generated:
-                return None, candidates
-            candidates.extend(generated)
-            if (
-                possible_specs is not None
-                and spec_ast not in possible_specs
-                and possible_specs.issubset(candidate.spec for candidate in candidates)
-            ):
-                return None, candidates
-        known_depth_exhausted = True
-        return None, candidates
 
+def _add_missing_frontier(
+    spec_ast: SpecNode,
+    subexpressions: tuple[SpecNode, ...],
+    candidates: list[_Candidate],
+    sources: list[_Candidate],
+    source_states: set[tuple[SpecNode, DataType]],
+    generated_specs: set[SpecNode],
+    typed_ctx: SpecContext,
+) -> tuple[bool, list[Exception]]:
+    errors: list[Exception] = []
+    for expression, operand in _missing_frontiers(subexpressions, candidates):
+        if expression in generated_specs:
+            continue
+        if expression is not spec_ast and any(
+            candidate.spec.identical(expression) for candidate in candidates
+        ):
+            continue
+        try:
+            node = _build_missing_primitive(
+                expression,
+                tp.cast(RealExpr, operand.spec),
+                operand.node,
+                typed_ctx,
+            )
+        except (MissingError, ZolotoneError, NotImplementedError) as exc:
+            errors.append(exc)
+            continue
+        generated_specs.add(expression)
+        state = (expression, node.dtype)
+        if state in source_states:
+            continue
+        source_states.add(state)
+        sources.append(_Candidate(node=node, spec=expression, depth=0))
+        return True, errors
+    return False, errors
+
+
+def search_lower_spec_to_impl(
+    spec_ast: SpecNode,
+    spec_input_nodes: dict[tp.Any, Node],
+    return_annotation: object,
+    range_ctx: SpecContext,
+) -> Node:
+    """Lower with known components, generating one typed gap at a time."""
+    from ..components import LOSSLESS_COMPONENTS
+
+    components = tuple(LOSSLESS_COMPONENTS)
+    subexpressions = _spec_subexpressions(spec_ast)
+    component_contracts, component_categories = _component_search_metadata(
+        components
+    )
+    sources, source_states = _initial_candidates(subexpressions, spec_input_nodes)
     generated_specs: set[SpecNode] = set()
-    while True:
-        # Source descriptors, including newly generated nodes, are valid range
-        # facts even when this entry point is called outside Autogenerate.
-        typed_ctx = range_ctx.copy()
-        for source in sources:
-            if isinstance(source.spec, RealExpr) and isinstance(source.node.dtype, (Q, UQ)):
-                typed_ctx.assumes.append(
-                    _fixed_point_result_fits(source.spec, source.node.dtype, typed_ctx)
-                )
+    known_depth_exhausted = False
 
-        result, candidates = saturate(typed_ctx)
+    while True:
+        typed_ctx = _typed_context(range_ctx, sources)
+        result, candidates, depth_exhausted = _saturate_known_components(
+            spec_ast,
+            return_annotation,
+            subexpressions,
+            sources,
+            components,
+            component_contracts,
+            component_categories,
+            typed_ctx,
+        )
+        known_depth_exhausted |= depth_exhausted
         if result is not None:
             return result.node
 
-        # Missing component
-        errors: list[Exception] = []
-        created = False
-        for expression, operand in _missing_frontiers(subexpressions, candidates):
-            if expression in generated_specs:
-                continue
-            if expression is not spec_ast and any(
-                candidate.spec.identical(expression) for candidate in candidates
-            ):
-                continue
-            try:
-                node = _create_missing_primitive(expression, operand, typed_ctx)
-            except (MissingError, ZolotoneError, NotImplementedError) as exc:
-                errors.append(exc)
-                continue
-            generated_specs.add(expression)
-            state = (expression, node.dtype)
-            if state in source_states:
-                continue
-            source_states.add(state)
-            sources.append(_Candidate(node=node, spec=expression, depth=0))
-            created = True
-            break
+        created, errors = _add_missing_frontier(
+            spec_ast,
+            subexpressions,
+            candidates,
+            sources,
+            source_states,
+            generated_specs,
+            typed_ctx,
+        )
         if created:
             continue
         if errors:
