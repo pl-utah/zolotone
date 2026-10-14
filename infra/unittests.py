@@ -12072,19 +12072,79 @@ class TestSignSpecs(unittest.TestCase):
 
 
 class TestMissingPrimitiveRuntime(unittest.TestCase):
-    def test_lossy_lookup_rounds_to_even_then_wraps(self):
+    def test_missing_lookup_evaluates_every_reachable_entry_with_rival(self):
+        from zolotone.autogen import missing
+
+        ctx = SpecContext("rival-only-lookup")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.one())
+        source = Var("x", UQ(2, 0))
+        evaluator = Mock()
+        build = missing.build_integer_machine
+
+        def track_machine(*args, **kwargs):
+            evaluator.apply.side_effect = build(*args, **kwargs).apply
+            return evaluator
+
+        with patch.object(missing, "build_integer_machine", side_effect=track_machine):
+            primitive = missing._build_missing_primitive(
+                x ** ctx.two(), x, source, ctx, output_dtype=UQ(4, 0)
+            )
+        self.assertEqual(evaluator.apply.call_args_list, [call(1), call(2), call(3)])
+        for value in (1, 2, 3):
+            source.load_value(UQ(2, 0).from_bits(value))
+            self.assertEqual(primitive.evaluate().to_python(), value * value)
+
+    def test_missing_lookup_does_not_bypass_rival_failure(self):
+        from zolotone.autogen import missing
+
+        ctx = SpecContext("rival-failed-lookup")
+        x = ctx.real("x")
+        evaluator = Mock()
+        evaluator.apply.side_effect = ValueError("Cannot evaluate")
+        with patch.object(missing, "build_integer_machine", return_value=evaluator):
+            with self.assertRaisesRegex(ZolotoneError, "Could not evaluate generated component"):
+                missing._build_missing_primitive(
+                    x ** ctx.two(), x, Var("x", UQ(2, 0)), ctx,
+                    output_dtype=UQ(4, 0),
+                )
+        evaluator.apply.assert_called_once_with(0)
+
+    def test_missing_lookup_requires_explicit_output_dtype(self):
         from zolotone.autogen.missing import _build_missing_primitive
 
-        ctx = SpecContext("lossy-lookup")
+        ctx = SpecContext("explicit-lut-output")
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
-        primitive = _build_missing_primitive(
-            x ** ctx.two(), x, source, ctx, output_dtype=UQ(2, 0)
-        )
+        with self.assertRaises(TypeError):
+            _build_missing_primitive(x ** ctx.two(), x, source, ctx)
+        with self.assertRaisesRegex(MissingError, "output requires a Q or UQ"):
+            _build_missing_primitive(x ** ctx.two(), x, source, ctx, output_dtype=None)
 
-        source.load_value(UQ(2, 0).from_int(3))
-        self.assertEqual(primitive.evaluate().to_python(), 1)
+    def test_missing_lookup_rejects_output_overflow(self):
+        from zolotone.autogen.missing import _build_missing_primitive
 
+        ctx = SpecContext("overflow-lookup")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        for expression, output_dtype in (
+            (x ** ctx.two(), UQ(2, 0)),
+            (x, Q(2, 0)),
+            (ctx.zero() - x, UQ(2, 0)),
+            (ctx.zero() - x, Q(2, 0)),
+        ):
+            with self.subTest(expression=expression, output_dtype=output_dtype):
+                with self.assertRaisesRegex(ZolotoneError, "does not fit"):
+                    _build_missing_primitive(
+                        expression, x, source, ctx, output_dtype=output_dtype
+                    )
+
+    def test_lossy_lookup_rounds_to_even(self):
+        from zolotone.autogen.missing import _build_missing_primitive
+
+        ctx = SpecContext("rounded-lookup")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
         rounded = _build_missing_primitive(
             x * ctx.real_val(0.5), x, source, ctx, output_dtype=UQ(2, 0)
         )

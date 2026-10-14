@@ -441,6 +441,7 @@ class _LoweringSearch:
         key = (expression, input_dtype)
         if key not in self.suggested_lut_types:
             try:
+                # CAREFUL: it copies fractional bits from input_dtype, search algo is needed here
                 self.suggested_lut_types[key] = _suggest_missing_output_dtype(
                     expression, input_dtype, self.ctx
                 )

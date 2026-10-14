@@ -43,7 +43,7 @@ def _suggest_missing_output_dtype(
     return output
 
 
-def _code_bounds(
+def _expression_bounds(
     expression: RealExpr, dtype: Q | UQ, ctx: SpecContext
 ) -> tuple[int, int]:
     value_range = rival_range_analysis(expression, ctx)
@@ -54,6 +54,7 @@ def _code_bounds(
     scale = 1 << dtype.frac_bits
     lower = math.ceil(Fraction(value_range[0]) * scale)
     upper = math.floor(Fraction(value_range[1]) * scale)
+
     if isinstance(dtype, Q):
         minimum = -(1 << (dtype.total_bits() - 1))
         maximum = (1 << (dtype.total_bits() - 1)) - 1
@@ -69,27 +70,6 @@ def _code_bounds(
     return lower, upper
 
 
-def _evaluate_real_expression(
-    expression: RealExpr,
-    input_expr: RealExpr,
-    code: int,
-    dtype: Q | UQ,
-) -> Fraction | None:
-    concrete = substitute_spec_node(
-        expression, input_expr, RealLit(Fraction(code, 1 << dtype.frac_bits))
-    )
-    try:
-        folded = concrete.constant_fold()
-    except (ArithmeticError, OverflowError, ValueError, TypeError):
-        return None
-    if isinstance(folded, RealLit):
-        try:
-            return Fraction(folded.value)
-        except (OverflowError, ValueError):
-            return None
-    return None
-
-
 def _decoded_output(raw: int, dtype: Q | UQ) -> Fraction:
     code = dtype._scaled_integer(raw) if isinstance(dtype, Q) else raw
     return Fraction(code, 1 << dtype.frac_bits)
@@ -100,12 +80,14 @@ def _build_missing_primitive(
     input_expr: RealExpr,
     input_node: Node,
     range_ctx: SpecContext,
-    output_dtype: Q | UQ | None = None,
+    output_dtype: Q | UQ,
 ) -> Node:
     """Generate a univariate typed LUT from one materialized input."""
     dtype = input_node.dtype
     if not isinstance(dtype, (Q, UQ)):
         raise MissingError("Missing component input requires a Q or UQ descriptor")
+    if not isinstance(output_dtype, (Q, UQ)):
+        raise MissingError("Missing component output requires a Q or UQ descriptor")
     if dtype.total_bits() > 63:
         raise MissingError("Generated LUT inputs must have at most 63 bits")
 
@@ -113,14 +95,10 @@ def _build_missing_primitive(
     generation_ctx.assumes.append(
         _fixed_point_result_fits(input_expr, dtype, generation_ctx)
     )
-    if output_dtype is None:
-        output_dtype = _suggest_missing_output_dtype(
-            missing, dtype, generation_ctx
-        )
     if output_dtype.total_bits() > 64:
         raise MissingError("Generated LUT outputs must have at most 64 bits")
 
-    lower, upper = _code_bounds(input_expr, dtype, generation_ctx)
+    lower, upper = _expression_bounds(input_expr, dtype, generation_ctx)
     table_size = upper - lower + 1
     if table_size > MAX_GENERATED_TABLE_ENTRIES:
         raise ZolotoneError(
@@ -128,22 +106,20 @@ def _build_missing_primitive(
             f"encodings; the limit is {MAX_GENERATED_TABLE_ENTRIES}"
         )
 
-    local_var = RealVar("x0")
-    local_expression = substitute_spec_node(missing, input_expr, local_var)
+    raw = RealVar("x")
+    integer_expression = substitute_spec_node(
+        missing,
+        input_expr,
+        raw * (RealLit(2) ** RealLit(-dtype.frac_bits)),
+    ) * (RealLit(2) ** RealLit(output_dtype.frac_bits))
     pattern = re.sub(r"[^a-z0-9]+", "_", type(missing).__name__.lower())
     dtype_part = "_".join(
         f"{type(format_).__name__.lower()}{format_.int_bits}_{format_.frac_bits}"
         for format_ in (dtype, output_dtype)
     )
-    digest = hashlib.sha256(repr(local_expression).encode()).hexdigest()[:10]
+    digest = hashlib.sha256(repr(integer_expression).encode()).hexdigest()[:10]
     component_name = f"generated_{pattern}_{dtype_part}_{digest}"
 
-    raw = RealVar("x")
-    integer_expression = substitute_spec_node(
-        local_expression,
-        local_var,
-        raw * (RealLit(2) ** RealLit(-dtype.frac_bits)),
-    ) * (RealLit(2) ** RealLit(output_dtype.frac_bits))
     evaluator = build_integer_machine(
         integer_expression,
         input_total_bits=dtype.total_bits(),
@@ -154,37 +130,40 @@ def _build_missing_primitive(
     env: dict[object, object] = {}
     solver.add(*(assume.to_z3(env) for assume in generation_ctx.assumes))
     input_term = input_expr.to_z3(env)
-    mask = (1 << output_dtype.total_bits()) - 1
+
+    output_bits = output_dtype.total_bits()
+    mask = (1 << output_bits) - 1
+    if isinstance(output_dtype, Q):
+        output_minimum = -(1 << (output_bits - 1))
+        output_maximum = (1 << (output_bits - 1)) - 1
+    else:
+        output_minimum = 0
+        output_maximum = mask
+
     entries: list[int] = []
     reachable_entries: list[tuple[int, int]] = []
-    exact = True
     try:
-        for code in range(lower, upper + 1):
+        for point in range(lower, upper + 1):
+            # check with z3 that the point belongs to assumes
             solver.push()
-            solver.add(input_term == z3.RealVal(f"{code}/{1 << dtype.frac_bits}"))
+            solver.add(input_term == z3.RealVal(f"{point}/{1 << dtype.frac_bits}"))
             reachable = solver.check() != z3.unsat
             solver.pop()
             if not reachable:
                 entries.append(0)
                 continue
-            value = _evaluate_real_expression(
-                local_expression, local_var, code, dtype
-            )
-            if value is None:
-                try:
-                    scaled = evaluator.apply(code)
-                except ValueError as exc:
-                    raise ZolotoneError(
-                        f"Could not prove a finite output range for {missing!r}"
-                    ) from exc
-                exact = False
-            else:
-                scaled = round(value * (1 << output_dtype.frac_bits))
+            scaled = evaluator.apply(point)
+            if not output_minimum <= scaled <= output_maximum:
+                raise ZolotoneError(
+                    f"Generated LUT output {scaled} at input point {point} "
+                    f"does not fit {output_dtype!r} "
+                    f"(allowed range [{output_minimum},{output_maximum}])"
+                )
+            # Converts signed int into two's complement
             raw_value = scaled & mask
+            
             entries.append(raw_value)
-            reachable_entries.append((code, raw_value))
-            if value is not None and _decoded_output(raw_value, output_dtype) != value:
-                exact = False
+            reachable_entries.append((point, raw_value))
     except ValueError as exc:
         raise ZolotoneError(
             f"Could not evaluate generated component {component_name!r}"
@@ -197,8 +176,6 @@ def _build_missing_primitive(
             (x >= ctx.real_val(Fraction(lower, scale)))
             & (x <= ctx.real_val(Fraction(upper, scale)))
         )
-        if exact:
-            return substitute_spec_node(missing, input_expr, x)
         result: RealExpr = RealLit(0)
         for code, raw_value in reversed(reachable_entries):
             result = If(
