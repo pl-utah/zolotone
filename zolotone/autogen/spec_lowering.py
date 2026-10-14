@@ -30,7 +30,7 @@ from ..spec.spec_ast import (
 )
 from ..spec.spec_context import SpecContext
 from ..types import Bool, DataType, Q, UQ, Value
-from .missing import _create_missing_primitive as _build_missing_primitive
+from .missing import _build_missing_primitive
 from ..ast.node import Node
 from ..ast.nodes import (
     Composite,
@@ -52,8 +52,13 @@ if tp.TYPE_CHECKING:
 @dataclass(frozen=True)
 class _Component:
     contract: _SpecContract
-    categories: tuple[type[SpecNode], ...]
-    component: tp.Callable[..., Node]
+    input_categories: tuple[type[SpecNode], ...]
+    node: tp.Callable[..., Node]
+
+    @property
+    def input_types(self):
+        parameters = tuple(self.contract.signature.parameters.values())[:-1]
+        return tuple(self.contract.annotations[parameter.name] for parameter in parameters)
 
     @classmethod
     def from_callable(cls, component: tp.Callable[..., Node]) -> _Component:
@@ -66,7 +71,7 @@ class _Component:
                 "a specification contract"
             )
         parameters = tuple(contract.signature.parameters.values())[:-1]
-        categories = []
+        input_categories = []
         for parameter in parameters:
             annotation = contract.annotations[parameter.name]
             category = _probe_input_category(annotation)
@@ -76,27 +81,34 @@ class _Component:
                     f"unsupported input category for parameter {parameter.name!r} "
                     f"with annotation {annotation!r}"
                 )
-            categories.append(category)
+            input_categories.append(category)
         return cls(
-            contract=contract, categories=tuple(categories), component=component
+            contract=contract, input_categories=tuple(input_categories), node=component
         )
 
 
 class _Candidate(tp.NamedTuple):
     node: Node
     spec: SpecNode
-    depth: int = 0
     cost: int = 0
-    parents: tuple[_Candidate, ...] = ()
-    operation: str = "source"
-    exact: bool = True
-    rank: int = -1
-    lossy_count: int = 0
     steps: frozenset[tuple[int, int]] = frozenset()
+
+    @classmethod
+    def from_operation(cls, node, spec, arguments, operation_cost):
+        steps = _shared_steps(arguments) | {(id(node), operation_cost)}
+        return cls(node, spec, sum(cost for _, cost in steps), steps)
+
+
+def _shared_steps(arguments):
+    """Charge a shared implementation node once, even when reused by inputs."""
+    return frozenset().union(*(argument.steps for argument in arguments))
+
+
+def _operation_cost(arguments, operation_cost):
+    return operation_cost + sum(cost for _, cost in _shared_steps(arguments))
 
 
 MAX_SPEC_PROBES = 5_000
-MAX_TYPED_SPEC_PROBES = 5_000
 MAX_EXTENSION_BITS = 32
 LUT_COST = 100
 
@@ -180,49 +192,6 @@ def _probe_input_category(annotation: object) -> type[SpecNode] | None:
         return None
 
 
-def _prefilter_component_matches(
-    subexpressions: tuple[SpecNode, ...],
-    available: tuple[SpecNode, ...],
-    components: tuple[_Component, ...],
-) -> tuple[dict[tuple[int, tuple[SpecNode, ...]], SpecNode], frozenset[SpecNode]] | None:
-    """Find relevant spec shapes; this does not establish typed reachability."""
-    if any(not isinstance(expr, SpecNode) for expr in available):
-        return None
-    possible = set(available)
-
-    matches: dict[tuple[int, tuple[SpecNode, ...]], SpecNode] = {}
-    probed: set[tuple[int, tuple[SpecNode, ...]]] = set()
-    while True:
-        old_count = len(possible)
-        for index, entry in enumerate(components):
-            pools = [
-                tuple(expr for expr in possible if isinstance(expr, category))
-                for category in entry.categories
-            ]
-            for argument_specs in itertools.product(*pools):
-                key = (index, argument_specs)
-                if key in probed:
-                    continue
-                if len(probed) >= MAX_SPEC_PROBES:
-                    return None
-                probed.add(key)
-                try:
-                    result = entry.component._spec_fn(
-                        *argument_specs,
-                        SpecContext(f"autogen candidate {entry.contract.display_name}"),
-                    )
-                except (TypeError, ValueError, NotImplementedError, OverflowError):
-                    continue
-                except Exception:
-                    return None
-                matched = _matching_subexpression(result, subexpressions)
-                if matched is not None:
-                    matches[key] = matched
-                    possible.add(matched)
-        if len(possible) == old_count:
-            return matches, frozenset(possible)
-
-
 def _matches_result(
     candidate: _Candidate,
     spec_ast: SpecNode,
@@ -264,7 +233,7 @@ def _candidate_output_range_fits(
 
 def _initial_candidates(subexpressions, spec_input_nodes):
     sources = [
-        _Candidate(node=node, spec=expr, depth=0)
+        _Candidate(node=node, spec=expr)
         for expr, node in spec_input_nodes.items()
     ]
     source_states = {(candidate.spec, candidate.node.dtype) for candidate in sources}
@@ -283,7 +252,7 @@ def _initial_candidates(subexpressions, spec_input_nodes):
         if state not in source_states:
             source_states.add(state)
             sources.append(literal)
-    return sources, source_states
+    return sources
 
 
 def _typed_context(range_ctx: SpecContext, sources: list[_Candidate]) -> SpecContext:
@@ -296,6 +265,257 @@ def _typed_context(range_ctx: SpecContext, sources: list[_Candidate]) -> SpecCon
     return typed_ctx
 
 
+class _LoweringSearch:
+    """One candidate table, improved by known components and generated LUTs."""
+
+    def __init__(self, spec_ast, spec_input_nodes, return_annotation, range_ctx):
+        from ..components import LOSSLESS_COMPONENTS
+
+        self.root = spec_ast
+        self.return_annotation = return_annotation
+        self.expressions = _spec_subexpressions(spec_ast)
+        self.components = tuple(
+            _Component.from_callable(component) for component in LOSSLESS_COMPONENTS
+        )
+        # self.candidates = {
+        #     expr: {
+        #         dtype: candidate,
+        #     },
+        # }
+        self.candidates = {}
+
+        # Constants/Variables
+        sources = _initial_candidates(self.expressions, spec_input_nodes)
+        self.ctx = _typed_context(range_ctx, sources)
+        for source in sources:
+            self.add(source)
+
+        # Cache both matches and misses across all format variants.
+        self.component_matches = {}
+        self.component_attempts = {}
+        self.lut_attempts = {}
+        self.suggested_lut_types = {}
+        self.range_checks = {}
+        self.errors = []
+
+    def run(self) -> Node:
+        # Run up until a fixed point
+        while True:
+            changed = self.add_component_candidates()
+            changed |= self.add_lut_candidates()
+            if not changed:
+                break
+
+        result = self.best_result()
+        if result is not None:
+            return result.node
+        if self.errors:
+            raise self.errors[0]
+        raise ZolotoneError(
+            f"Cannot lower specification {self.root!r} to "
+            f"{self.return_annotation!r}; no typed component or supported "
+            "missing primitive was found"
+        )
+
+    def best_result(self):
+        return min(
+            (
+                candidate
+                for formats in self.candidates.values()
+                for candidate in formats.values()
+                if _matches_result(candidate, self.root, self.return_annotation)
+            ),
+            key=lambda candidate: candidate.cost,
+            default=None,
+        )
+
+    # Add candidate if it is cheaper than previous one
+    def add(self, candidate):
+        formats = self.candidates.setdefault(candidate.spec, {})
+        previous = formats.get(candidate.node.dtype)
+        if previous is not None and previous.cost <= candidate.cost:
+            return False
+        formats[candidate.node.dtype] = candidate
+        return True
+
+    def worth_trying(self, cost):
+        result = self.best_result()
+        return result is None or cost < result.cost
+
+    def match_component(self, index, argument_specs):
+        key = (index, argument_specs)
+        if key not in self.component_matches:
+            if len(self.component_matches) >= MAX_SPEC_PROBES:
+                raise ZolotoneError(
+                    f"Cannot lower {self.root!r}: component spec probe "
+                    f"limit of {MAX_SPEC_PROBES} was reached"
+                )
+            component = self.components[index]
+            try:
+                expression = component.node._spec_fn(
+                    *argument_specs,
+                    SpecContext(f"autogen candidate {component.contract.display_name}"),
+                )
+            except (TypeError, ValueError, NotImplementedError, OverflowError):
+                expression = None
+            matched = _matching_subexpression(expression, self.expressions)
+            self.component_matches[key] = matched
+
+        return self.component_matches[key]
+
+    def allows_format(self, node, expression, arguments):
+        """Allow extensions up to the cap; arithmetic may produce wider values."""
+        if not isinstance(node.dtype, (Q, UQ)):
+            return True
+        for arg in arguments:
+            if (
+                arg.spec != expression
+                or not isinstance(arg.node.dtype, (Q, UQ))
+                or node.dtype.total_bits() <= arg.node.dtype.total_bits()
+            ):
+                continue
+            if node.dtype.total_bits() > MAX_EXTENSION_BITS:
+                return False
+        return True
+
+    def fits(self, candidate):
+        key = (candidate.spec, candidate.node.dtype)
+        if key not in self.range_checks:
+            try:
+                self.range_checks[key] = _candidate_output_range_fits(candidate, self.ctx)
+            except (NotImplementedError, ZolotoneError):
+                self.range_checks[key] = False
+        return self.range_checks[key]
+
+    def add_component_candidates(self):
+        changed = False
+        expressions = tuple(self.candidates.keys())  # Resolved expressions
+        for index, component in enumerate(self.components):
+            # Select expressions that can be inputs to new component
+            expression_pools = [
+                tuple(
+                    expression for expression in expressions
+                    if isinstance(expression, category)
+                )
+                for category in component.input_categories
+            ]
+            for argument_specs in itertools.product(*expression_pools):
+                # Try to see whether component implements some subexpressions
+                matched = self.match_component(index, argument_specs)
+                if matched is None:
+                    continue
+                # Select candidates which dtypes do match component input types
+                pools = [
+                    tuple(
+                        candidate
+                        for candidate in self.candidates[expression].values()
+                        if _annotation_matches(candidate.node.dtype, annotation)
+                    )
+                    for expression, annotation in zip(
+                        argument_specs, component.input_types, strict=True
+                    )
+                ]
+                for arguments in itertools.product(*pools):
+                    cost = _operation_cost(arguments, 1)
+                    if not self.worth_trying(cost):
+                        continue
+                    key = (index, tuple((arg.spec, arg.node.dtype) for arg in arguments))
+                    if self.component_attempts.get(key, math.inf) <= cost:
+                        continue
+                    self.component_attempts[key] = cost
+                    try:
+                        node = component.node(*(arg.node for arg in arguments))
+                    except (TypeError, ValueError, NotImplementedError, OverflowError):
+                        continue
+                    if not self.allows_format(node, matched, arguments):
+                        continue
+                    candidate = _Candidate.from_operation(node, matched, arguments, operation_cost=1)
+                    if self.fits(candidate):
+                        changed |= self.add(candidate)
+        return changed
+
+    def lut_output_type(self, expression, input_dtype):
+        """Infer the LUT format independently of consumer and result annotations."""
+        from .missing import _suggest_missing_output_dtype
+
+        key = (expression, input_dtype)
+        if key not in self.suggested_lut_types:
+            try:
+                self.suggested_lut_types[key] = _suggest_missing_output_dtype(
+                    expression, input_dtype, self.ctx
+                )
+            except (ZolotoneError, NotImplementedError) as exc:
+                self.errors.append(exc)
+                self.suggested_lut_types[key] = None
+        return self.suggested_lut_types[key]
+
+    def add_lut_candidates(self):
+        changed = False
+        for expression in reversed(self.expressions):
+            # Does it worth trying a LUT
+            existing = self.candidates.get(expression, {})
+            if any(candidate.cost < LUT_COST for candidate in existing.values()):
+                continue
+            
+            operands = lut_inputs(expression)
+            # Only univariant function can be approximated with LUT
+            if len(operands) != 1:
+                continue
+            operand, = operands
+
+            pool = tuple(
+                candidate
+                for candidate in self.candidates.get(operand, {}).values()
+                if isinstance(candidate.node.dtype, (Q, UQ))
+            )
+            for argument in pool:
+                cost = argument.cost + LUT_COST
+                if not self.worth_trying(cost):
+                    continue
+                dtype = self.lut_output_type(expression, argument.node.dtype)
+                if dtype is None:
+                    continue
+                existing = self.candidates.get(expression, {}).get(dtype)
+                # Does it worth trying a LUT
+                if existing is not None and existing.cost <= cost:
+                    continue
+                key = (
+                    expression,
+                    (argument.spec, argument.node.dtype),
+                    dtype,
+                )
+                if self.lut_attempts.get(key, math.inf) <= cost:
+                    continue
+                self.lut_attempts[key] = cost
+                try:
+                    node = _build_missing_primitive(
+                        expression, operand, argument.node,
+                        self.ctx, output_dtype=dtype,
+                    )
+                except (MissingError, ZolotoneError, NotImplementedError) as exc:
+                    self.errors.append(exc)
+                    continue
+                changed |= self.add(
+                    _Candidate.from_operation(node, expression, (argument,), LUT_COST)
+                )
+        return changed
+
+
+def lut_inputs(expression):
+    """Use the distinct nonliteral children as a LUT's materialized inputs."""
+    if not isinstance(expression, RealExpr) or isinstance(expression, RealLit):
+        return ()
+    operands = []
+    for child in children(expression):
+        if isinstance(child, (RealLit, BoolLit)):
+            continue
+        if not isinstance(child, RealExpr):
+            return ()
+        if child not in operands:
+            operands.append(child)
+    return tuple(operands)
+
+
 def search_lower_spec_to_impl(
     spec_ast: SpecNode,
     spec_input_nodes: dict[tp.Any, Node],
@@ -303,357 +523,9 @@ def search_lower_spec_to_impl(
     range_ctx: SpecContext,
 ) -> Node:
     """Find the cheapest typed derivation of a specification expression."""
-    from ..components import LOSSLESS_COMPONENTS
-    from .missing import _suggest_missing_output_dtype
-
-    components = tuple(
-        _Component.from_callable(component) for component in LOSSLESS_COMPONENTS
-    )
-    subexpressions = _spec_subexpressions(spec_ast)
-    sources, _ = _initial_candidates(subexpressions, spec_input_nodes)
-    typed_ctx = _typed_context(range_ctx, sources)
-    candidates: dict[tuple[SpecNode, DataType], _Candidate] = {
-        (source.spec, source.node.dtype): source for source in sources
-    }
-    spec_matches = None
-    component_attempts = {}
-    lut_attempts = {}
-    probe_count = 0
-    errors = []
-
-    initial_prefilter = _prefilter_component_matches(
-        subexpressions,
-        tuple(source.spec for source in sources),
-        components,
-    )
-    prefilter_cache = {
-        frozenset(source.spec for source in sources): initial_prefilter
-    }
-    root_known_without_missing = (
-        initial_prefilter is None or spec_ast in initial_prefilter[1]
-    )
-    extensions_enabled = False
-
-    def current_result() -> _Candidate | None:
-        matching = (
-            candidate for candidate in candidates.values()
-            if _matches_result(candidate, spec_ast, return_annotation)
-        )
-        return min(
-            matching,
-            key=lambda candidate: (
-                candidate.cost,
-                candidate.lossy_count,
-                candidate.node.dtype.total_bits(),
-            ),
-            default=None,
-        )
-
-    def add(candidate: _Candidate) -> bool:
-        state = (candidate.spec, candidate.node.dtype)
-        previous = candidates.get(state)
-        if previous is not None and (
-            previous.cost < candidate.cost
-            or previous.cost == candidate.cost and (
-                previous.lossy_count < candidate.lossy_count
-                or previous.lossy_count == candidate.lossy_count
-                and previous.rank <= candidate.rank
-            )
-        ):
-            return False
-        candidates[state] = candidate
-        return True
-
-    def known_pass() -> bool:
-        nonlocal probe_count
-        changed = False
-        if spec_matches is None:
-            work = (
-                (index, None, None)
-                for index in range(len(components))
-            )
-        else:
-            work = (
-                (index, argument_specs, matched)
-                for (index, argument_specs), matched in spec_matches.items()
-            )
-        for index, argument_specs, known_match in work:
-            entry = components[index]
-            component = entry.component
-            contract = entry.contract
-            if not extensions_enabled and contract.display_name.split(" ", 1)[0].strip("'") in {
-                "_uq_zero_extend", "_uq_fraction_extend",
-                "_q_sign_extend", "_q_fraction_extend",
-            }:
-                continue
-            parameters = tuple(contract.signature.parameters.values())[:-1]
-            pools = [
-                tuple(
-                    candidate for candidate in candidates.values()
-                    if (argument_specs is None or candidate.spec == argument_specs[position])
-                    and _annotation_matches(
-                        candidate.node.dtype, contract.annotations[parameter.name]
-                    )
-                    and isinstance(candidate.spec, entry.categories[position])
-                )
-                for position, parameter in enumerate(parameters)
-            ]
-            if any(not pool for pool in pools):
-                continue
-            for arguments in itertools.product(*pools):
-                parent_steps = frozenset().union(
-                    *(argument.steps for argument in arguments)
-                )
-                total_cost = 1 + sum(weight for _, weight in parent_steps)
-                best = current_result()
-                if best is not None and total_cost > best.cost:
-                    continue
-                key = (index, tuple((arg.spec, arg.node.dtype) for arg in arguments))
-                if component_attempts.get(key, math.inf) <= total_cost:
-                    continue
-                component_attempts[key] = total_cost
-                matched = known_match
-                if matched is None:
-                    if probe_count >= MAX_TYPED_SPEC_PROBES:
-                        raise ZolotoneError(
-                            f"Cannot lower {spec_ast!r}: component spec probe "
-                            f"limit of {MAX_TYPED_SPEC_PROBES} was reached"
-                        )
-                    probe_count += 1
-                    try:
-                        result = component._spec_fn(
-                            *(arg.spec for arg in arguments),
-                            SpecContext(f"autogen candidate {contract.display_name}"),
-                        )
-                    except (TypeError, ValueError, NotImplementedError, OverflowError):
-                        continue
-                    matched = _matching_subexpression(result, subexpressions)
-                if matched is None:
-                    continue
-                try:
-                    node = component(*(arg.node for arg in arguments))
-                except (TypeError, ValueError, NotImplementedError, OverflowError):
-                    continue
-                if (
-                    isinstance(node.dtype, (Q, UQ))
-                    and node.dtype.total_bits() > MAX_EXTENSION_BITS
-                    and any(
-                        arg.spec.identical(matched)
-                        and isinstance(arg.node.dtype, (Q, UQ))
-                        and node.dtype.total_bits() > arg.node.dtype.total_bits()
-                        for arg in arguments
-                    )
-                ):
-                    continue
-                candidate = _Candidate(
-                    node=node,
-                    spec=matched,
-                    depth=max((arg.depth for arg in arguments), default=0) + 1,
-                    cost=total_cost,
-                    parents=arguments,
-                    operation=contract.display_name,
-                    exact=all(arg.exact for arg in arguments),
-                    rank=index,
-                    lossy_count=sum(arg.lossy_count for arg in arguments),
-                    steps=parent_steps | {(id(node), 1)},
-                )
-                try:
-                    if not _candidate_output_range_fits(candidate, typed_ctx):
-                        continue
-                except (NotImplementedError, ZolotoneError):
-                    continue
-                changed |= add(candidate)
-        return changed
-
-    def missing_pass() -> bool:
-        changed = False
-        available = tuple(candidates.values())
-        for expression in reversed(subexpressions):
-            if not isinstance(expression, RealExpr) or isinstance(expression, RealLit):
-                continue
-            operands: list[RealExpr] = []
-            for child in children(expression):
-                if isinstance(child, RealExpr) and not isinstance(child, RealLit):
-                    if not any(child.identical(existing) for existing in operands):
-                        operands.append(child)
-                elif not isinstance(child, (RealLit, BoolLit)):
-                    operands = []
-                    break
-            if not operands:
-                continue
-            demanded_types: set[Q | UQ] = set()
-            if expression.identical(spec_ast) and isinstance(return_annotation, (Q, UQ)):
-                demanded_types.add(return_annotation)
-            if spec_matches is not None:
-                for (index, argument_specs), _ in spec_matches.items():
-                    contract = components[index].contract
-                    parameters = tuple(contract.signature.parameters.values())[:-1]
-                    for argument_spec, parameter in zip(
-                        argument_specs, parameters, strict=True
-                    ):
-                        if argument_spec.identical(expression):
-                            annotation = contract.annotations[parameter.name]
-                            if isinstance(annotation, (Q, UQ)):
-                                demanded_types.add(annotation)
-            existing = tuple(
-                candidate for candidate in available
-                if candidate.spec.identical(expression)
-            )
-            if (
-                any(candidate.cost < LUT_COST for candidate in existing)
-                and all(
-                    any(candidate.node.dtype == dtype for candidate in existing)
-                    for dtype in demanded_types
-                )
-                and (
-                    not expression.identical(spec_ast)
-                    or any(
-                        _annotation_matches(candidate.node.dtype, return_annotation)
-                        for candidate in existing
-                    )
-                )
-            ):
-                continue
-            pools = [
-                tuple(
-                    candidate for candidate in available
-                    if candidate.spec.identical(operand)
-                    and isinstance(candidate.node.dtype, (Q, UQ))
-                )
-                for operand in operands
-            ]
-            if any(not pool for pool in pools):
-                continue
-            for arguments in itertools.product(*pools):
-                parent_steps = frozenset().union(
-                    *(arg.steps for arg in arguments)
-                )
-                total_cost = LUT_COST + sum(weight for _, weight in parent_steps)
-                best = current_result()
-                if best is not None and total_cost > best.cost:
-                    continue
-                output_types: set[Q | UQ] = {
-                    tp.cast(Q | UQ, arg.node.dtype) for arg in arguments
-                }
-                output_types.update(demanded_types)
-                suggested = None
-                try:
-                    suggested = _suggest_missing_output_dtype(
-                        expression,
-                        tp.cast(Q | UQ, arguments[0].node.dtype),
-                        typed_ctx,
-                    )
-                    output_types.add(suggested)
-                except (ZolotoneError, NotImplementedError):
-                    pass
-                if existing and min(candidate.cost for candidate in existing) < LUT_COST:
-                    output_types = {
-                        dtype for dtype in demanded_types
-                        if all(candidate.node.dtype != dtype for candidate in existing)
-                    }
-                argument_states = tuple((arg.spec, arg.node.dtype) for arg in arguments)
-                for output_dtype in sorted(
-                    output_types,
-                    key=lambda dtype: (
-                        dtype != suggested,
-                        dtype.total_bits(),
-                        dtype.frac_bits,
-                        type(dtype).__name__,
-                    ),
-                ):
-                    if expression.identical(spec_ast) and not _annotation_matches(
-                        output_dtype, return_annotation
-                    ):
-                        continue
-                    state = (expression, output_dtype)
-                    if state in candidates and candidates[state].cost <= total_cost:
-                        continue
-                    key = (expression, argument_states, output_dtype)
-                    if lut_attempts.get(key, math.inf) <= total_cost:
-                        continue
-                    lut_attempts[key] = total_cost
-                    try:
-                        node = _build_missing_primitive(
-                            expression,
-                            tuple(operands),
-                            tuple(arg.node for arg in arguments),
-                            typed_ctx,
-                            output_dtype=output_dtype,
-                        )
-                    except (MissingError, ZolotoneError, NotImplementedError) as exc:
-                        errors.append(exc)
-                        continue
-                    changed |= add(_Candidate(
-                        node=node,
-                        spec=expression,
-                        depth=max(arg.depth for arg in arguments) + 1,
-                        cost=total_cost,
-                        parents=arguments,
-                        operation="generated_lut",
-                        exact=getattr(node, "_autogen_lut_exact", False)
-                        and all(arg.exact for arg in arguments),
-                        rank=len(components),
-                        lossy_count=sum(arg.lossy_count for arg in arguments)
-                        + int(not getattr(node, "_autogen_lut_exact", False)),
-                        steps=parent_steps | {(id(node), LUT_COST)},
-                    ))
-        return changed
-
-    initial = current_result()
-    if initial is not None:
-        return initial.node
-    while True:
-        available_key = frozenset(candidate.spec for candidate in candidates.values())
-        if available_key not in prefilter_cache:
-            prefilter_cache[available_key] = _prefilter_component_matches(
-                subexpressions,
-                tuple(available_key),
-                components,
-            )
-        prefilter = prefilter_cache[available_key]
-        spec_matches = prefilter[0] if prefilter is not None else None
-        possible_specs = prefilter[1] if prefilter is not None else None
-        available_specs = {candidate.spec for candidate in candidates.values()}
-        known_can_advance = (
-            extensions_enabled
-            or
-            possible_specs is None
-            or bool(possible_specs - available_specs)
-            or spec_ast in available_specs and current_result() is None
-        )
-        if known_can_advance:
-            while known_pass():
-                pass
-        result = current_result()
-        exact_component_demands = any(
-            isinstance(annotation, (Q, UQ))
-            for entry in components
-            for name, annotation in entry.contract.annotations.items()
-            if name != "return"
-        )
-        if result is not None and result.cost <= 2:
-            return result.node
-        if missing_pass():
-            continue
-        if result is not None and (
-            not root_known_without_missing
-            or not isinstance(return_annotation, (Q, UQ))
-            and not exact_component_demands
-        ):
-            return result.node
-        if not extensions_enabled:
-            if errors and not root_known_without_missing:
-                raise errors[0]
-            extensions_enabled = True
-            continue
-        if result is not None:
-            return result.node
-        if errors:
-            raise errors[0]
-        raise ZolotoneError(
-            f"Cannot lower specification {spec_ast!r} to {return_annotation!r}; "
-            "no typed component or supported missing primitive was found"
-        )
+    return _LoweringSearch(
+        spec_ast, spec_input_nodes, return_annotation, range_ctx
+    ).run()
 
 
 def _tighten_literal_comparison(

@@ -8984,6 +8984,237 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             )
         self.assertEqual(lowered.name, "uq_add")
 
+    def test_lowering_cost_pruning_only_uses_valid_final_result(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("extension-cost-pruning")
+        x = ctx.real("x")
+        root = x ** ctx.two()
+        search = spec_lowering._LoweringSearch(
+            root, {x: Var("x", UQ(2, 0))}, UQ(4, 0), ctx
+        )
+
+        # A cheaper intermediate candidate must not suppress other formats.
+        self.assertTrue(search.worth_trying(1))
+
+        # A root candidate with the wrong output format is not a final result.
+        search.add(spec_lowering._Candidate(Var("narrow", UQ(2, 0)), root, 1))
+        self.assertTrue(search.worth_trying(2))
+
+        search.add(spec_lowering._Candidate(Var("result", UQ(4, 0)), root, 3))
+        self.assertTrue(search.worth_trying(2))
+        self.assertFalse(search.worth_trying(3))
+        self.assertFalse(search.worth_trying(4))
+
+    def test_lowering_lut_skips_multiple_inputs_with_same_dtype(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("shared-lut-input-format")
+        x, y = ctx.real("x"), ctx.real("y")
+        lhs, rhs = Var("x", UQ(2, 0)), Var("y", UQ(2, 0))
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
+            with self.assertRaisesRegex(ZolotoneError, "no typed component"):
+                spec_lowering.search_lower_spec_to_impl(
+                    x + y, {x: lhs, y: rhs}, UQ, ctx
+                )
+
+    def test_lowering_lut_skips_mixed_input_dtypes(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("mixed-lut-input-formats")
+        x, y = ctx.real("x"), ctx.real("y")
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", ()),
+            patch("zolotone.autogen.missing._suggest_missing_output_dtype") as infer,
+        ):
+            with self.assertRaisesRegex(ZolotoneError, "no typed component"):
+                spec_lowering.search_lower_spec_to_impl(
+                    x + y,
+                    {x: Var("x", UQ(2, 0)), y: Var("y", UQ(1, 1))},
+                    UQ, ctx,
+                )
+            infer.assert_not_called()
+
+    def test_lowering_can_replace_lut_with_later_extended_component(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import _uq_zero_extend, uq_add, uq_mul
+
+        def square_spec(value: UQ, ctx) -> UQ:
+            return value ** ctx.two()
+
+        @Composite(name="wide_square", spec=square_spec)
+        def square(value):
+            if value.dtype.total_bits() < 4:
+                raise ValueError("This component requires at least four input bits")
+            return uq_mul(value, value)
+
+        ctx = SpecContext("late-extended-component")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        with patch(
+            "zolotone.components.LOSSLESS_COMPONENTS",
+            (uq_add, square, _uq_zero_extend),
+        ):
+            search = spec_lowering._LoweringSearch(
+                (x + ctx.one()) ** ctx.two(), {x: source}, UQ, ctx
+            )
+            result = search.run()
+
+        self.assertEqual(result.name, "wide_square")
+        self.assertEqual(search.best_result().cost, 3)
+        for value in range(4):
+            source.load_value(UQ(2, 0).from_bits(value))
+            self.assertEqual(result.evaluate().to_python(), (value + 1) ** 2)
+
+    def test_lowering_bounds_extensions_but_allows_wider_operation_results(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import _uq_zero_extend, uq_mul
+
+        def square_spec(value: UQ(4, 0), ctx) -> UQ(8, 0):
+            return value ** ctx.two()
+
+        @Composite(name="four_bit_square", spec=square_spec)
+        def square(value):
+            return uq_mul(value, value)
+
+        ctx = SpecContext("bounded-extension")
+        x = ctx.real("x")
+        for limit, expected_cost in ((3, 100), (4, 3)):
+            with (
+                self.subTest(limit=limit),
+                patch.object(spec_lowering, "MAX_EXTENSION_BITS", limit),
+                patch(
+                    "zolotone.components.LOSSLESS_COMPONENTS",
+                    (square, _uq_zero_extend),
+                ),
+            ):
+                source = Var("x", UQ(2, 0))
+                search = spec_lowering._LoweringSearch(
+                    x ** ctx.two(), {x: source}, UQ, ctx
+                )
+                result = search.run()
+                self.assertEqual(search.best_result().cost, expected_cost)
+                self.assertGreater(result.dtype.total_bits(), limit)
+                self.assertTrue(all(
+                    dtype.total_bits() <= limit for dtype in search.candidates[x]
+                ))
+                source.load_value(UQ(2, 0).from_bits(3))
+                self.assertEqual(result.evaluate().to_python(), 9)
+
+    def test_lowering_extends_by_default_up_to_32_bits(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import _uq_fraction_extend, _uq_zero_extend
+
+        ctx = SpecContext("default-extensions")
+        x = ctx.real("x")
+        with patch(
+            "zolotone.components.LOSSLESS_COMPONENTS",
+            (_uq_zero_extend, _uq_fraction_extend),
+        ):
+            for bits in (31, 32, 33):
+                with self.subTest(bits=bits):
+                    search = spec_lowering._LoweringSearch(
+                        x ** ctx.two(), {x: Var("x", UQ(bits, 0))}, UQ, ctx
+                    )
+                    while search.add_component_candidates():
+                        pass
+                    expected = {UQ(bits, 0)}
+                    if bits == 31:
+                        expected.update((UQ(32, 0), UQ(31, 1)))
+                    self.assertEqual(set(search.candidates[x]), expected)
+
+    def test_lowering_charges_shared_lut_once(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("shared-lut")
+        x = ctx.real("x")
+        squared = x ** ctx.two()
+        source = Var("x", UQ(2, 0))
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add,)):
+            search = spec_lowering._LoweringSearch(
+                squared + squared, {x: source}, UQ, ctx
+            )
+            result = search.run()
+        self.assertEqual(search.best_result().cost, 101)
+        self.assertIs(result.args[0], result.args[1])
+        source.load_value(UQ(2, 0).from_bits(3))
+        self.assertEqual(result.evaluate().to_python(), 18)
+
+    def test_lowering_does_not_force_lut_to_consumer_input_format(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.ast.nodes import _build_spec_contract
+
+        def reciprocal_spec(value: UQ, ctx) -> UQ(1, 0):
+            return value ** ctx.real_val(-1)
+
+        def reciprocal(value):
+            return Var("integer_reciprocal", UQ(1, 0))
+
+        def compare_spec(value: UQ(1, 2), ctx) -> Bool:
+            return value > ctx.real_val(0.5)
+
+        received = []
+
+        def compare(value):
+            received.append(value)
+            return Var("compare_precise_reciprocal", Bool())
+
+        for component, spec in ((reciprocal, reciprocal_spec), (compare, compare_spec)):
+            component._spec_contract = _build_spec_contract(component.__name__, spec)
+            component._spec_fn = spec
+
+        ctx = SpecContext("typed-lut-consumer")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.one())
+        inverse = x ** ctx.real_val(-1)
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (reciprocal, compare)):
+            with self.assertRaisesRegex(ZolotoneError, "no typed component"):
+                spec_lowering.search_lower_spec_to_impl(
+                    inverse > ctx.real_val(0.5), {x: Var("x", UQ(2, 0))}, Bool, ctx
+                )
+        self.assertEqual(received, [])
+
+    def test_lowering_does_not_narrow_lut_to_requested_result_format(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("inferred-lut-format")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        expression = x ** ctx.two()
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
+            search = spec_lowering._LoweringSearch(
+                expression, {x: source}, UQ(2, 0), ctx
+            )
+            with self.assertRaisesRegex(ZolotoneError, "no typed component"):
+                search.run()
+        self.assertEqual(set(search.candidates[expression]), {UQ(4, 0)})
+        source.load_value(UQ(2, 0).from_bits(3))
+        self.assertEqual(search.candidates[expression][UQ(4, 0)].node.evaluate().to_python(), 9)
+
+    def test_lowering_extends_inferred_lut_result_explicitly(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import _uq_zero_extend
+
+        ctx = SpecContext("extended-lut-format")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        expression = x ** ctx.two()
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (_uq_zero_extend,)),
+            patch.object(spec_lowering, "MAX_EXTENSION_BITS", 5),
+        ):
+            search = spec_lowering._LoweringSearch(
+                expression, {x: source}, UQ(5, 0), ctx
+            )
+            result = search.run()
+        self.assertEqual(result.dtype, UQ(5, 0))
+        self.assertEqual(result.args[0].dtype, UQ(4, 0))
+        self.assertTrue(result.args[0].name.startswith("generated_pow_"))
+        self.assertEqual(search.best_result().cost, 101)
+        source.load_value(UQ(2, 0).from_bits(3))
+        self.assertEqual(result.evaluate().to_python(), 9)
+
     def test_lowering_accepts_operation_added_by_component_spec(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import uq_add, uq_mul
@@ -9040,7 +9271,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertTrue(powered.name.startswith("generated_pow_"))
         self.assertEqual(lowered.name, "composite")
 
-    def test_lowering_reuses_reachability_matches_with_unhashable_component(self):
+    def test_lowering_reuses_spec_matches_with_unhashable_component(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import uq_add
 
@@ -9080,7 +9311,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             {f"autogen candidate {uq_add._spec_contract.display_name}"},
         )
 
-    def test_lowering_falls_back_when_spec_probe_limit_is_reached(self):
+    def test_lowering_reports_exhausted_spec_probe_limit(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import uq_add
 
@@ -9089,15 +9320,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         with (
             patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add,)),
             patch.object(spec_lowering, "MAX_SPEC_PROBES", 0),
-            patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
+            self.assertRaisesRegex(ZolotoneError, "spec probe limit of 0"),
         ):
-            lowered = spec_lowering.search_lower_spec_to_impl(
+            spec_lowering.search_lower_spec_to_impl(
                 x + y,
                 {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
                 UQ,
                 ctx,
             )
-        self.assertEqual(lowered.name, "uq_add")
 
     def test_lowering_probes_only_matching_fp_format(self):
         from dataclasses import replace
@@ -10205,10 +10435,16 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             generated = Autogenerate("generated_widened_conversion", spec)
 
         self.assertEqual(generated.dtype, Q(4, 0))
-        self.assertEqual(generated.inner_tree.name, "uq_to_q")
-        widened = generated.inner_tree.args[0]
-        self.assertEqual(widened.name, "_uq_zero_extend")
-        self.assertEqual(widened.inner_tree.name, "uq_zero_extend")
+        self.assertIn(
+            (generated.inner_tree.name, generated.inner_tree.args[0].name),
+            {
+                ("uq_to_q", "_uq_zero_extend"),
+                ("_q_sign_extend", "uq_to_q"),
+            },
+        )
+        for value in range(4):
+            generated.args[0].load_value(UQ(2, 0).from_bits(value))
+            self.assertEqual(generated.evaluate(), Q(4, 0).from_bits(value))
 
     def test_autogenerate_extends_fractional_formats(self):
         def signed_spec(x: Q(4, 0), ctx) -> Q(4, 2):
@@ -10643,7 +10879,6 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         candidate = _Candidate(
             node=Const(Bool().from_bits(1)),
             spec=ctx.one(),
-            depth=0,
         )
 
         with self.assertRaisesRegex(
@@ -11838,20 +12073,19 @@ class TestSignSpecs(unittest.TestCase):
 
 class TestMissingPrimitiveRuntime(unittest.TestCase):
     def test_lossy_lookup_rounds_to_even_then_wraps(self):
-        from zolotone.autogen.missing import _create_missing_primitive
+        from zolotone.autogen.missing import _build_missing_primitive
 
         ctx = SpecContext("lossy-lookup")
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
-        primitive = _create_missing_primitive(
+        primitive = _build_missing_primitive(
             x ** ctx.two(), x, source, ctx, output_dtype=UQ(2, 0)
         )
 
         source.load_value(UQ(2, 0).from_int(3))
         self.assertEqual(primitive.evaluate().to_python(), 1)
-        self.assertFalse(primitive._autogen_lut_exact)
 
-        rounded = _create_missing_primitive(
+        rounded = _build_missing_primitive(
             x * ctx.real_val(0.5), x, source, ctx, output_dtype=UQ(2, 0)
         )
         source.load_value(UQ(2, 0).from_bits(1))
@@ -11859,24 +12093,46 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         source.load_value(UQ(2, 0).from_bits(3))
         self.assertEqual(rounded.evaluate().to_python(), 2)
 
-    def test_missing_lookup_accepts_two_typed_inputs(self):
-        from zolotone.autogen.missing import _create_missing_primitive
+    def test_missing_lookup_accepts_one_materialized_expression(self):
+        from zolotone.autogen.missing import _build_missing_primitive
+        from zolotone.autogen.autogen import get_spec
+        from zolotone.components import uq_add
 
-        ctx = SpecContext("two-input-lookup")
+        ctx = SpecContext("materialized-input-lookup")
         x, y = ctx.real("x"), ctx.real("y")
+        ctx.assume((x >= ctx.zero()) & (x <= ctx.real_val(3)))
+        ctx.assume((y >= ctx.zero()) & (y <= ctx.real_val(3)))
         lhs, rhs = Var("x", UQ(2, 0)), Var("y", UQ(2, 0))
-        primitive = _create_missing_primitive(
-            (x ** ctx.two()) + (y ** ctx.two()),
-            (x, y),
-            (lhs, rhs),
+        primitive = _build_missing_primitive(
+            (x + y) ** ctx.two(),
+            x + y,
+            uq_add(lhs, rhs),
             ctx,
-            output_dtype=UQ(4, 0),
+            output_dtype=UQ(6, 0),
         )
 
-        self.assertEqual(primitive.inner_tree.name, "integer_lookup_multi")
+        self.assertEqual(primitive.inner_tree.name, "integer_lookup")
+        generated_spec = get_spec(primitive.name, primitive.spec)
+        self.assertEqual(generated_spec.annotations["x"], UQ(3, 0))
+        self.assertEqual(generated_spec.return_annotation, UQ(6, 0))
         lhs.load_value(UQ(2, 0).from_int(2))
         rhs.load_value(UQ(2, 0).from_int(3))
-        self.assertEqual(primitive.evaluate().to_python(), 13)
+        self.assertEqual(primitive.evaluate().to_python(), 25)
+
+    def test_missing_lookup_preserves_signed_disjoint_input_domain(self):
+        from zolotone.autogen.missing import _build_missing_primitive
+
+        ctx = SpecContext("signed-univariate-lookup")
+        x = ctx.real("x")
+        ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
+        source = Var("x", Q(2, 1))
+        primitive = _build_missing_primitive(
+            x ** ctx.real_val(-1), x, source, ctx, output_dtype=Q(3, 0)
+        )
+        for value in (-0.5, 0.5):
+            with self.subTest(value=value):
+                source.load_value(Q(2, 1).from_float(value))
+                self.assertEqual(primitive.evaluate().to_python(), 1 / value)
 
     def test_disjoint_input_skips_undefined_lookup_codes(self):
         def reciprocal(x: Q(2, 1), ctx) -> Q:
