@@ -9155,6 +9155,39 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 self.assertIs(spec_lowering._probe_input_category(dtype_type), expected)
                 self.assertIs(spec_lowering._probe_input_category(dtype), expected)
 
+    def test_lowering_rejects_unsupported_component_input_category(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.ast.nodes import _build_spec_contract
+        from zolotone.types import Tuple
+
+        ctx = SpecContext("unsupported-component-category")
+        x = ctx.real("x")
+        for annotation in (Tuple(UQ(2, 0)), Tuple(UQ)):
+            with self.subTest(annotation=annotation):
+                def unsupported_spec(value: annotation, ctx) -> UQ:
+                    return ctx.zero()
+
+                def unsupported_component(*args):
+                    self.fail("Unsupported component must not be constructed")
+
+                unsupported_component._spec_contract = _build_spec_contract(
+                    "unsupported_tuple", unsupported_spec
+                )
+                unsupported_component._spec_fn = unsupported_spec
+                with (
+                    patch(
+                        "zolotone.components.LOSSLESS_COMPONENTS",
+                        (unsupported_component,),
+                    ),
+                    self.assertRaisesRegex(
+                        MissingError,
+                        r"unsupported_tuple.*unsupported input category.*'value'.*Tuple",
+                    ),
+                ):
+                    spec_lowering.search_lower_spec_to_impl(
+                        x + ctx.one(), {x: Var("x", UQ(2, 0))}, UQ, ctx
+                    )
+
     def test_lowering_reaches_fp_spec_through_generic_conditional(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _if_then_else
@@ -9188,8 +9221,6 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             Autogenerate("generated_q_to_uq", spec)
 
     def test_autogenerate_uses_q_to_uq_only_for_nonnegative_range(self):
-        from zolotone.autogen import spec_lowering
-
         def nonnegative_spec(x: Q(3, 0), ctx) -> UQ:
             ctx.assume(x >= ctx.zero())
             return x
@@ -9202,20 +9233,15 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(generated.inner_tree.name, "q_to_uq")
         self.assertEqual(generated.dtype, UQ(2, 0))
 
-        ctx = SpecContext("reject_potentially_negative_q_to_uq")
-        x = ctx.real("x")
-        ctx.assume(x >= ctx.real_val(-4))
-        ctx.assume(x <= ctx.real_val(3))
-        with (
-            patch.object(spec_lowering, "MAX_SEARCH_DEPTH", 1),
-            self.assertRaisesRegex(ZolotoneError, "maximum depth"),
-        ):
-            spec_lowering.search_lower_spec_to_impl(
-                x,
-                {x: Var("x", Q(3, 0))},
-                UQ,
-                ctx,
-            )
+        def potentially_negative_spec(x: Q(3, 0), ctx) -> UQ:
+            return x
+
+        with patch("zolotone.autogen.autogen.lower_spec_result") as lower:
+            with self.assertRaisesRegex(InfeasibleError, "result range does not fit"):
+                Autogenerate(
+                    "reject_potentially_negative_q_to_uq", potentially_negative_spec
+                )
+            lower.assert_not_called()
 
     def test_autogenerate_rejects_unreachable_assumptions(self):
         def spec(x: UQ(2, 0), ctx) -> Bool:
@@ -10254,29 +10280,21 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             uq_truncate_msb(Var("unsigned", UQ(0, 2)))
 
     def test_autogenerate_rejects_unsafe_msb_truncation(self):
-        from zolotone.autogen import spec_lowering
-
         cases = (
-            (Q(4, 0), Q(3, 0), -8, 7),
-            (UQ(4, 0), UQ(3, 0), 0, 15),
+            (Q(4, 0), Q(3, 0)),
+            (UQ(4, 0), UQ(3, 0)),
         )
-        for input_type, output_type, lower, upper in cases:
+        for input_type, output_type in cases:
             with self.subTest(input_type=input_type, output_type=output_type):
-                ctx = SpecContext("unsafe-msb-truncation")
-                x = ctx.real("x")
-                ctx.assume(x >= ctx.real_val(lower))
-                ctx.assume(x <= ctx.real_val(upper))
+                def spec(x: input_type, ctx) -> output_type:
+                    return x
 
-                with (
-                    patch.object(spec_lowering, "MAX_SEARCH_DEPTH", 1),
-                    self.assertRaisesRegex(ZolotoneError, "maximum depth"),
-                ):
-                    spec_lowering.search_lower_spec_to_impl(
-                        x,
-                        {x: Var("x", input_type)},
-                        output_type,
-                        ctx,
-                    )
+                with patch("zolotone.autogen.autogen.lower_spec_result") as lower:
+                    with self.assertRaisesRegex(
+                        InfeasibleError, "result range does not fit"
+                    ):
+                        Autogenerate("unsafe-msb-truncation", spec)
+                    lower.assert_not_called()
 
     def test_output_optimization_propagates_range_analysis_failure(self):
         def spec(x: UQ(2, 0), ctx) -> UQ(4, 0):
@@ -11819,6 +11837,47 @@ class TestSignSpecs(unittest.TestCase):
 
 
 class TestMissingPrimitiveRuntime(unittest.TestCase):
+    def test_lossy_lookup_rounds_to_even_then_wraps(self):
+        from zolotone.autogen.missing import _create_missing_primitive
+
+        ctx = SpecContext("lossy-lookup")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        primitive = _create_missing_primitive(
+            x ** ctx.two(), x, source, ctx, output_dtype=UQ(2, 0)
+        )
+
+        source.load_value(UQ(2, 0).from_int(3))
+        self.assertEqual(primitive.evaluate().to_python(), 1)
+        self.assertFalse(primitive._autogen_lut_exact)
+
+        rounded = _create_missing_primitive(
+            x * ctx.real_val(0.5), x, source, ctx, output_dtype=UQ(2, 0)
+        )
+        source.load_value(UQ(2, 0).from_bits(1))
+        self.assertEqual(rounded.evaluate().to_python(), 0)
+        source.load_value(UQ(2, 0).from_bits(3))
+        self.assertEqual(rounded.evaluate().to_python(), 2)
+
+    def test_missing_lookup_accepts_two_typed_inputs(self):
+        from zolotone.autogen.missing import _create_missing_primitive
+
+        ctx = SpecContext("two-input-lookup")
+        x, y = ctx.real("x"), ctx.real("y")
+        lhs, rhs = Var("x", UQ(2, 0)), Var("y", UQ(2, 0))
+        primitive = _create_missing_primitive(
+            (x ** ctx.two()) + (y ** ctx.two()),
+            (x, y),
+            (lhs, rhs),
+            ctx,
+            output_dtype=UQ(4, 0),
+        )
+
+        self.assertEqual(primitive.inner_tree.name, "integer_lookup_multi")
+        lhs.load_value(UQ(2, 0).from_int(2))
+        rhs.load_value(UQ(2, 0).from_int(3))
+        self.assertEqual(primitive.evaluate().to_python(), 13)
+
     def test_disjoint_input_skips_undefined_lookup_codes(self):
         def reciprocal(x: Q(2, 1), ctx) -> Q:
             ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
@@ -11845,11 +11904,11 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
 
         self.assertEqual(generated_spec.annotations["x"], UQ(3, 2))
         self.assertEqual(generated_spec.return_annotation, UQ(1, 2))
-        self.assertEqual(str(generated_spec.spec_ast), "(real(x_0) ** -1)")
-        self.assertEqual(len(generated_spec.spec_ctx.requirements), 1)
-        requirement = str(generated_spec.spec_ctx.requirements[0])
-        self.assertIn("(real(x_0) >= 1.0)", requirement)
-        self.assertIn("(real(x_0) <= 7.75)", requirement)
+        # A lossy LUT specifies its quantized table, not an exact reciprocal.
+        self.assertIn("then 3/4", str(generated_spec.spec_ast))
+        assumptions = " ".join(map(str, generated_spec.spec_ctx.assumes))
+        self.assertIn("(real(x_0) >= 1)", assumptions)
+        self.assertIn("(real(x_0) <= 31/4)", assumptions)
         self.assertFalse(
             any(component._spec_fn is primitive.spec for component in LOSSLESS_COMPONENTS)
         )
@@ -11867,7 +11926,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         generated_spec = get_spec(primitive.name, primitive.spec)
 
         self.assertEqual(generated_spec.annotations["x"], UQ(3, 2))
-        self.assertEqual(str(generated_spec.spec_ast), "(real(x_0) ** -1)")
+        self.assertIn("then 3/4", str(generated_spec.spec_ast))
         self.assertEqual(primitive.args[0].name, "uq_add")
 
     def test_reciprocal_uses_known_multiplication_as_its_typed_input(self):
@@ -11959,9 +12018,10 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             )
 
         self.assertEqual(result.name, "known_result")
-        self.assertEqual(create.call_count, 2)
-        self.assertIn("value=-1", repr(create.call_args_list[0].args[0]))
-        self.assertIn("value=2", repr(create.call_args_list[1].args[0]))
+        self.assertGreaterEqual(create.call_count, 2)
+        generated = [repr(call.args[0]) for call in create.call_args_list]
+        self.assertTrue(any("value=-1" in expression for expression in generated))
+        self.assertTrue(any("value=2" in expression for expression in generated))
 
     def test_autogenerate_uses_multiple_runtime_components(self):
         def two_missing(x: UQ(2, 0), ctx) -> UQ:

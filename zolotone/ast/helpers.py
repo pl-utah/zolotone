@@ -1,7 +1,10 @@
+import math
+
 from ..types import DataType, Q, Tuple, UQ
 from ..spec import BoolExpr, Cases, case, FPExpr, If, RealExpr
 from .node import Node
 from .nodes import Op, Primitive
+from ..utils import make_fixed_arguments
 
 
 def integer_lookup(
@@ -49,6 +52,81 @@ def integer_lookup(
         c_lowering=c_lowering,
         args=[x],
         name="integer_lookup",
+    )
+
+
+def integer_lookup_multi(
+    inputs: tuple[Node, ...],
+    *,
+    table: tuple[int, ...],
+    lowest_codes: tuple[int, ...],
+    extents: tuple[int, ...],
+    out: Q | UQ,
+) -> Op:
+    """Look up a row-major table using several fixed-point input codes."""
+    if not inputs or len(inputs) != len(lowest_codes) or len(inputs) != len(extents):
+        raise ValueError("lookup dimensions must match its inputs")
+    if any(extent < 1 for extent in extents) or len(table) != math.prod(extents):
+        raise ValueError("lookup table length must match its positive extents")
+    if any(not isinstance(node.dtype, (Q, UQ)) for node in inputs):
+        raise TypeError("integer lookup inputs must be Q or UQ")
+
+    def index(raw_values: tuple[int, ...]) -> int:
+        position = 0
+        for raw, node, lower, extent in zip(
+            raw_values, inputs, lowest_codes, extents, strict=True
+        ):
+            code = node.dtype._scaled_integer(raw) if isinstance(node.dtype, Q) else raw
+            offset = code - lower
+            if not 0 <= offset < extent:
+                raise ValueError("integer lookup input is outside its required range")
+            position = position * extent + offset
+        return position
+
+    def impl(*raw_values: int) -> int:
+        return table[index(raw_values)]
+
+    def sign(*dtypes: DataType) -> DataType:
+        return out
+
+    values = ", ".join(map(str, table))
+
+    def c_lowering(args: list[str], jittable: bool) -> str:
+        lines = [
+            "([](" + ", ".join(f"uint64_t raw{i}" for i in range(len(inputs))) + ") {",
+            f"static constexpr uint64_t table[] = {{{values}}};",
+            "uint64_t index = 0;",
+        ]
+        for i, (node, lower, extent) in enumerate(
+            zip(inputs, lowest_codes, extents, strict=True)
+        ):
+            dtype = node.dtype
+            if isinstance(dtype, Q):
+                shift = 64 - dtype.total_bits()
+                signed = (
+                    f"static_cast<int64_t>(raw{i})" if shift == 0
+                    else f"(static_cast<int64_t>(raw{i} << {shift}) >> {shift})"
+                )
+                code = signed
+            else:
+                code = f"static_cast<int64_t>(raw{i})"
+            lines.extend((
+                f"const int64_t code{i} = {code};",
+                f"if (code{i} < {lower} || code{i} >= {lower + extent}) return uint64_t(0);",
+                f"index = index * {extent} + static_cast<uint64_t>(code{i} - {lower});",
+            ))
+        lines.append("return table[index];")
+        lines.append("})(" + ", ".join(args) + ")")
+        return " ".join(lines)
+
+    return Op(
+        impl=make_fixed_arguments(impl, [int] * len(inputs), return_type=int),
+        sign=make_fixed_arguments(
+            sign, [DataType] * len(inputs), return_type=type(out)
+        ),
+        c_lowering=c_lowering,
+        args=list(inputs),
+        name="integer_lookup_multi",
     )
 
 
