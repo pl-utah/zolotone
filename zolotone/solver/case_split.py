@@ -6,8 +6,8 @@ import typing as tp
 from dataclasses import dataclass
 from itertools import product
 
-from ..solver.engine import check_equivalence as _solver_check_equivalence
-from ..solver.report import (
+from .engine import check_equivalence as _solver_check_equivalence
+from .report import (
     CaseVerificationResult,
     ProofReport,
     VerificationObserver,

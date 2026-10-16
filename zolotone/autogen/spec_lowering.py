@@ -1,0 +1,766 @@
+"""Lower validated specification expressions into implementation nodes."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from fractions import Fraction
+import itertools
+import math
+import typing as tp
+
+from ..errors import MissingError, ZolotoneError
+from ..rival import rival_range_analysis
+from ..spec.spec_ast import (
+    BoolExpr,
+    BoolLit,
+    BoolVar,
+    Eq,
+    FPExpr,
+    Ge,
+    Gt,
+    Le,
+    Lt,
+    NotEq,
+    RealExpr,
+    RealLit,
+    RealVar,
+    SpecNode,
+    children,
+    substitute_spec_node,
+)
+from ..spec.spec_context import SpecContext
+from ..types import Bool, DataType, Q, UQ, Value
+from .missing import _build_missing_primitive
+from ..ast.node import Node
+from ..ast.nodes import (
+    Composite,
+    Const,
+    Var,
+    _annotation_matches,
+    _SpecContract,
+)
+from .spec_validation import (
+    _fixed_point_real_bounds,
+    _fixed_point_result_fits,
+    _prove_result_fits,
+)
+
+if tp.TYPE_CHECKING:
+    from .autogen import Spec
+
+
+@dataclass(frozen=True)
+class _Component:
+    contract: _SpecContract
+    input_categories: tuple[type[SpecNode], ...]
+    node: tp.Callable[..., Node]
+
+    @property
+    def input_types(self):
+        parameters = tuple(self.contract.signature.parameters.values())[:-1]
+        return tuple(self.contract.annotations[parameter.name] for parameter in parameters)
+
+    @classmethod
+    def from_callable(cls, component: tp.Callable[..., Node]) -> _Component:
+        contract = getattr(component, "_spec_contract", None)
+        if not isinstance(contract, _SpecContract) or not callable(
+            getattr(component, "_spec_fn", None)
+        ):
+            raise MissingError(
+                f"Autogeneration component {component!r} does not expose "
+                "a specification contract"
+            )
+        parameters = tuple(contract.signature.parameters.values())[:-1]
+        input_categories = []
+        for parameter in parameters:
+            annotation = contract.annotations[parameter.name]
+            category = _probe_input_category(annotation)
+            if category is None:
+                raise MissingError(
+                    f"Autogeneration component {contract.display_name} has an "
+                    f"unsupported input category for parameter {parameter.name!r} "
+                    f"with annotation {annotation!r}"
+                )
+            input_categories.append(category)
+        return cls(
+            contract=contract, input_categories=tuple(input_categories), node=component
+        )
+
+
+class _Candidate(tp.NamedTuple):
+    node: Node
+    spec: SpecNode
+    cost: int = 0
+    steps: frozenset[tuple[int, int]] = frozenset()
+
+    @classmethod
+    def from_operation(cls, node, spec, arguments, operation_cost):
+        steps = _shared_steps(arguments) | {(id(node), operation_cost)}
+        return cls(node, spec, sum(cost for _, cost in steps), steps)
+
+
+def _shared_steps(arguments):
+    """Charge a shared implementation node once, even when reused by inputs."""
+    return frozenset().union(*(argument.steps for argument in arguments))
+
+
+def _operation_cost(arguments, operation_cost):
+    return operation_cost + sum(cost for _, cost in _shared_steps(arguments))
+
+
+MAX_SPEC_PROBES = 5_000
+MAX_EXTENSION_BITS = 32
+LUT_COST = 100
+
+
+# TODO: this is not too good
+def _exact_fixed_point_value(value: int | float) -> Value[int]:
+    numerator, denominator = value.as_integer_ratio()
+    if denominator & (denominator - 1):
+        raise NotImplementedError(
+            f"Cannot exactly represent {value!r} as fixed point"
+        )
+
+    if denominator == 1:
+        try:
+            return UQ.from_int(numerator)
+        except ValueError:
+            return Q.from_int(numerator)
+
+    frac_bits = denominator.bit_length() - 1
+    if numerator >= 0:
+        total_bits = max(frac_bits, numerator.bit_length())
+        dtype = UQ(total_bits - frac_bits, frac_bits)
+        raw = numerator
+    else:
+        signed_bits = (abs(numerator) - 1).bit_length() + 1
+        total_bits = max(frac_bits, signed_bits)
+        dtype = Q(total_bits - frac_bits, frac_bits)
+        raw = (1 << total_bits) + numerator
+    return dtype.from_bits(raw)
+
+
+def _spec_subexpressions(root: SpecNode) -> tuple[SpecNode, ...]:
+    result = []
+    visited = set()
+
+    def visit(expr: SpecNode) -> None:
+        if expr in visited:
+            return
+        visited.add(expr)
+        result.append(expr)
+        for child in children(expr):
+            visit(child)
+
+    visit(root)
+    return tuple(result)
+
+
+def _matching_subexpression(
+    expr: object,
+    subexpressions: tuple[SpecNode, ...],
+) -> SpecNode | None:
+    if not isinstance(expr, SpecNode):
+        return None
+    return next(
+        (
+            subexpression
+            for subexpression in subexpressions
+            if expr.identical(subexpression)
+        ),
+        None,
+    )
+
+
+def _probe_input_category(annotation: object) -> type[SpecNode] | None:
+    if annotation is Bool or isinstance(annotation, Bool):
+        return BoolExpr
+    if annotation in (Q, UQ) or isinstance(annotation, (Q, UQ)):
+        return RealExpr
+    if annotation is DataType:  # in case of if statement, annotation is just any type
+        return SpecNode
+    if not (
+        isinstance(annotation, DataType)
+        or isinstance(annotation, type) and issubclass(annotation, DataType)
+    ):
+        return None
+    try:
+        dtype = annotation if isinstance(annotation, DataType) else annotation()
+        sample = dtype.to_spec("probe", SpecContext("lowering input type"))
+        return type(sample) if isinstance(sample, FPExpr) else None
+    except Exception:
+        return None
+
+
+def _matches_result(
+    candidate: _Candidate,
+    spec_ast: SpecNode,
+    return_annotation: object,
+) -> bool:
+    return (
+        candidate.spec.identical(spec_ast)
+        and _annotation_matches(candidate.node.dtype, return_annotation)
+    )
+
+
+def _candidate_output_range_fits(
+    candidate: _Candidate,
+    range_ctx: SpecContext,
+) -> bool:
+    if not isinstance(candidate.spec, RealExpr):
+        return True
+    if not isinstance(candidate.node.dtype, (Q, UQ)):
+        raise NotImplementedError(
+            "Real-valued autogeneration candidate must have a Q or UQ "
+            f"output format, got {candidate.node.dtype!r} from "
+            f"{candidate.node.name!r}"
+        )
+
+    output_range = rival_range_analysis(candidate.spec, range_ctx)
+    if output_range is not None:
+        lower, upper = output_range
+        dtype_lower, dtype_upper = _fixed_point_real_bounds(candidate.node.dtype)
+        if (
+            math.isfinite(lower)
+            and math.isfinite(upper)
+            and lower >= dtype_lower
+            and upper <= dtype_upper
+        ):
+            return True
+
+    return _prove_result_fits(candidate.spec, candidate.node.dtype, range_ctx)
+
+
+def _initial_candidates(subexpressions, spec_input_nodes):
+    sources = [
+        _Candidate(node=node, spec=expr)
+        for expr, node in spec_input_nodes.items()
+    ]
+    source_states = {(candidate.spec, candidate.node.dtype) for candidate in sources}
+    for expr in subexpressions:
+        if isinstance(expr, RealLit):
+            literal = _Candidate(Const(_exact_fixed_point_value(expr.value)), expr, 0)
+        elif isinstance(expr, BoolLit):
+            literal = _Candidate(Const(Bool().from_bits(int(expr.value))), expr, 0)
+        elif isinstance(expr, (BoolVar, RealVar)):
+            if expr not in spec_input_nodes:
+                raise MissingError(f"Undeclared variable in specification: {expr}")
+            continue
+        else:
+            continue
+        state = (literal.spec, literal.node.dtype)
+        if state not in source_states:
+            source_states.add(state)
+            sources.append(literal)
+    return sources
+
+
+def _typed_context(range_ctx: SpecContext, sources: list[_Candidate]) -> SpecContext:
+    typed_ctx = range_ctx.copy()
+    for source in sources:
+        if isinstance(source.spec, RealExpr) and isinstance(source.node.dtype, (Q, UQ)):
+            typed_ctx.assumes.append(
+                _fixed_point_result_fits(source.spec, source.node.dtype, typed_ctx)
+            )
+    return typed_ctx
+
+
+class _LoweringSearch:
+    """One candidate table, improved by known components and generated LUTs."""
+
+    def __init__(self, spec_ast, spec_input_nodes, return_annotation, range_ctx):
+        from ..components import LOSSLESS_COMPONENTS
+
+        self.root = spec_ast
+        self.return_annotation = return_annotation
+        self.expressions = _spec_subexpressions(spec_ast)
+        self.components = tuple(
+            _Component.from_callable(component) for component in LOSSLESS_COMPONENTS
+        )
+        # self.candidates = {
+        #     expr: {
+        #         dtype: candidate,
+        #     },
+        # }
+        self.candidates = {}
+
+        # Constants/Variables
+        sources = _initial_candidates(self.expressions, spec_input_nodes)
+        self.ctx = _typed_context(range_ctx, sources)
+        for source in sources:
+            self.add(source)
+
+        # Cache both matches and misses across all format variants.
+        self.component_matches = {}
+        self.component_attempts = {}
+        self.lut_attempts = {}
+        self.suggested_lut_types = {}
+        self.range_checks = {}
+        self.errors = []
+
+    def run(self) -> Node:
+        # Run up until a fixed point
+        while True:
+            changed = self.add_component_candidates()
+            changed |= self.add_lut_candidates()
+            if not changed:
+                break
+
+        result = self.best_result()
+        if result is not None:
+            return result.node
+        if self.errors:
+            raise self.errors[0]
+        raise ZolotoneError(
+            f"Cannot lower specification {self.root!r} to "
+            f"{self.return_annotation!r}; no typed component or supported "
+            "missing primitive was found"
+        )
+
+    def best_result(self):
+        return min(
+            (
+                candidate
+                for formats in self.candidates.values()
+                for candidate in formats.values()
+                if _matches_result(candidate, self.root, self.return_annotation)
+            ),
+            key=lambda candidate: candidate.cost,
+            default=None,
+        )
+
+    # Add candidate if it is cheaper than previous one
+    def add(self, candidate):
+        formats = self.candidates.setdefault(candidate.spec, {})
+        previous = formats.get(candidate.node.dtype)
+        if previous is not None and previous.cost <= candidate.cost:
+            return False
+        formats[candidate.node.dtype] = candidate
+        return True
+
+    def worth_trying(self, cost):
+        result = self.best_result()
+        return result is None or cost < result.cost
+
+    def match_component(self, index, argument_specs):
+        key = (index, argument_specs)
+        if key not in self.component_matches:
+            if len(self.component_matches) >= MAX_SPEC_PROBES:
+                raise ZolotoneError(
+                    f"Cannot lower {self.root!r}: component spec probe "
+                    f"limit of {MAX_SPEC_PROBES} was reached"
+                )
+            component = self.components[index]
+            try:
+                expression = component.node._spec_fn(
+                    *argument_specs,
+                    SpecContext(f"autogen candidate {component.contract.display_name}"),
+                )
+            except (TypeError, ValueError, NotImplementedError, OverflowError):
+                expression = None
+            matched = _matching_subexpression(expression, self.expressions)
+            self.component_matches[key] = matched
+
+        return self.component_matches[key]
+
+    def allows_format(self, node, expression, arguments):
+        """Allow extensions up to the cap; arithmetic may produce wider values."""
+        if not isinstance(node.dtype, (Q, UQ)):
+            return True
+        for arg in arguments:
+            if (
+                arg.spec != expression
+                or not isinstance(arg.node.dtype, (Q, UQ))
+                or node.dtype.total_bits() <= arg.node.dtype.total_bits()
+            ):
+                continue
+            if node.dtype.total_bits() > MAX_EXTENSION_BITS:
+                return False
+        return True
+
+    def fits(self, candidate):
+        key = (candidate.spec, candidate.node.dtype)
+        if key not in self.range_checks:
+            try:
+                self.range_checks[key] = _candidate_output_range_fits(candidate, self.ctx)
+            except (NotImplementedError, ZolotoneError):
+                self.range_checks[key] = False
+        return self.range_checks[key]
+
+    def add_component_candidates(self):
+        changed = False
+        expressions = tuple(self.candidates.keys())  # Resolved expressions
+        for index, component in enumerate(self.components):
+            # Select expressions that can be inputs to new component
+            expression_pools = [
+                tuple(
+                    expression for expression in expressions
+                    if isinstance(expression, category)
+                )
+                for category in component.input_categories
+            ]
+            for argument_specs in itertools.product(*expression_pools):
+                # Try to see whether component implements some subexpressions
+                matched = self.match_component(index, argument_specs)
+                if matched is None:
+                    continue
+                # Select candidates which dtypes do match component input types
+                pools = [
+                    tuple(
+                        candidate
+                        for candidate in self.candidates[expression].values()
+                        if _annotation_matches(candidate.node.dtype, annotation)
+                    )
+                    for expression, annotation in zip(
+                        argument_specs, component.input_types, strict=True
+                    )
+                ]
+                for arguments in itertools.product(*pools):
+                    cost = _operation_cost(arguments, 1)
+                    if not self.worth_trying(cost):
+                        continue
+                    key = (index, tuple((arg.spec, arg.node.dtype) for arg in arguments))
+                    if self.component_attempts.get(key, math.inf) <= cost:
+                        continue
+                    self.component_attempts[key] = cost
+                    try:
+                        node = component.node(*(arg.node for arg in arguments))
+                    except (TypeError, ValueError, NotImplementedError, OverflowError):
+                        continue
+                    if not self.allows_format(node, matched, arguments):
+                        continue
+                    candidate = _Candidate.from_operation(node, matched, arguments, operation_cost=1)
+                    if self.fits(candidate):
+                        changed |= self.add(candidate)
+        return changed
+
+    def lut_output_type(self, expression, input_dtype):
+        """Use requested fractional bits for a final LUT; infer its integer width."""
+        from .missing import _suggest_missing_output_dtype
+
+        key = (expression, input_dtype)
+        if key not in self.suggested_lut_types:
+            try:
+                precision_dtype = input_dtype
+                if expression.identical(self.root) and isinstance(
+                    self.return_annotation, (Q, UQ)
+                ):
+                    precision_dtype = self.return_annotation
+                self.suggested_lut_types[key] = _suggest_missing_output_dtype(
+                    expression, precision_dtype, self.ctx
+                )
+            except (ZolotoneError, NotImplementedError) as exc:
+                self.errors.append(exc)
+                self.suggested_lut_types[key] = None
+        return self.suggested_lut_types[key]
+
+    def add_lut_candidates(self):
+        changed = False
+        for expression in reversed(self.expressions):
+            # Does it worth trying a LUT
+            existing = self.candidates.get(expression, {})
+            if any(candidate.cost < LUT_COST for candidate in existing.values()):
+                continue
+            
+            operands = lut_inputs(expression)
+            # Only univariant function can be approximated with LUT
+            if len(operands) != 1:
+                continue
+            operand, = operands
+
+            pool = tuple(
+                candidate
+                for candidate in self.candidates.get(operand, {}).values()
+                if isinstance(candidate.node.dtype, (Q, UQ))
+            )
+            for argument in pool:
+                cost = argument.cost + LUT_COST
+                if not self.worth_trying(cost):
+                    continue
+                dtype = self.lut_output_type(expression, argument.node.dtype)
+                if dtype is None:
+                    continue
+                existing = self.candidates.get(expression, {}).get(dtype)
+                # Does it worth trying a LUT
+                if existing is not None and existing.cost <= cost:
+                    continue
+                key = (
+                    expression,
+                    (argument.spec, argument.node.dtype),
+                    dtype,
+                )
+                if self.lut_attempts.get(key, math.inf) <= cost:
+                    continue
+                self.lut_attempts[key] = cost
+                try:
+                    node = _build_missing_primitive(
+                        expression, operand, argument.node,
+                        self.ctx, output_dtype=dtype,
+                    )
+                except (MissingError, ZolotoneError, NotImplementedError) as exc:
+                    self.errors.append(exc)
+                    continue
+                changed |= self.add(
+                    _Candidate.from_operation(node, expression, (argument,), LUT_COST)
+                )
+        return changed
+
+
+def lut_inputs(expression):
+    """Use the distinct nonliteral children as a LUT's materialized inputs."""
+    if not isinstance(expression, RealExpr) or isinstance(expression, RealLit):
+        return ()
+    operands = []
+    for child in children(expression):
+        if isinstance(child, (RealLit, BoolLit)):
+            continue
+        if not isinstance(child, RealExpr):
+            return ()
+        if child not in operands:
+            operands.append(child)
+    return tuple(operands)
+
+
+def search_lower_spec_to_impl(
+    spec_ast: SpecNode,
+    spec_input_nodes: dict[tp.Any, Node],
+    return_annotation: object,
+    range_ctx: SpecContext,
+) -> Node:
+    """Find the cheapest typed derivation of a specification expression."""
+    return _LoweringSearch(
+        spec_ast, spec_input_nodes, return_annotation, range_ctx
+    ).run()
+
+
+def _tighten_literal_comparison(
+    comparison: Lt | Le | Gt | Ge | Eq | NotEq,
+    spec_input_nodes: dict[tp.Any, Node],
+) -> BoolExpr | None:
+    """Tighten a var–literal comparison using its representable input values."""
+    lhs = comparison.lhs.constant_fold()
+    rhs = comparison.rhs.constant_fold()
+    operator = type(comparison)
+    if isinstance(lhs, RealLit):
+        lhs, rhs = rhs, lhs
+        operator = {Lt: Gt, Le: Ge, Gt: Lt, Ge: Le, Eq: Eq, NotEq: NotEq}[operator]
+    input_node = spec_input_nodes.get(lhs)
+    if (
+        not isinstance(lhs, RealVar)
+        or not isinstance(rhs, RealLit)
+        or input_node is None
+        or not isinstance(input_node.dtype, (Q, UQ))
+    ):
+        return None
+
+    scale = 1 << input_node.dtype.frac_bits
+    scaled = Fraction(rhs.value) * scale
+    if operator in (Eq, NotEq):
+        signed = isinstance(input_node.dtype, Q)
+        magnitude = 1 << (input_node.dtype.total_bits() - int(signed))
+        minimum = -magnitude if signed else 0
+        if scaled.denominator != 1 or not minimum <= scaled < magnitude:
+            return BoolLit(operator is NotEq)
+        return None
+    if operator is Ge:
+        bound = math.ceil(scaled)
+    elif operator is Gt:
+        bound = math.floor(scaled) + 1
+    elif operator is Le:
+        bound = math.floor(scaled)
+    else:
+        bound = math.ceil(scaled) - 1
+
+    exact = Fraction(bound, scale)
+    if exact.denominator == 1:
+        literal = RealLit(exact.numerator)
+    elif Fraction(float(exact)) == exact:
+        literal = RealLit(float(exact))
+    else:
+        # Keep bounds beyond float precision exact as a dyadic expression.
+        literal = RealLit(bound) * (RealLit(2) ** RealLit(-input_node.dtype.frac_bits))
+    return Ge(lhs, literal) if operator in (Gt, Ge) else Le(lhs, literal)
+
+
+def _make_conditions_bit_precise(
+    conditions: tp.Iterable[BoolExpr],
+    spec_inputs: tuple[tp.Any, ...],
+    contract: _SpecContract,
+    range_ctx: SpecContext,
+) -> tuple[BoolExpr, ...]:
+    """Tighten var–literal bounds and lower other strict comparisons."""
+    input_parameters = list(contract.signature.parameters.values())[:-1]
+    spec_input_nodes = dict(
+        zip(
+            spec_inputs,
+            (
+                Var(parameter.name, contract.annotations[parameter.name])
+                for parameter in input_parameters
+            ),
+            strict=True,
+        )
+    )
+
+    rewritten_conditions = []
+    for condition in conditions:
+        pending = [condition]
+        comparisons = []
+        while pending:
+            node = pending.pop()
+            pending.extend(children(node))
+            if isinstance(node, (Lt, Le, Gt, Ge, Eq, NotEq)):
+                comparisons.append(node)
+
+        rewritten = condition
+        for comparison in reversed(comparisons):
+            precise = _tighten_literal_comparison(comparison, spec_input_nodes)
+            if precise is not None:
+                rewritten = substitute_spec_node(rewritten, comparison, precise)
+                if isinstance(precise, BoolLit):
+                    rewritten = rewritten.constant_fold()
+                continue
+            if not isinstance(comparison, (Lt, Gt)):
+                continue
+
+            lowered = search_lower_spec_to_impl(
+                comparison,
+                spec_input_nodes,
+                Bool(),
+                range_ctx,
+            )
+            lowered_args = getattr(lowered, "args", ())
+            if len(lowered_args) != 2:
+                continue
+            lhs_dtype = lowered_args[0].dtype
+            rhs_dtype = lowered_args[1].dtype
+            if not isinstance(lhs_dtype, (Q, UQ)) or not isinstance(
+                rhs_dtype,
+                (Q, UQ),
+            ):
+                continue
+
+            frac_bits = max(lhs_dtype.frac_bits, rhs_dtype.frac_bits)
+            quantum = range_ctx.real_val(2.0 ** -frac_bits)
+            if isinstance(comparison, Gt):
+                precise = comparison.lhs >= comparison.rhs + quantum
+            else:
+                precise = comparison.lhs <= comparison.rhs - quantum
+            rewritten = substitute_spec_node(
+                rewritten,
+                comparison,
+                precise.constant_fold(),
+            )
+        rewritten_conditions.append(rewritten)
+    return tuple(rewritten_conditions)
+
+
+def rewrite_strict_conditions(
+    spec: Spec,
+) -> Spec:
+    """Tighten assumptions and checks for fixed-point semantics.
+
+    Assumptions are rewritten in context order so each one is lowered using
+    only the preceding precise assumptions. Requirements stay in source form
+    because Z3's continuous-real model cannot exclude gaps between adjacent
+    fixed-point values.
+    """
+    condition_ctx = spec.spec_ctx.copy(
+        assumes=[],
+        checks=[],
+        requirements=[],
+    )
+    for assumption in spec.spec_ctx.assumes:
+        precise_assumption, = _make_conditions_bit_precise(
+            (assumption,),
+            spec.spec_inputs,
+            spec.contract,
+            condition_ctx,
+        )
+        condition_ctx.assumes.append(precise_assumption)
+
+    precise_checks = _make_conditions_bit_precise(
+        spec.spec_ctx.checks,
+        spec.spec_inputs,
+        spec.contract,
+        condition_ctx,
+    )
+    return replace(
+        spec,
+        spec_ctx=spec.spec_ctx.copy(
+            assumes=list(condition_ctx.assumes),
+            checks=list(precise_checks),
+        ),
+    )
+
+
+def lower_spec_result(
+    spec: Spec,
+) -> Node:
+    @Composite(name=spec.name, spec=spec.function)
+    def generated_impl(*impl_inputs: Node) -> Node:
+        spec_input_nodes = dict(
+            zip(spec.spec_inputs, impl_inputs, strict=True)
+        )
+        return search_lower_spec_to_impl(
+            spec.spec_ast,
+            spec_input_nodes,
+            spec.return_annotation,
+            spec.spec_ctx,
+        )
+
+    input_parameters = list(spec.contract.signature.parameters.values())[:-1]
+    impl_inputs = [
+        Var(
+            name=parameter.name,
+            dtype=spec.annotations[parameter.name],
+        )
+        for parameter in input_parameters
+    ]
+    return generated_impl(*impl_inputs)
+
+
+def attach_lowered_conditions(
+    lowered_composite: Node,
+    spec: Spec,
+) -> None:
+    """Lower and attach specification assumptions and runtime checks."""
+    spec_input_nodes = dict(
+        zip(spec.spec_inputs, lowered_composite.inner_args, strict=True)
+    )
+    lowered_assumes = []
+    prior_assumes = []
+    for assumption in spec.spec_ctx.assumes:
+        range_ctx = spec.spec_ctx.copy(
+            assumes=list(prior_assumes),
+            checks=[],
+        )
+        lowered_assumes.append(
+            (
+                assumption,
+                search_lower_spec_to_impl(
+                    assumption,
+                    spec_input_nodes,
+                    Bool(),
+                    range_ctx,
+                ),
+            )
+        )
+        prior_assumes.append(assumption)
+
+    spec_input_nodes[spec.spec_ast] = lowered_composite.inner_tree
+    lowered_checks = tuple(
+        (
+            check,
+            search_lower_spec_to_impl(
+                check,
+                spec_input_nodes,
+                Bool(),
+                spec.spec_ctx,
+            ),
+        )
+        for check in spec.spec_ctx.checks
+    )
+    lowered_composite.set_impl_conditions(
+        assumes=tuple(lowered_assumes),
+        checks=lowered_checks,
+    )

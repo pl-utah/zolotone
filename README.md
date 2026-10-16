@@ -119,6 +119,20 @@ Zolotone connects golden specifications to typed implementation models:
    specification produce equivalent results for the same symbolic inputs.
 5. Call `check_spec()` to compare the implementation with its golden model.
 
+Lowering first searches for dtype-compatible, range-valid implementations of
+specification expressions using known components. If a real expression still
+needs a component, lowering creates a typed `Primitive` in memory at the first
+provable typed frontier, then searches known components again. The generated
+node contains an in-memory Rival lookup table with at most 4,096 valid input
+encodings. Its provisional implementation may be lossy and is not registered
+as a lossless component. This first pass supports one typed reachable
+fixed-point input plus literals.
+
+A LUT for the final result uses the fractional width of a concrete `Q` or `UQ`
+return annotation, rounding directly to that precision. Its sign and integer
+width are still inferred from the result range. Intermediate LUTs and results
+with a family annotation (`Q` or `UQ`) use the input's fractional width.
+
 Proof obligations can be simplified, rewritten with egglog, discharged with
 Z3, and checked with dReal. Floating-point results are split into observable
 classification cases so finite values, zeros, infinities, and NaNs are compared
@@ -271,6 +285,14 @@ non-JIT source files under `examples/c_models/`. Generated C++ source files are
 ignored by Git.
 
 ## Rival3 bridge
+
+Generated lookup tables compile the integer-code expression
+`e(n * 2**(-F_input)) * 2**F_output`, where `n` is the exact input code
+(a signed integer for `Q`). Rival still evaluates real intervals internally;
+it rounds once to the nearest integer output code, with ties to even.
+`F_output` is the primitive's actual output fractional width, so there is no
+intermediate rounding at a shared maximum precision. This transformation is
+local to table construction and does not change the primitive's exact-real spec.
 
 `zolotone.rival` translates specification expressions into Rival3 for
 interval-based feasibility checks. `make install` builds the PyO3 extension;

@@ -21,6 +21,7 @@ __all__ = [
     "rival_range_analysis",
     "rival_feasibility_check",
     "rival_trim_context",
+    "build_integer_machine",
 ]
 
 
@@ -139,6 +140,16 @@ class RivalMachine:
         ]
 
 
+class RivalIntegerMachine:
+    """Evaluate exact signed integer inputs to nearest-even integer outputs."""
+
+    def __init__(self, raw_machine: Any):
+        self._raw_machine = raw_machine
+
+    def apply(self, raw_input: int) -> int:
+        return int(self._raw_machine.apply(str(raw_input)))
+
+
 def build_machine(
     exprs: Sequence[SpecNode],
     free_vars: Sequence[str],
@@ -163,6 +174,36 @@ def build_range_machine(
     native = _load_native_module()
     raw_machine = native.build_machine([to_rival_ir(expr)], var_list)
     return RivalMachine(raw_machine)
+
+
+def build_integer_machine(
+    expr: RealExpr,
+    *,
+    input_total_bits: int,
+    output_total_bits: int,
+) -> RivalIntegerMachine:
+    """Compile an expression from exact integer input to integer output.
+
+    Rival evaluates real intervals internally and rounds once, to nearest-even
+    integer output. Callers are responsible for expressing any unit conversion
+    in ``expr`` before compiling it.
+    """
+    if not isinstance(expr, RealExpr):
+        raise TypeError("integer evaluation requires a real expression")
+    _validate_referenced_vars([expr], ["x"])
+    for label, total in (("input", input_total_bits), ("output", output_total_bits)):
+        if type(total) is not int:
+            raise TypeError(f"{label} bit width must be an integer")
+        if total < 1:
+            raise ValueError(f"invalid {label} integer bit width")
+
+    native = _load_native_module()
+    raw_machine = native.build_integer_machine(
+        to_rival_ir(expr),
+        input_total_bits,
+        output_total_bits,
+    )
+    return RivalIntegerMachine(raw_machine)
 
 
 def _build_domain_machine(
@@ -354,6 +395,13 @@ def _get_rival_rects_and_contributors(
     bool_var_names: set[str],
     max_rects: int,
 ) -> tuple[list[list[tuple[float, float]]], list[bool]]:
+    from .spec.spec_context import SpecContext, normalize_ctx
+
+    # Keep assumption positions intact so contributors still refer to the
+    # caller's source expressions, even when extraction uses normalized ones.
+    normalization_ctx = SpecContext("Rival rectangle assumptions")
+    normalization_ctx.assumes = list(assumes)
+    assumes = normalize_ctx(normalization_ctx).assumes
     domain = _RivalRectDomain.build(free_vars, bool_var_names)
     variable_kind_cache: dict[int, tuple[bool, bool]] = {}
     rects = [domain.new_rect()]

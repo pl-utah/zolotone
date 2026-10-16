@@ -61,7 +61,7 @@ from zolotone import (
     UE4M3,
     Var,
 )
-from zolotone.ast.parallel_verification import MAX_WORKERS_ENV
+from zolotone.solver.parallel_verification import MAX_WORKERS_ENV
 from zolotone.solver import CaseVerificationResult
 
 

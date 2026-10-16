@@ -1,7 +1,37 @@
-from ..types import DataType, Tuple
+from ..types import DataType, Q, Tuple, UQ
 from ..spec import BoolExpr, Cases, case, FPExpr, If, RealExpr
 from .node import Node
-from .nodes import Op, Primitive
+from .nodes import Const, Op, Primitive
+
+
+def integer_lookup(
+    x: Node,
+    table: tuple[int, ...],
+    out: Q | UQ,
+) -> Node:
+    """Select a typed tuple entry using the input's integer code."""
+    from ..components.basics import basic_sub
+
+    input_dtype = x.dtype
+    if not isinstance(input_dtype, (Q, UQ)):
+        raise TypeError("integer lookup input must be Q or UQ")
+    bits = input_dtype.total_bits()
+    minimum = -(1 << (bits - 1)) if isinstance(input_dtype, Q) else 0
+    maximum = (1 << (bits - int(isinstance(input_dtype, Q)))) - 1
+    if len(table) != maximum - minimum + 1:
+        raise ValueError("integer lookup table must cover every input code")
+
+    values = Const(Tuple(*(out for _ in table)).from_values(
+        *(out.from_bits(raw) for raw in table)
+    ))
+    index_dtype = UQ(bits, 0)
+    # Shift signed codes so the dtype's minimum value maps to tuple index zero.
+    index = basic_sub(
+        x,
+        Const(index_dtype.from_bits(minimum & ((1 << bits) - 1))),
+        out=index_dtype,
+    )
+    return Tuple_get_item(values, index)
 
 
 def Copy(x: Node) -> Node:
@@ -44,9 +74,54 @@ def _basic_get_item(x: Node, idx: int) -> Op:
         name=f"_basic_get_item_{idx}",
     )
 
-def Tuple_get_item(x: Node, idx: int) -> Primitive:
+def _dynamic_get_item(x: Node, idx: Node) -> Node:
+    input_type = x.dtype
+    output_type = input_type.items[0]
+    if not isinstance(output_type, (Q, UQ)) or not input_type.is_homogeneous:
+        raise TypeError("Dynamic tuple indexing requires matching Q or UQ element types")
+    if not isinstance(idx.dtype, UQ) or idx.dtype.frac_bits != 0:
+        raise TypeError("Dynamic tuple indexing requires an unsigned integer index")
+    index_type = idx.dtype
+    length = len(input_type.items)
+
+    def get_item_spec(values: input_type, index: index_type, ctx) -> output_type:
+        ctx.assume((index >= ctx.zero()) & (index < ctx.real_val(length)))
+
+        def select(start, end):
+            if end - start == 1:
+                return values[start]
+            middle = (start + end) // 2
+            return If(
+                index < ctx.real_val(middle),
+                select(start, middle), select(middle, end),
+            )
+
+        return select(0, length)
+
+    def impl(values: tuple, index: int) -> int:
+        return values[index]
+
+    def sign(values: Tuple, index: UQ) -> DataType:
+        return output_type
+
+    def c_lowering(args: list[str], jittable: bool) -> str:
+        return f"({args[0]}).at(static_cast<uint64_t>({args[1]}))"
+
+    @Primitive(name="Tuple_get_item", spec=get_item_spec, c_inline=True)
+    def get_item(values: Node, index: Node) -> Node:
+        return Op(
+            impl=impl, sign=sign, c_lowering=c_lowering,
+            args=[values, index], name="_basic_dynamic_get_item",
+        )
+
+    return get_item(x, idx)
+
+
+def Tuple_get_item(x: Node, idx: int | Node) -> Node:
     if not isinstance(x.dtype, Tuple):
         raise TypeError(f"Expected a Tuple node, got {x.dtype}")
+    if isinstance(idx, Node):
+        return _dynamic_get_item(x, idx)
     if idx >= len(x.dtype.items) or idx < 0:
         raise IndexError(f"Index is out of range for tuple {str(x)}, given {str(idx)}")
 

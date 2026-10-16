@@ -126,6 +126,17 @@ def spec13(x: UQ(2, 0), ctx) -> Float32():
     return x + ctx.one()
 
 
+# Missing-component synthesis currently handles one nonliteral input only.
+@Test(MissingError)
+def missing_component_with_two_inputs(
+    x: UQ(2, 0),
+    y: UQ(2, 0),
+    ctx,
+) -> UQ(5, 0):
+    ctx.assume(x >= ctx.one())
+    return x ** y
+
+
 # conversion can be composed with numeric components
 @Test()
 def spec_bool_to_uq_then_add(x: Bool(), y: UQ(2, 1), ctx) -> UQ(5, 1):

@@ -5,7 +5,7 @@ import typing as tp
 from ..spec.spec_ast import SpecNode
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
-from .nodes import _build_spec_contract, _SpecContract
+from ..ast.nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
     attach_lowered_conditions,
     lower_spec_result,
@@ -120,11 +120,15 @@ def get_spec(
     )
 
 
-def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
+def Autogenerate(
+    name: str,
+    spec: tp.Callable[..., tp.Any],
+):
+    """Lower a specification, creating missing real Primitives in memory."""
     # Step 1: Obtain spec AST
     current_spec = get_spec(name, spec)
 
-    # print(current_spec)
+    print(current_spec)
 
     # Step 2: establish the abstract input domain and validate its shape.
     # Error on undeclared variables, warn about unused variables.
@@ -160,10 +164,11 @@ def Autogenerate(name: str, spec: tp.Callable[..., tp.Any]):
             signature=current_spec.signature.replace(return_annotation=result_dtype),
         )
 
-    # print(current_spec)
-
     # Step 7: derive guards for the selected implementation result.
     current_spec = add_output_guards(current_spec)
+
+    print(current_spec)
+
 
     # Step 8: lower and attach assumptions, user checks, and output guards.
     attach_lowered_conditions(lowered_composite, current_spec)

@@ -431,17 +431,101 @@ def _simplify_with_rival(ctx: SpecContext) -> SpecContext:
     return current
 
 
-def normalize_nnf(ctx: SpecContext) -> SpecContext:
-    """Normalize assumptions and checks without changing context metadata."""
-    from ..egglog.egraph import _needs_nnf, _normalize_nnf
+_REVERSE_COMPARISON = {Lt: Gt, Le: Ge, Gt: Lt, Ge: Le, Eq: Eq, NotEq: NotEq}
 
-    def normalize(condition: BoolExpr) -> BoolExpr:
-        return _normalize_nnf(condition) if _needs_nnf(condition) else condition
+
+def normalize_ctx(ctx: SpecContext) -> SpecContext:
+    """Normalize Boolean polarity and comparison terms in one cached traversal."""
+    complements = {
+        And: Or, Or: And,
+        Eq: NotEq, NotEq: Eq,
+        Lt: Ge, Le: Gt, Gt: Le, Ge: Lt,
+        BoolEq: BoolNe, BoolNe: BoolEq,
+    }
+
+    # Cache by identity so distinct but equal nodes retain their identity,
+    # and looking up shared subtrees does not recursively hash their contents.
+    normalized_nodes: dict[tuple[int, bool], SpecNode] = {}
+
+    def normalize(node: SpecNode, negated: bool = False) -> SpecNode:
+        key = (id(node), negated)
+        if key not in normalized_nodes:
+            normalized_nodes[key] = visit(node, negated)
+        return normalized_nodes[key]
+
+    def visit(node: SpecNode, negated: bool) -> SpecNode:
+        if isinstance(node, Not):
+            if not negated and isinstance(node.value, BoolVar):
+                return node
+            return normalize(node.value, not negated)
+        if isinstance(node, BoolLit):
+            return BoolLit(not node.value) if negated else node
+        if isinstance(node, BoolVar):
+            return Not(node) if negated else node
+
+        args = children(node)
+        # Only De Morgan's laws pass negative polarity to the operands.
+        # Comparisons (including Boolean equality) complement their operator;
+        # arithmetic children still need traversal for nested If conditions.
+        negate_args = negated and isinstance(node, (And, Or))
+        normalized = tuple(normalize(arg, negate_args) for arg in args)
+        operator = complements[type(node)] if negated else type(node)
+        result = (
+            node
+            if operator is type(node) and all(
+                old is new for old, new in zip(args, normalized)
+            )
+            else operator(*normalized)
+        )
+        if type(result) in _REVERSE_COMPARISON:
+            result = _normalize_comparison(result)
+        return result
 
     return ctx.copy(
         assumes=[normalize(assume) for assume in ctx.assumes],
         checks=[normalize(check) for check in ctx.checks],
     )
+
+
+def _normalize_comparison(node: BoolExpr) -> BoolExpr:
+    """Move additive variable terms left and constant terms right"""
+    def sum_terms(terms: list[tuple[RealExpr, int]]) -> RealExpr:
+        if not terms:
+            return RealLit(0)
+        first, sign = terms[0]
+        result = first if sign == 1 else -first
+        for term, sign in terms[1:]:
+            result = result + term if sign == 1 else result - term
+        return result
+
+    variable_terms = []
+    constant_terms = []
+
+    def collect(expr: RealExpr, sign: int) -> None:
+        if isinstance(expr, (Add, Sub)):
+            collect(expr.lhs, sign)
+            collect(expr.rhs, -sign if isinstance(expr, Sub) else sign)
+        elif isinstance(expr, Neg):
+            collect(expr.value, -sign)
+        elif variables(expr):
+            variable_terms.append((expr, sign))
+        else:
+            constant_terms.append((expr, -sign))
+
+    collect(node.lhs, 1)
+    collect(node.rhs, -1)
+    if not variable_terms:
+        return node
+
+    operator = type(node)
+    if variable_terms[0][1] == -1:
+        operator = _REVERSE_COMPARISON[operator]
+        variable_terms = [(term, -sign) for term, sign in variable_terms]
+        constant_terms = [(term, -sign) for term, sign in constant_terms]
+    lhs = sum_terms(variable_terms)
+    rhs = sum_terms(constant_terms).constant_fold()
+    result = operator(lhs, rhs)
+    return node if result.identical(node) else result
 
 
 def simplify_ctx(ctx: SpecContext):

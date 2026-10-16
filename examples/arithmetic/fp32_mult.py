@@ -94,7 +94,7 @@ if __name__ == '__main__':
         Var(name="a", dtype=Float32()),
         Var(name="b", dtype=Float32()),
     )
-    multiplier.check_spec()
+    # multiplier.check_spec()
     # pprint(multiplier.check_spec())
     with open("examples/c_models/fp32_mult_jit.cpp", "w") as file:
         file.write(multiplier.to_cpp(jittable=True))
