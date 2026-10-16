@@ -27,7 +27,7 @@ def _fp16_mantissa(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda lowered_args, jittable: f"({lowered_args[0]} & 1023)",
+        c_lowering=lambda lowered_args, jittable: f"({lowered_args[0]} & 0x3ff)",
         args=[x],
         name="_fp16_mantissa",
     )
@@ -43,7 +43,7 @@ def _fp16_exponent(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda lowered_args, jittable: f"(({lowered_args[0]} >> 10) & 31)",
+        c_lowering=lambda lowered_args, jittable: f"(({lowered_args[0]} >> 10) & 0x1f)",
         args=[x],
         name="_fp16_exponent",
     )
@@ -59,7 +59,7 @@ def _fp16_sign(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda lowered_args, jittable: f"(({lowered_args[0]} >> 15) & 1)",
+        c_lowering=lambda lowered_args, jittable: f"(({lowered_args[0]} >> 15) & 0x1)",
         args=[x],
         name="_fp16_sign",
     )

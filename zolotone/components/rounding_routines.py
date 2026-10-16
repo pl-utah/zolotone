@@ -115,12 +115,12 @@ def lzc(x: Node) -> Node:
         arg = args[0]
         if width <= 32:
             return (
-                f"(({arg}) == 0 ? {width} : "
+                f"(({arg}) == 0x0 ? {width} : "
                 f"(__builtin_clz(static_cast<uint32_t>({arg})) - {32 - width}))"
             )
         if width <= 64:
             return (
-                f"(({arg}) == 0 ? {width} : "
+                f"(({arg}) == 0x0 ? {width} : "
                 f"(__builtin_clzll(static_cast<uint64_t>({arg})) - {64 - width}))"
             )
         raise TypeError("lzc supports values up to 64 bits")

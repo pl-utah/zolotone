@@ -26,7 +26,7 @@ def uq_alloc(int_bits: Node,
     return Op(
         sign=sign,
         impl=impl,
-        c_lowering=lambda lowered_args, jittable: "0",
+        c_lowering=lambda lowered_args, jittable: "0x0",
         args=[int_bits, frac_bits],
         name="uq_alloc")
 

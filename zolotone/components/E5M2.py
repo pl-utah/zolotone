@@ -20,7 +20,7 @@ def _e5m2_mantissa(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"({args[0]} & 3)",
+        c_lowering=lambda args, jittable: f"({args[0]} & 0x3)",
         args=[x],
         name="_e5m2_mantissa",
     )
@@ -36,7 +36,7 @@ def _e5m2_exponent(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 2) & 31)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 2) & 0x1f)",
         args=[x],
         name="_e5m2_exponent",
     )
@@ -52,7 +52,7 @@ def _e5m2_sign(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 7) & 1)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 7) & 0x1)",
         args=[x],
         name="_e5m2_sign",
     )
