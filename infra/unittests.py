@@ -9256,6 +9256,35 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         source.load_value(UQ(2, 0).from_bits(3))
         self.assertEqual(search.candidates[expression][UQ(4, 0)].node.evaluate().to_python(), 9)
 
+    def test_final_lut_rounds_at_requested_fractional_precision(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import _uq_fraction_extend, _uq_zero_extend
+
+        for input_frac in (0, 3):
+            for output_frac in (0, 2):
+                with self.subTest(input_frac=input_frac, output_frac=output_frac):
+                    ctx = SpecContext("requested-lut-precision")
+                    x = ctx.real("x")
+                    ctx.assume(x >= ctx.one())
+                    ctx.assume(x <= ctx.real_val(3))
+                    input_dtype = UQ(2, input_frac)
+                    output_dtype = UQ(2, output_frac)
+                    source = Var("x", input_dtype)
+                    with (
+                        patch("zolotone.components.LOSSLESS_COMPONENTS", (
+                            _uq_zero_extend, _uq_fraction_extend,
+                        )),
+                        patch.object(spec_lowering, "MAX_EXTENSION_BITS", 5),
+                    ):
+                        result = spec_lowering.search_lower_spec_to_impl(
+                            x ** ctx.real_val(-1), {x: source}, output_dtype, ctx
+                        )
+                    self.assertEqual(result.dtype, output_dtype)
+                    for code in range(1 << input_frac, (3 << input_frac) + 1):
+                        source.load_value(input_dtype.from_bits(code))
+                        expected = round(Fraction(1 << (input_frac + output_frac), code))
+                        self.assertEqual(result.evaluate().raw, expected, f"input code {code}")
+
     def test_lowering_extends_inferred_lut_result_explicitly(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _uq_zero_extend

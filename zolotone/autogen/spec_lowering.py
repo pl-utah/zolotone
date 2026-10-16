@@ -435,15 +435,19 @@ class _LoweringSearch:
         return changed
 
     def lut_output_type(self, expression, input_dtype):
-        """Infer the LUT format independently of consumer and result annotations."""
+        """Use requested fractional bits for a final LUT; infer its integer width."""
         from .missing import _suggest_missing_output_dtype
 
         key = (expression, input_dtype)
         if key not in self.suggested_lut_types:
             try:
-                # CAREFUL: it copies fractional bits from input_dtype, search algo is needed here
+                precision_dtype = input_dtype
+                if expression.identical(self.root) and isinstance(
+                    self.return_annotation, (Q, UQ)
+                ):
+                    precision_dtype = self.return_annotation
                 self.suggested_lut_types[key] = _suggest_missing_output_dtype(
-                    expression, input_dtype, self.ctx
+                    expression, precision_dtype, self.ctx
                 )
             except (ZolotoneError, NotImplementedError) as exc:
                 self.errors.append(exc)

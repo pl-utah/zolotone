@@ -28,10 +28,11 @@ MAX_GENERATED_TABLE_ENTRIES = 4_096
 
 
 def _suggest_missing_output_dtype(
-    expression: RealExpr, input_dtype: Q | UQ, range_ctx: SpecContext
+    expression: RealExpr, precision_dtype: Q | UQ, range_ctx: SpecContext
 ) -> Q | UQ:
+    """Keep the supplied fractional width and infer sign/integer bits from range."""
     conservative = _output_format_suggestion_with_range_analysis(
-        expression, input_dtype, range_ctx
+        expression, precision_dtype, range_ctx
     )
     output = _output_format_suggestion_with_search(
         expression, conservative, range_ctx

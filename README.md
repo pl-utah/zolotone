@@ -128,6 +128,11 @@ encodings. Its provisional implementation may be lossy and is not registered
 as a lossless component. This first pass supports one typed reachable
 fixed-point input plus literals.
 
+A LUT for the final result uses the fractional width of a concrete `Q` or `UQ`
+return annotation, rounding directly to that precision. Its sign and integer
+width are still inferred from the result range. Intermediate LUTs and results
+with a family annotation (`Q` or `UQ`) use the input's fractional width.
+
 Proof obligations can be simplified, rewritten with egglog, discharged with
 Z3, and checked with dReal. Floating-point results are split into observable
 classification cases so finite values, zeros, infinities, and NaNs are compared
