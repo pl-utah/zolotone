@@ -1,133 +1,37 @@
-import math
-
 from ..types import DataType, Q, Tuple, UQ
 from ..spec import BoolExpr, Cases, case, FPExpr, If, RealExpr
 from .node import Node
-from .nodes import Op, Primitive
-from ..utils import make_fixed_arguments
+from .nodes import Const, Op, Primitive
 
 
 def integer_lookup(
     x: Node,
-    *,
     table: tuple[int, ...],
-    lowest_code: int,
     out: Q | UQ,
-) -> Op:
-    """Look up raw output bits by the input's integer encoding."""
+) -> Node:
+    """Select a typed tuple entry using the input's integer code."""
+    from ..components.basics import basic_sub
+
     input_dtype = x.dtype
     if not isinstance(input_dtype, (Q, UQ)):
         raise TypeError("integer lookup input must be Q or UQ")
+    bits = input_dtype.total_bits()
+    minimum = -(1 << (bits - 1)) if isinstance(input_dtype, Q) else 0
+    maximum = (1 << (bits - int(isinstance(input_dtype, Q)))) - 1
+    if len(table) != maximum - minimum + 1:
+        raise ValueError("integer lookup table must cover every input code")
 
-    def impl(raw: int) -> int:
-        code = input_dtype._scaled_integer(raw) if isinstance(input_dtype, Q) else raw
-        index = code - lowest_code
-        if not 0 <= index < len(table):
-            raise ValueError("integer lookup input is outside its required range")
-        return table[index]
-
-    def sign(value: DataType) -> DataType:
-        return out
-
-    values = ", ".join(map(str, table))
-    code = "static_cast<int64_t>(raw)"
-    if isinstance(input_dtype, Q) and input_dtype.total_bits() != 64:
-        shift = 64 - input_dtype.total_bits()
-        code = f"(static_cast<int64_t>(raw << {shift}) >> {shift})"
-
-    def c_lowering(args: list[str], jittable: bool) -> str:
-        return (
-            "([](uint64_t raw) { "
-            f"static constexpr uint64_t table[] = {{{values}}}; "
-            f"const int64_t code = {code}; "
-            f"return code >= {lowest_code} && "
-            f"static_cast<uint64_t>(code - {lowest_code}) < {len(table)} "
-            f"? table[static_cast<uint64_t>(code - {lowest_code})] : 0; "
-            f"}})({args[0]})"
-        )
-
-    return Op(
-        impl=impl,
-        sign=sign,
-        c_lowering=c_lowering,
-        args=[x],
-        name="integer_lookup",
+    values = Const(Tuple(*(out for _ in table)).from_values(
+        *(out.from_bits(raw) for raw in table)
+    ))
+    index_dtype = UQ(bits, 0)
+    # Shift signed codes so the dtype's minimum value maps to tuple index zero.
+    index = basic_sub(
+        x,
+        Const(index_dtype.from_bits(minimum & ((1 << bits) - 1))),
+        out=index_dtype,
     )
-
-
-def integer_lookup_multi(
-    inputs: tuple[Node, ...],
-    *,
-    table: tuple[int, ...],
-    lowest_codes: tuple[int, ...],
-    extents: tuple[int, ...],
-    out: Q | UQ,
-) -> Op:
-    """Look up a row-major table using several fixed-point input codes."""
-    if not inputs or len(inputs) != len(lowest_codes) or len(inputs) != len(extents):
-        raise ValueError("lookup dimensions must match its inputs")
-    if any(extent < 1 for extent in extents) or len(table) != math.prod(extents):
-        raise ValueError("lookup table length must match its positive extents")
-    if any(not isinstance(node.dtype, (Q, UQ)) for node in inputs):
-        raise TypeError("integer lookup inputs must be Q or UQ")
-
-    def index(raw_values: tuple[int, ...]) -> int:
-        position = 0
-        for raw, node, lower, extent in zip(
-            raw_values, inputs, lowest_codes, extents, strict=True
-        ):
-            code = node.dtype._scaled_integer(raw) if isinstance(node.dtype, Q) else raw
-            offset = code - lower
-            if not 0 <= offset < extent:
-                raise ValueError("integer lookup input is outside its required range")
-            position = position * extent + offset
-        return position
-
-    def impl(*raw_values: int) -> int:
-        return table[index(raw_values)]
-
-    def sign(*dtypes: DataType) -> DataType:
-        return out
-
-    values = ", ".join(map(str, table))
-
-    def c_lowering(args: list[str], jittable: bool) -> str:
-        lines = [
-            "([](" + ", ".join(f"uint64_t raw{i}" for i in range(len(inputs))) + ") {",
-            f"static constexpr uint64_t table[] = {{{values}}};",
-            "uint64_t index = 0;",
-        ]
-        for i, (node, lower, extent) in enumerate(
-            zip(inputs, lowest_codes, extents, strict=True)
-        ):
-            dtype = node.dtype
-            if isinstance(dtype, Q):
-                shift = 64 - dtype.total_bits()
-                signed = (
-                    f"static_cast<int64_t>(raw{i})" if shift == 0
-                    else f"(static_cast<int64_t>(raw{i} << {shift}) >> {shift})"
-                )
-                code = signed
-            else:
-                code = f"static_cast<int64_t>(raw{i})"
-            lines.extend((
-                f"const int64_t code{i} = {code};",
-                f"if (code{i} < {lower} || code{i} >= {lower + extent}) return uint64_t(0);",
-                f"index = index * {extent} + static_cast<uint64_t>(code{i} - {lower});",
-            ))
-        lines.append("return table[index];")
-        lines.append("})(" + ", ".join(args) + ")")
-        return " ".join(lines)
-
-    return Op(
-        impl=make_fixed_arguments(impl, [int] * len(inputs), return_type=int),
-        sign=make_fixed_arguments(
-            sign, [DataType] * len(inputs), return_type=type(out)
-        ),
-        c_lowering=c_lowering,
-        args=list(inputs),
-        name="integer_lookup_multi",
-    )
+    return Tuple_get_item(values, index)
 
 
 def Copy(x: Node) -> Node:
@@ -170,9 +74,54 @@ def _basic_get_item(x: Node, idx: int) -> Op:
         name=f"_basic_get_item_{idx}",
     )
 
-def Tuple_get_item(x: Node, idx: int) -> Primitive:
+def _dynamic_get_item(x: Node, idx: Node) -> Node:
+    input_type = x.dtype
+    output_type = input_type.items[0]
+    if not isinstance(output_type, (Q, UQ)) or not input_type.is_homogeneous:
+        raise TypeError("Dynamic tuple indexing requires matching Q or UQ element types")
+    if not isinstance(idx.dtype, UQ) or idx.dtype.frac_bits != 0:
+        raise TypeError("Dynamic tuple indexing requires an unsigned integer index")
+    index_type = idx.dtype
+    length = len(input_type.items)
+
+    def get_item_spec(values: input_type, index: index_type, ctx) -> output_type:
+        ctx.assume((index >= ctx.zero()) & (index < ctx.real_val(length)))
+
+        def select(start, end):
+            if end - start == 1:
+                return values[start]
+            middle = (start + end) // 2
+            return If(
+                index < ctx.real_val(middle),
+                select(start, middle), select(middle, end),
+            )
+
+        return select(0, length)
+
+    def impl(values: tuple, index: int) -> int:
+        return values[index]
+
+    def sign(values: Tuple, index: UQ) -> DataType:
+        return output_type
+
+    def c_lowering(args: list[str], jittable: bool) -> str:
+        return f"({args[0]}).at(static_cast<uint64_t>({args[1]}))"
+
+    @Primitive(name="Tuple_get_item", spec=get_item_spec, c_inline=True)
+    def get_item(values: Node, index: Node) -> Node:
+        return Op(
+            impl=impl, sign=sign, c_lowering=c_lowering,
+            args=[values, index], name="_basic_dynamic_get_item",
+        )
+
+    return get_item(x, idx)
+
+
+def Tuple_get_item(x: Node, idx: int | Node) -> Node:
     if not isinstance(x.dtype, Tuple):
         raise TypeError(f"Expected a Tuple node, got {x.dtype}")
+    if isinstance(idx, Node):
+        return _dynamic_get_item(x, idx)
     if idx >= len(x.dtype.items) or idx < 0:
         raise IndexError(f"Index is out of range for tuple {str(x)}, given {str(idx)}")
 

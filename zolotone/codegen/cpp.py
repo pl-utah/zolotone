@@ -52,6 +52,7 @@ class _CppEmitter:
             includes.extend(["#include <array>", "#include <cassert>"])
         else:
             includes.extend([
+                "#include <array>",
                 "#include <tuple>",
                 "#include <ac_int.h>",
             ])
@@ -263,6 +264,12 @@ class _CppEmitter:
                 return (
                     f"{self._render_type(value.dtype)}{{"
                     + ", ".join(f"static_cast<uint64_t>({arg.expr})" for arg in args)
+                    + "}"
+                )
+            if value.dtype.is_homogeneous:
+                return (
+                    f"{self._render_type(value.dtype)}{{"
+                    + ", ".join(arg.expr for arg in args)
                     + "}"
                 )
             return f"std::make_tuple({', '.join(arg.expr for arg in args)})"

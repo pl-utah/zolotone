@@ -11,7 +11,7 @@ import z3
 
 from ..errors import MissingError, ZolotoneError
 from ..rival import build_integer_machine, rival_range_analysis
-from ..spec.spec_ast import If, RealExpr, RealLit, RealVar, substitute_spec_node
+from ..spec.spec_ast import RealExpr, RealLit, RealVar, substitute_spec_node
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
 from ..ast.helpers import integer_lookup
@@ -70,11 +70,6 @@ def _expression_bounds(
     return lower, upper
 
 
-def _decoded_output(raw: int, dtype: Q | UQ) -> Fraction:
-    code = dtype._scaled_integer(raw) if isinstance(dtype, Q) else raw
-    return Fraction(code, 1 << dtype.frac_bits)
-
-
 def _build_missing_primitive(
     missing: RealExpr,
     input_expr: RealExpr,
@@ -99,11 +94,11 @@ def _build_missing_primitive(
         raise MissingError("Generated LUT outputs must have at most 64 bits")
 
     lower, upper = _expression_bounds(input_expr, dtype, generation_ctx)
-    table_size = upper - lower + 1
+    table_size = 1 << dtype.total_bits()
     if table_size > MAX_GENERATED_TABLE_ENTRIES:
         raise ZolotoneError(
-            f"Generated component for {missing!r} has {table_size} input "
-            f"encodings; the limit is {MAX_GENERATED_TABLE_ENTRIES}"
+            f"Generated component for {missing!r} has a {table_size}-entry "
+            f"input dtype; the limit is {MAX_GENERATED_TABLE_ENTRIES}"
         )
 
     raw = RealVar("x")
@@ -141,7 +136,7 @@ def _build_missing_primitive(
         output_maximum = mask
 
     entries: list[int] = []
-    reachable_entries: list[tuple[int, int]] = []
+    unreachable_points: list[int] = []
     try:
         for point in range(lower, upper + 1):
             # check with z3 that the point belongs to assumes
@@ -151,6 +146,7 @@ def _build_missing_primitive(
             solver.pop()
             if not reachable:
                 entries.append(0)
+                unreachable_points.append(point)
                 continue
             scaled = evaluator.apply(point)
             if not output_minimum <= scaled <= output_maximum:
@@ -161,29 +157,30 @@ def _build_missing_primitive(
                 )
             # Converts signed int into two's complement
             raw_value = scaled & mask
-            
+
             entries.append(raw_value)
-            reachable_entries.append((point, raw_value))
     except ValueError as exc:
         raise ZolotoneError(
             f"Could not evaluate generated component {component_name!r}"
         ) from exc
-    table = tuple(entries)
+    dtype_minimum = (
+        -(1 << (dtype.total_bits() - 1)) if isinstance(dtype, Q) else 0
+    )
+    full_table = [0] * table_size
+    first_entry = lower - dtype_minimum
+    full_table[first_entry : first_entry + len(entries)] = entries
+    table = tuple(full_table)
 
     def generated_spec(x, ctx):
+        """Describe the real-valued function approximated by the table."""
         scale = 1 << dtype.frac_bits
         ctx.assume(
             (x >= ctx.real_val(Fraction(lower, scale)))
             & (x <= ctx.real_val(Fraction(upper, scale)))
         )
-        result: RealExpr = RealLit(0)
-        for code, raw_value in reversed(reachable_entries):
-            result = If(
-                x.eq(RealLit(Fraction(code, scale))),
-                RealLit(_decoded_output(raw_value, output_dtype)),
-                result,
-            )
-        return result
+        for point in unreachable_points:
+            ctx.assume(x.ne(ctx.real_val(Fraction(point, scale))))
+        return substitute_spec_node(missing, input_expr, x)
 
     generated_spec.__annotations__ = {
         "x": dtype,
@@ -195,7 +192,7 @@ def _build_missing_primitive(
     @Primitive(name=component_name, spec=generated_spec)
     def generated_impl(node: Node) -> Node:
         return integer_lookup(
-            node, table=table, lowest_code=lower, out=output_dtype
+            node, table=table, out=output_dtype
         )
 
     return generated_impl(input_node)

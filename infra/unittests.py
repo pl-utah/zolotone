@@ -1371,6 +1371,70 @@ class TestCppLowering(unittest.TestCase):
 
         self.assertIn("arg_0.at(1)", source)
 
+    def test_tuple_supports_dynamic_integer_index(self):
+        dtype = UQ(4, 0)
+        table = Const(Tuple(dtype, dtype, dtype).from_values(
+            *(dtype.from_bits(value) for value in (7, 2, 11))
+        ))
+        index = Var("index", UQ(2, 0))
+        selected = table[index]
+        for position, expected in enumerate((7, 2, 11)):
+            index.load_value(UQ(2, 0).from_bits(position))
+            self.assertEqual(selected.evaluate().raw, expected)
+        index.load_value(UQ(2, 0).from_bits(3))
+        with self.assertRaises(IndexError):
+            selected.evaluate()
+
+    def test_dynamic_tuple_index_rejects_incompatible_types(self):
+        table = Var("table", Tuple(UQ(4, 0), UQ(4, 0)))
+        for dtype in (UQ(1, 1), Q(2, 0)):
+            with self.subTest(dtype=dtype), self.assertRaises(TypeError):
+                table[Var("index", dtype)]
+        mixed = Var("mixed", Tuple(UQ(4, 0), Q(4, 0)))
+        with self.assertRaises(TypeError):
+            mixed[Var("index", UQ(1, 0))]
+
+    def test_large_tuple_lookup_compiles_in_both_modes(self):
+        from zolotone.ast.helpers import integer_lookup
+
+        def identity_spec(x: UQ(12, 0), ctx) -> UQ(12, 0):
+            return x
+
+        @Primitive(name="large_tuple_lookup", spec=identity_spec)
+        def identity(x):
+            return integer_lookup(
+                x, table=tuple(range(4096)), out=UQ(12, 0)
+            )
+
+        node = identity(Var("x", UQ(12, 0)))
+        for compile_fn in (jit_compile, nonjit_compile):
+            with self.subTest(backend=compile_fn.__name__):
+                tempdir, evaluate_cpp = compile_fn(node)
+                try:
+                    for value in (0, 1, 2047, 2048, 4095):
+                        self.assertEqual(evaluate_cpp(value), value)
+                finally:
+                    tempdir.cleanup()
+
+    def test_constructed_tuple_static_access_compiles_in_both_modes(self):
+        for second_dtype in (UQ(3, 0), Q(3, 0)):
+            def identity_spec(x: UQ(3, 0), ctx) -> UQ(3, 0):
+                return x
+
+            @Composite(name="tuple_identity", spec=identity_spec)
+            def identity(x):
+                return make_Tuple(x, Const(second_dtype.from_bits(0)))[0]
+
+            node = identity(Var("x", UQ(3, 0)))
+            for compile_fn in (jit_compile, nonjit_compile):
+                with self.subTest(second_dtype=second_dtype, backend=compile_fn.__name__):
+                    tempdir, evaluate_cpp = compile_fn(node)
+                    try:
+                        for value in range(8):
+                            self.assertEqual(evaluate_cpp(value), value)
+                    finally:
+                        tempdir.cleanup()
+
 
 class TestConstantFolding(unittest.TestCase):
     def assert_folded_value(self, node, descriptor_type, expected_val):
@@ -12072,6 +12136,42 @@ class TestSignSpecs(unittest.TestCase):
 
 
 class TestMissingPrimitiveRuntime(unittest.TestCase):
+    def test_missing_lookup_tuple_table_matches_python_and_cpp(self):
+        from zolotone.autogen.missing import _build_missing_primitive
+
+        for signed in (False, True):
+            ctx = SpecContext("tuple-lut")
+            x = ctx.real("x")
+            if signed:
+                input_dtype = output_dtype = Q(3, 1)
+                expression = x
+                codes = range(-8, 8)
+            else:
+                input_dtype, output_dtype = UQ(3, 1), UQ(6, 2)
+                ctx.assume((x >= ctx.real_val(0.5)) & (x <= ctx.real_val(2.5)))
+                expression = x ** ctx.two()
+                codes = range(1, 6)
+            source = Var("x", input_dtype)
+            primitive = _build_missing_primitive(
+                expression, x, source, ctx, output_dtype=output_dtype
+            )
+            table = primitive.inner_tree.args[0]
+            self.assertIsInstance(table, Const)
+            self.assertIsInstance(table.dtype, Tuple)
+            self.assertEqual(len(table.value.raw), len(codes))
+            for compile_fn in (jit_compile, nonjit_compile):
+                with self.subTest(signed=signed, backend=compile_fn.__name__):
+                    tempdir, evaluate_cpp = compile_fn(primitive)
+                    try:
+                        for code in codes:
+                            raw = code & ((1 << input_dtype.total_bits()) - 1)
+                            expected = raw if signed else code * code
+                            source.load_value(input_dtype.from_bits(raw))
+                            self.assertEqual(primitive.evaluate().raw, expected)
+                            self.assertEqual(evaluate_cpp(raw), expected)
+                    finally:
+                        tempdir.cleanup()
+
     def test_missing_lookup_evaluates_every_reachable_entry_with_rival(self):
         from zolotone.autogen import missing
 
@@ -12141,6 +12241,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
 
     def test_lossy_lookup_rounds_to_even(self):
         from zolotone.autogen.missing import _build_missing_primitive
+        from zolotone.autogen.autogen import get_spec
 
         ctx = SpecContext("rounded-lookup")
         x = ctx.real("x")
@@ -12148,6 +12249,10 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         rounded = _build_missing_primitive(
             x * ctx.real_val(0.5), x, source, ctx, output_dtype=UQ(2, 0)
         )
+        generated_spec = get_spec(rounded.name, rounded.spec)
+        self.assertTrue(generated_spec.spec_ast.identical(
+            generated_spec.spec_inputs[0] * RealLit(0.5)
+        ))
         source.load_value(UQ(2, 0).from_bits(1))
         self.assertEqual(rounded.evaluate().to_python(), 0)
         source.load_value(UQ(2, 0).from_bits(3))
@@ -12171,10 +12276,13 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             output_dtype=UQ(6, 0),
         )
 
-        self.assertEqual(primitive.inner_tree.name, "integer_lookup")
+        self.assertEqual(primitive.inner_tree.name, "Tuple_get_item")
         generated_spec = get_spec(primitive.name, primitive.spec)
         self.assertEqual(generated_spec.annotations["x"], UQ(3, 0))
         self.assertEqual(generated_spec.return_annotation, UQ(6, 0))
+        self.assertTrue(generated_spec.spec_ast.identical(
+            generated_spec.spec_inputs[0] ** RealLit(2)
+        ))
         lhs.load_value(UQ(2, 0).from_int(2))
         rhs.load_value(UQ(2, 0).from_int(3))
         self.assertEqual(primitive.evaluate().to_python(), 25)
@@ -12193,6 +12301,31 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             with self.subTest(value=value):
                 source.load_value(Q(2, 1).from_float(value))
                 self.assertEqual(primitive.evaluate().to_python(), 1 / value)
+
+    def test_missing_lookup_spec_excludes_unreachable_fractional_points(self):
+        from zolotone.autogen.missing import _build_missing_primitive
+        from zolotone.autogen.autogen import get_spec
+
+        ctx = SpecContext("excluded-lut-points")
+        x = ctx.real("x")
+        ctx.assume(x.ne(ctx.real_val(Fraction(1, 4))))
+        ctx.assume(x.ne(ctx.one()))
+        primitive = _build_missing_primitive(
+            x ** ctx.two(), x, Var("x", UQ(2, 2)), ctx,
+            output_dtype=UQ(4, 2),
+        )
+        generated_spec = get_spec(primitive.name, primitive.spec)
+        env = {}
+        solver = z3.Solver()
+        solver.add(*(condition.to_z3(env) for condition in generated_spec.spec_ctx.assumes))
+        input_term = generated_spec.spec_inputs[0].to_z3(env)
+        for code in range(-1, 17):
+            with self.subTest(code=code):
+                solver.push()
+                solver.add(input_term == z3.RealVal(f"{code}/4"))
+                expected = z3.sat if 0 <= code < 16 and code not in (1, 4) else z3.unsat
+                self.assertEqual(solver.check(), expected)
+                solver.pop()
 
     def test_disjoint_input_skips_undefined_lookup_codes(self):
         def reciprocal(x: Q(2, 1), ctx) -> Q:
@@ -12220,8 +12353,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
 
         self.assertEqual(generated_spec.annotations["x"], UQ(3, 2))
         self.assertEqual(generated_spec.return_annotation, UQ(1, 2))
-        # A lossy LUT specifies its quantized table, not an exact reciprocal.
-        self.assertIn("then 3/4", str(generated_spec.spec_ast))
+        self.assertTrue(generated_spec.spec_ast.identical(
+            generated_spec.spec_inputs[0] ** RealLit(-1)
+        ))
         assumptions = " ".join(map(str, generated_spec.spec_ctx.assumes))
         self.assertIn("(real(x_0) >= 1)", assumptions)
         self.assertIn("(real(x_0) <= 31/4)", assumptions)
@@ -12229,7 +12363,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             any(component._spec_fn is primitive.spec for component in LOSSLESS_COMPONENTS)
         )
         self.assertEqual(primitive.dtype, UQ(1, 2))
-        self.assertEqual(primitive.inner_tree.name, "integer_lookup")
+        self.assertEqual(primitive.inner_tree.name, "Tuple_get_item")
 
     def test_missing_component_lowers_a_nested_reachable_input(self):
         from zolotone.autogen.autogen import get_spec
@@ -12242,7 +12376,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         generated_spec = get_spec(primitive.name, primitive.spec)
 
         self.assertEqual(generated_spec.annotations["x"], UQ(3, 2))
-        self.assertIn("then 3/4", str(generated_spec.spec_ast))
+        self.assertTrue(generated_spec.spec_ast.identical(
+            generated_spec.spec_inputs[0] ** RealLit(-1)
+        ))
         self.assertEqual(primitive.args[0].name, "uq_add")
 
     def test_reciprocal_uses_known_multiplication_as_its_typed_input(self):
