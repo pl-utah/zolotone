@@ -1348,7 +1348,7 @@ class TestCppLowering(unittest.TestCase):
 
         self.assertIn("#include <cassert>", bool_source)
         self.assertIn("class Zolotone", bool_source)
-        self.assertIn("assert(arg_0 >= 0 && arg_0 <= 1);", bool_source)
+        self.assertIn("assert(arg_0 >= 0x0 && arg_0 <= 0x1);", bool_source)
         self.assertIn("return check_bool(arg_0);", bool_source)
 
     def test_nonjittable_entry_relies_on_exact_width_type(self):

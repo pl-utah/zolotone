@@ -20,7 +20,7 @@ def _ue4m3_mantissa(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"({args[0]} & 7)",
+        c_lowering=lambda args, jittable: f"({args[0]} & 0x7)",
         args=[x],
         name="_ue4m3_mantissa",
     )
@@ -36,7 +36,7 @@ def _ue4m3_exponent(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 3) & 15)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 3) & 0xf)",
         args=[x],
         name="_ue4m3_exponent",
     )
