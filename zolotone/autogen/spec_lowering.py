@@ -296,7 +296,7 @@ class _LoweringSearch:
             if not changed:
                 break
 
-        result = self.best_result()
+        result = self.result
         if result is not None:
             return result.node
         if self.errors:
@@ -306,9 +306,6 @@ class _LoweringSearch:
             f"{self.return_annotation!r}; no typed component or supported "
             "missing primitive was found"
         )
-
-    def best_result(self):
-        return self.result
 
     def consider_result(self, candidate):
         if not candidate.spec.identical(self.root):
@@ -345,7 +342,7 @@ class _LoweringSearch:
         return True
 
     def worth_trying(self, cost):
-        result = self.best_result()
+        result = self.result
         return result is None or cost < result.cost
 
     def match_component(self, index, argument_specs):
@@ -369,6 +366,7 @@ class _LoweringSearch:
 
         return self.component_matches[key]
 
+    # Checks that we do not widen formats unless it is a final root
     def allows_format(self, node, expression, arguments):
         """Leave same-format widening to final adaptation, not operand search."""
         if not isinstance(node.dtype, (Q, UQ)):
@@ -461,22 +459,22 @@ class _LoweringSearch:
 
     def add_lut_candidates(self):
         changed = False
-        for expression in reversed(self.expressions):
+        # Consider whole regions before their children so a cheap fused LUT can
+        # prune more expensive chains. Components still compete by total cost.
+        for expression in self.expressions:
             # Does it worth trying a LUT
             existing = self.candidates.get(expression, {})
             if any(candidate.cost < LUT_COST for candidate in existing.values()):
                 continue
             
-            operands = lut_inputs(expression)
-            # Only univariant function can be approximated with LUT
-            if len(operands) != 1:
-                continue
-            operand, = operands
-
-            pool = tuple(
-                candidate
-                for candidate in self.candidates.get(operand, {}).values()
-                if isinstance(candidate.node.dtype, (Q, UQ))
+            pool = sorted(
+                (
+                    candidate
+                    for operand in lut_inputs(expression)
+                    for candidate in self.candidates.get(operand, {}).values()
+                    if isinstance(candidate.node.dtype, (Q, UQ))
+                ),
+                key=lambda candidate: candidate.cost,
             )
             for argument in pool:
                 cost = argument.cost + LUT_COST
@@ -499,7 +497,7 @@ class _LoweringSearch:
                 self.lut_attempts[key] = cost
                 try:
                     node = _build_missing_primitive(
-                        expression, operand, argument.node,
+                        expression, argument.spec, argument.node,
                         self.ctx, output_dtype=dtype,
                     )
                 except (MissingError, ZolotoneError, NotImplementedError) as exc:
@@ -512,18 +510,40 @@ class _LoweringSearch:
 
 
 def lut_inputs(expression):
-    """Use the distinct nonliteral children as a LUT's materialized inputs."""
+    """Find single-input cuts, ordered from largest to smallest LUT region."""
     if not isinstance(expression, RealExpr) or isinstance(expression, RealLit):
         return ()
-    operands = []
-    for child in children(expression):
-        if isinstance(child, (RealLit, BoolLit)):
-            continue
-        if not isinstance(child, RealExpr):
-            return ()
-        if child not in operands:
-            operands.append(child)
-    return tuple(operands)
+
+    cuts = {}
+
+    def visit(node):
+        if isinstance(node, (RealLit, BoolLit)):
+            return None
+        if node not in cuts:
+            node_children = children(node)
+            dependent_children = [
+                child_cuts
+                for child in node_children
+                if (child_cuts := visit(child)) is not None
+            ]
+            if node_children and not dependent_children:
+                cuts[node] = None
+                return None
+            # A boundary must account for every nonliteral dependency, including
+            # repeated occurrences. Independent inputs have no common cut.
+            common = (
+                set.intersection(*dependent_children) if dependent_children else set()
+            )
+            if isinstance(node, RealExpr):
+                common.add(node)
+            cuts[node] = common
+        return cuts[node]
+
+    boundaries = visit(expression) or set()
+    return tuple(
+        node for node in reversed(_spec_subexpressions(expression)[1:])
+        if node in boundaries
+    )
 
 
 def search_lower_spec_to_impl(

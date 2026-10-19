@@ -1,10 +1,10 @@
 from zolotone import *
 
 
-def spec(x: UQ(1, 0), ctx) -> UQ(3, 0):
+def spec(x: UQ(3, 0), y: UQ(2, 0), ctx) -> UQ:
     ctx.assume(x >= ctx.real_val(0.5))
-    denominator = x - ctx.real_val(0.75)
-    return denominator ** ctx.real_val(-1)
+    denominator = x + y
+    return (denominator ** ctx.real_val(-1)) * ctx.real_val(2)
 
 
 generated = Autogenerate(name=spec.__name__, spec=spec)

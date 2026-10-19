@@ -9125,7 +9125,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             result = search.run()
 
         self.assertTrue(result.name.startswith("LUT_pow_"))
-        self.assertEqual(search.best_result().cost, 101)
+        self.assertEqual(search.result.cost, 100)
+        self.assertIs(result.args[0], source)
         self.assertEqual(set(search.candidates[x]), {UQ(2, 0)})
         self.assertEqual(set(search.candidates[x + ctx.one()]), {UQ(3, 0)})
         for value in range(4):
@@ -9158,7 +9159,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     x ** ctx.two(), {x: source}, UQ, ctx
                 )
                 result = search.run()
-                self.assertEqual(search.best_result().cost, expected_cost)
+                self.assertEqual(search.result.cost, expected_cost)
                 self.assertGreater(result.dtype.total_bits(), input_bits)
                 self.assertEqual(set(search.candidates[x]), {source.dtype})
                 source.load_value(source.dtype.from_bits(3))
@@ -9183,7 +9184,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     result = search.run()
                     self.assertEqual(result.dtype, dtype(40, 2))
                     self.assertIs(result.args[0], source)
-                    self.assertEqual(search.best_result().cost, 1)
+                    self.assertEqual(search.result.cost, 1)
                     self.assertEqual(set(search.candidates[x]), {source.dtype})
                     for code in range(4):
                         source.load_value(source.dtype.from_bits(code))
@@ -9194,18 +9195,20 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         from zolotone.components import uq_add
 
         ctx = SpecContext("shared-lut")
-        x = ctx.real("x")
+        x, y = ctx.real("x"), ctx.real("y")
         squared = x ** ctx.two()
         source = Var("x", UQ(2, 0))
+        other = Var("y", UQ(2, 0))
         with patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add,)):
             search = spec_lowering._LoweringSearch(
-                squared + squared, {x: source}, UQ, ctx
+                (squared + y) + squared, {x: source, y: other}, UQ, ctx
             )
             result = search.run()
-        self.assertEqual(search.best_result().cost, 101)
-        self.assertIs(result.args[0], result.args[1])
+        self.assertEqual(search.result.cost, 102)
+        self.assertIs(result.args[0].args[0], result.args[1])
         source.load_value(UQ(2, 0).from_bits(3))
-        self.assertEqual(result.evaluate().to_python(), 18)
+        other.load_value(UQ(2, 0).from_bits(1))
+        self.assertEqual(result.evaluate().to_python(), 19)
 
     def test_final_adaptation_rejects_fractional_narrowing(self):
         from zolotone.autogen import spec_lowering
@@ -9332,7 +9335,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(result.name, "uq_resize")
         self.assertEqual(result.args[0].dtype, UQ(4, 0))
         self.assertTrue(result.args[0].name.startswith("LUT_pow_"))
-        self.assertEqual(search.best_result().cost, 101)
+        self.assertEqual(search.result.cost, 101)
         source.load_value(UQ(2, 0).from_bits(3))
         self.assertEqual(result.evaluate().to_python(), 9)
 
@@ -12194,6 +12197,107 @@ class TestSignSpecs(unittest.TestCase):
 
 
 class TestMissingPrimitiveRuntime(unittest.TestCase):
+    def test_lut_boundaries_cover_every_nonliteral_dependency(self):
+        from zolotone.autogen.spec_lowering import lut_inputs
+
+        ctx = SpecContext("lut-boundaries")
+        x, y = ctx.real("x"), ctx.real("y")
+        shifted = x + ctx.one()
+        reciprocal = shifted ** ctx.real_val(-1)
+        self.assertEqual(lut_inputs(reciprocal * ctx.two()), (x, shifted, reciprocal))
+        self.assertEqual(lut_inputs(x + (ctx.one() + ctx.two())), (x,))
+        self.assertEqual(lut_inputs(ctx.one() + ctx.two()), ())
+        self.assertEqual(lut_inputs(shifted * shifted), (x, shifted))
+        self.assertEqual(lut_inputs(x + y), ())
+        self.assertEqual(lut_inputs(x + (x + y)), ())
+        summed = x + y
+        self.assertEqual(lut_inputs(summed ** ctx.real_val(-1)), (summed,))
+        self.assertEqual(lut_inputs(If(ctx.bool("select"), x, ctx.one())), ())
+
+    def test_nested_powers_use_one_lut_and_round_only_final_result(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("fused-nested-powers")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.one())
+        ctx.assume(x <= ctx.real_val(3))
+        expression = (x ** ctx.real_val(0.5)) ** ctx.real_val(-1)
+        source = Var("x", UQ(2, 0))
+        with patch.object(
+            spec_lowering, "_build_missing_primitive",
+            wraps=spec_lowering._build_missing_primitive,
+        ) as build:
+            search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(1, 2), ctx)
+            result = search.run()
+
+        self.assertEqual(search.result.cost, 100)
+        self.assertIs(result.args[0], source)
+        build.assert_called_once_with(expression, x, source, search.ctx, output_dtype=UQ(1, 2))
+        for value, expected in ((1, 1), (2, 0.75), (3, 0.5)):
+            source.load_value(UQ(2, 0).from_bits(value))
+            self.assertEqual(result.evaluate().to_python(), expected)
+
+    def test_lut_absorbs_surrounding_arithmetic_when_cheaper(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("fused-lut-arithmetic")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        expression = ((x + ctx.one()) ** ctx.real_val(-1)) * ctx.two()
+        search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(2, 3), ctx)
+        result = search.run()
+
+        self.assertEqual(search.result.cost, 100)
+        self.assertTrue(result.name.startswith("LUT_mul_"))
+        self.assertIs(result.args[0], source)
+        for value, expected in ((0, 2), (1, 1), (2, 0.625), (3, 0.5)):
+            source.load_value(UQ(2, 0).from_bits(value))
+            self.assertEqual(result.evaluate().to_python(), expected)
+
+    def test_cheaper_components_replace_whole_expression_lut(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import uq_add, uq_mul
+
+        ctx = SpecContext("components-beat-fused-lut")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        # Addition precedes multiplication, so finding the exact result needs
+        # another search iteration after the whole-expression LUT is available.
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add, uq_mul)):
+            search = spec_lowering._LoweringSearch(
+                x + x * x, {x: source}, UQ, ctx
+            )
+            result = search.run()
+
+        self.assertEqual(search.result.cost, 2)
+        self.assertEqual(result.name, "uq_add")
+        self.assertEqual(result.args[1].name, "uq_mul")
+        for value in range(4):
+            source.load_value(UQ(2, 0).from_bits(value))
+            self.assertEqual(result.evaluate().to_python(), value + value * value)
+
+    def test_lut_uses_narrow_materialized_input_when_direct_table_is_too_large(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("narrow-lut-boundary")
+        x = ctx.real("x")
+        ctx.assume(x <= ctx.two())
+        shifted = x + ctx.one()
+        materialized = Var("shifted", UQ(2, 0))
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
+            search = spec_lowering._LoweringSearch(
+                shifted ** ctx.real_val(-1),
+                {x: Var("x", UQ(13, 0)), shifted: materialized},
+                UQ(1, 2), ctx,
+            )
+            result = search.run()
+
+        self.assertEqual(search.result.cost, 100)
+        self.assertIs(result.args[0], materialized)
+        for value, expected in ((1, 1), (2, 0.5), (3, 0.25)):
+            materialized.load_value(UQ(2, 0).from_bits(value))
+            self.assertEqual(result.evaluate().to_python(), expected)
+
     def test_missing_lookup_evaluates_every_reachable_entry_with_rival(self):
         from zolotone.autogen import missing
 
@@ -12397,20 +12501,20 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         primitive = result.inner_tree
         generated_spec = get_spec(primitive.name, primitive.spec)
 
-        self.assertEqual(generated_spec.annotations["x"], UQ(3, 2))
+        self.assertEqual(generated_spec.annotations["x"], UQ(2, 2))
         self.assertTrue(generated_spec.spec_ast.identical(
-            generated_spec.spec_inputs[0] ** RealLit(-1)
+            (generated_spec.spec_inputs[0] + RealLit(1)) ** RealLit(-1)
         ))
-        self.assertEqual(primitive.args[0].name, "uq_add")
+        self.assertIs(primitive.args[0], result.inner_args[0])
 
-    def test_reciprocal_uses_known_multiplication_as_its_typed_input(self):
+    def test_reciprocal_absorbs_multiplication_into_cheaper_lut(self):
         def reciprocal_of_product(x: UQ(2, 2), ctx) -> UQ:
             ctx.assume(x >= ctx.real_val(0.5))
             return (ctx.two() * x) ** ctx.real_val(-1)
 
         result = Autogenerate("reciprocal_of_product", reciprocal_of_product)
         self.assertTrue(result.inner_tree.name.startswith("LUT_pow_"))
-        self.assertEqual(result.inner_tree.args[0].name, "uq_mul")
+        self.assertIs(result.inner_tree.args[0], result.inner_args[0])
 
     def test_structural_match_without_compatible_dtypes_is_a_typed_gap(self):
         from zolotone.autogen import spec_lowering
@@ -12465,9 +12569,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         from zolotone.components import uq_add
 
         ctx = SpecContext("first-typed-frontier")
-        x = ctx.real("x")
-        ctx.assume(x >= ctx.one())
-        ctx.assume(x <= ctx.real_val(3))
+        x, y = ctx.real("x"), ctx.real("y")
+        ctx.assume(y >= ctx.one())
+        ctx.assume(y <= ctx.real_val(3))
 
         def finish_with_reciprocal(lhs, rhs, component_ctx):
             return lhs + rhs ** component_ctx.real_val(-1)
@@ -12485,8 +12589,8 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             ) as create,
         ):
             result = spec_lowering.search_lower_spec_to_impl(
-                (x ** ctx.two()) + (x ** ctx.real_val(-1)),
-                {x: Var("x", UQ(2, 0))},
+                (x ** ctx.two()) + (y ** ctx.real_val(-1)),
+                {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
                 UQ,
                 ctx,
             )
@@ -12498,8 +12602,8 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         self.assertTrue(any("value=2" in expression for expression in generated))
 
     def test_autogenerate_uses_multiple_runtime_components(self):
-        def two_missing(x: UQ(2, 0), ctx) -> UQ:
-            return (x ** ctx.two()) + ((x + ctx.one()) ** ctx.real_val(-1))
+        def two_missing(x: UQ(2, 0), y: UQ(2, 0), ctx) -> UQ:
+            return (x ** ctx.two()) + ((y + ctx.one()) ** ctx.real_val(-1))
 
         result = Autogenerate("two_missing", two_missing)
 
