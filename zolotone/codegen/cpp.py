@@ -155,7 +155,9 @@ class _CppEmitter:
         signature = f"static inline {self._signature(name, root.inner_args, root.dtype)}"
 
         body = [*ctx.statements, f"return {result.expr};"]
-        indented_body = "\n".join(f"    {line}" for line in body)
+        indented_body = "\n".join(
+            f"    {line}" for statement in body for line in statement.splitlines()
+        )
         rendered = "\n".join(
             [signature + f" {{  // {root.name}", indented_body, "}"]
         )
@@ -260,16 +262,22 @@ class _CppEmitter:
                 self._lower_const(Value(item_type, item_raw))
                 for item_raw, item_type in zip(value.raw, value.dtype.items)
             ]
-            if self.jittable:
+            if self.jittable or value.dtype.is_homogeneous:
+                elements = [
+                    f"static_cast<uint64_t>({arg.expr})" if self.jittable else arg.expr
+                    for arg in args
+                ]
+                if len(elements) > 4:
+                    rows = [
+                        "    " + ", ".join(elements[start:start + 4])
+                        for start in range(0, len(elements), 4)
+                    ]
+                    initializer = "\n" + ",\n".join(rows) + "\n"
+                else:
+                    initializer = ", ".join(elements)
                 return (
                     f"{self._render_type(value.dtype)}{{"
-                    + ", ".join(f"static_cast<uint64_t>({arg.expr})" for arg in args)
-                    + "}"
-                )
-            if value.dtype.is_homogeneous:
-                return (
-                    f"{self._render_type(value.dtype)}{{"
-                    + ", ".join(arg.expr for arg in args)
+                    + initializer
                     + "}"
                 )
             return f"std::make_tuple({', '.join(arg.expr for arg in args)})"

@@ -10,3 +10,5 @@ def spec(x: UQ(1, 0), ctx) -> UQ(3, 0):
 generated = Autogenerate(name=spec.__name__, spec=spec)
 print(generated.print_tree(depth=1))
 print(generated.to_cpp())
+with open("examples/c_models/test.cpp", "w") as file:
+    file.write(generated.to_cpp())

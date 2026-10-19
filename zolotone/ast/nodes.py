@@ -1,5 +1,4 @@
 import inspect
-import pprint
 import random
 import typing as tp
 
@@ -773,22 +772,6 @@ class Const(Node):
     
     def print_tree(self, prefix: str = "", is_last: bool = True, depth: int = 0):
         connector = "└── " if is_last else "├── "
-        if isinstance(self.dtype, Tuple) and self.dtype.items and self.dtype.is_homogeneous:
-            values = str(self.value.to_python())
-            if len(prefix) + len(connector) + len(str(self)) > 100:
-                print(
-                    prefix + connector
-                    + f"Tuple<{self.dtype.items[0]} × {len(self.dtype.items)}>: [Const]"
-                )
-                continuation = prefix + ("    " if is_last else "│   ")
-                rows = pprint.pformat(
-                    self.value.to_python(),
-                    width=max(20, 100 - len(continuation)),
-                    compact=True,
-                )
-                for row in rows.splitlines():
-                    print(continuation + row)
-                return
         print(prefix + connector + self.__str__())
     
     def __str__(self):

@@ -9023,7 +9023,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 ctx,
             )
         self.assertEqual(lowered.name, "uq_add")
-        self.assertTrue(lowered.args[1].name.startswith("generated_pow_"))
+        self.assertTrue(lowered.args[1].name.startswith("LUT_pow_"))
 
     def test_lowering_accepts_operation_supplied_as_input(self):
         from zolotone.autogen import spec_lowering
@@ -9124,7 +9124,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             )
             result = search.run()
 
-        self.assertTrue(result.name.startswith("generated_pow_"))
+        self.assertTrue(result.name.startswith("LUT_pow_"))
         self.assertEqual(search.best_result().cost, 101)
         self.assertEqual(set(search.candidates[x]), {UQ(2, 0)})
         self.assertEqual(set(search.candidates[x + ctx.one()]), {UQ(3, 0)})
@@ -9331,7 +9331,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(result.dtype, UQ(5, 0))
         self.assertEqual(result.name, "uq_resize")
         self.assertEqual(result.args[0].dtype, UQ(4, 0))
-        self.assertTrue(result.args[0].name.startswith("generated_pow_"))
+        self.assertTrue(result.args[0].name.startswith("LUT_pow_"))
         self.assertEqual(search.best_result().cost, 101)
         source.load_value(UQ(2, 0).from_bits(3))
         self.assertEqual(result.evaluate().to_python(), 9)
@@ -9389,7 +9389,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             lowered = spec_lowering.search_lower_spec_to_impl(
                 composite, inputs, UQ, ctx,
             )
-        self.assertTrue(powered.name.startswith("generated_pow_"))
+        self.assertTrue(powered.name.startswith("LUT_pow_"))
         self.assertEqual(lowered.name, "composite")
 
     def test_lowering_reuses_spec_matches_with_unhashable_component(self):
@@ -10983,7 +10983,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         generated = Autogenerate("generated_widened_negation", spec)
 
-        self.assertTrue(generated.inner_tree.name.startswith("generated_neg_"))
+        self.assertTrue(generated.inner_tree.name.startswith("LUT_neg_"))
         self.assertEqual(generated.inner_tree.dtype, Q(4, 0))
         self.assertIs(generated.inner_tree.args[0], generated.inner_args[0])
         for code in range(8):
@@ -11025,7 +11025,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x ** ctx.two()
 
         generated = Autogenerate("generated_pow", spec)
-        self.assertTrue(generated.inner_tree.name.startswith("generated_pow_"))
+        self.assertTrue(generated.inner_tree.name.startswith("LUT_pow_"))
 
     def test_complete_exact_and_family_contracts_are_accepted(self):
         def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
@@ -12355,7 +12355,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             return x ** ctx.real_val(-1)
 
         result = Autogenerate("disjoint_reciprocal", reciprocal)
-        self.assertTrue(result.inner_tree.name.startswith("generated_pow_"))
+        self.assertTrue(result.inner_tree.name.startswith("LUT_pow_"))
         for value in (-0.5, 0.5):
             with self.subTest(value=value):
                 result.args[0].load_value(Q(2, 1).from_float(value))
@@ -12409,7 +12409,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             return (ctx.two() * x) ** ctx.real_val(-1)
 
         result = Autogenerate("reciprocal_of_product", reciprocal_of_product)
-        self.assertTrue(result.inner_tree.name.startswith("generated_pow_"))
+        self.assertTrue(result.inner_tree.name.startswith("LUT_pow_"))
         self.assertEqual(result.inner_tree.args[0].name, "uq_mul")
 
     def test_structural_match_without_compatible_dtypes_is_a_typed_gap(self):
@@ -12429,7 +12429,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             result = spec_lowering.search_lower_spec_to_impl(
                 x ** ctx.real_val(-1), {x: Var("x", UQ(2, 0))}, UQ, ctx
             )
-        self.assertTrue(result.name.startswith("generated_pow_"))
+        self.assertTrue(result.name.startswith("LUT_pow_"))
 
     def test_failed_known_component_construction_or_range_uses_typed_hole(self):
         from zolotone.autogen import spec_lowering
@@ -12457,7 +12457,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
                 result = spec_lowering.search_lower_spec_to_impl(
                     x ** ctx.two(), {x: Var("x", UQ(2, 0))}, UQ, ctx
                 )
-                self.assertTrue(result.name.startswith("generated_pow_"))
+                self.assertTrue(result.name.startswith("LUT_pow_"))
                 self.assertEqual(result.dtype, UQ(4, 0))
 
     def test_generates_first_typed_frontier_then_uses_known_composition(self):
@@ -12507,7 +12507,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         self.assertEqual(result.dtype, UQ(5, 0))
         self.assertTrue(
             all(
-                argument.name.startswith("generated_pow_")
+                argument.name.startswith("LUT_pow_")
                 for argument in result.inner_tree.args
             )
         )
@@ -12525,7 +12525,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             ctx,
         )
 
-        self.assertTrue(node.name.startswith("generated_pow_"))
+        self.assertTrue(node.name.startswith("LUT_pow_"))
         self.assertEqual(node.dtype, UQ(4, 0))
 
     def test_unbounded_reciprocal_creates_no_component(self):

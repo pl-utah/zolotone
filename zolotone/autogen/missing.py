@@ -114,7 +114,7 @@ def _build_missing_primitive(
         for format_ in (dtype, output_dtype)
     )
     digest = hashlib.sha256(repr(integer_expression).encode()).hexdigest()[:10]
-    component_name = f"generated_{pattern}_{dtype_part}_{digest}"
+    component_name = f"LUT_{pattern}_{dtype_part}_{digest}"
 
     evaluator = build_integer_machine(
         integer_expression,
