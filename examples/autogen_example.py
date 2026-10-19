@@ -127,12 +127,8 @@ def spec13(x: UQ(2, 0), ctx) -> Float32():
 
 
 # Missing-component synthesis currently handles one nonliteral input only.
-@Test(MissingError)
-def missing_component_with_two_inputs(
-    x: UQ(2, 0),
-    y: UQ(2, 0),
-    ctx,
-) -> UQ(5, 0):
+@Test(ZolotoneError)
+def missing_component_with_two_inputs(x: UQ(2, 0), y: UQ(2, 0), ctx) -> UQ(5, 0):
     ctx.assume(x >= ctx.one())
     return x ** y
 
@@ -272,7 +268,7 @@ def tightened_bound_avoids_domain_error(x: UQ(1, 0), ctx) -> UQ(3, 0):
 
 
 # Domain error
-@Test()
+@Test(ZolotoneError)
 def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
     return x ** (ctx.real_val(-1)) + ctx.one()
 

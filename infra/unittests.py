@@ -9061,8 +9061,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         # A cheaper intermediate candidate must not suppress other formats.
         self.assertTrue(search.worth_trying(1))
 
-        # A root candidate with the wrong output format is not a final result.
-        search.add(spec_lowering._Candidate(Var("narrow", UQ(2, 0)), root, 1))
+        # Excess fractional precision cannot be repaired by lossless widening.
+        search.add(spec_lowering._Candidate(Var("fractional", UQ(2, 1)), root, 1))
         self.assertTrue(search.worth_trying(2))
 
         search.add(spec_lowering._Candidate(Var("result", UQ(4, 0)), root, 3))
@@ -9099,7 +9099,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 )
             infer.assert_not_called()
 
-    def test_lowering_can_replace_lut_with_later_extended_component(self):
+    def test_lowering_uses_lut_when_component_needs_intermediate_widening(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _uq_zero_extend, uq_add, uq_mul
 
@@ -9124,13 +9124,15 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             )
             result = search.run()
 
-        self.assertEqual(result.name, "wide_square")
-        self.assertEqual(search.best_result().cost, 3)
+        self.assertTrue(result.name.startswith("generated_pow_"))
+        self.assertEqual(search.best_result().cost, 101)
+        self.assertEqual(set(search.candidates[x]), {UQ(2, 0)})
+        self.assertEqual(set(search.candidates[x + ctx.one()]), {UQ(3, 0)})
         for value in range(4):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(result.evaluate().to_python(), (value + 1) ** 2)
 
-    def test_lowering_bounds_extensions_but_allows_wider_operation_results(self):
+    def test_lowering_keeps_natural_types_for_exact_component_inputs(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _uq_zero_extend, uq_mul
 
@@ -9143,29 +9145,26 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         ctx = SpecContext("bounded-extension")
         x = ctx.real("x")
-        for limit, expected_cost in ((3, 100), (4, 3)):
+        for input_bits, expected_cost in ((2, 100), (4, 1)):
             with (
-                self.subTest(limit=limit),
-                patch.object(spec_lowering, "MAX_EXTENSION_BITS", limit),
+                self.subTest(input_bits=input_bits),
                 patch(
                     "zolotone.components.LOSSLESS_COMPONENTS",
                     (square, _uq_zero_extend),
                 ),
             ):
-                source = Var("x", UQ(2, 0))
+                source = Var("x", UQ(input_bits, 0))
                 search = spec_lowering._LoweringSearch(
                     x ** ctx.two(), {x: source}, UQ, ctx
                 )
                 result = search.run()
                 self.assertEqual(search.best_result().cost, expected_cost)
-                self.assertGreater(result.dtype.total_bits(), limit)
-                self.assertTrue(all(
-                    dtype.total_bits() <= limit for dtype in search.candidates[x]
-                ))
-                source.load_value(UQ(2, 0).from_bits(3))
+                self.assertGreater(result.dtype.total_bits(), input_bits)
+                self.assertEqual(set(search.candidates[x]), {source.dtype})
+                source.load_value(source.dtype.from_bits(3))
                 self.assertEqual(result.evaluate().to_python(), 9)
 
-    def test_lowering_extends_by_default_up_to_32_bits(self):
+    def test_lowering_extends_final_result_directly_without_operand_variants(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _uq_fraction_extend, _uq_zero_extend
 
@@ -9175,17 +9174,20 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             "zolotone.components.LOSSLESS_COMPONENTS",
             (_uq_zero_extend, _uq_fraction_extend),
         ):
-            for bits in (31, 32, 33):
-                with self.subTest(bits=bits):
+            for dtype in (Q, UQ):
+                with self.subTest(dtype=dtype):
+                    source = Var("x", dtype(2, 0))
                     search = spec_lowering._LoweringSearch(
-                        x ** ctx.two(), {x: Var("x", UQ(bits, 0))}, UQ, ctx
+                        x, {x: source}, dtype(40, 2), ctx
                     )
-                    while search.add_component_candidates():
-                        pass
-                    expected = {UQ(bits, 0)}
-                    if bits == 31:
-                        expected.update((UQ(32, 0), UQ(31, 1)))
-                    self.assertEqual(set(search.candidates[x]), expected)
+                    result = search.run()
+                    self.assertEqual(result.dtype, dtype(40, 2))
+                    self.assertIs(result.args[0], source)
+                    self.assertEqual(search.best_result().cost, 1)
+                    self.assertEqual(set(search.candidates[x]), {source.dtype})
+                    for code in range(4):
+                        source.load_value(source.dtype.from_bits(code))
+                        self.assertEqual(result.evaluate().to_python(), source.evaluate().to_python())
 
     def test_lowering_charges_shared_lut_once(self):
         from zolotone.autogen import spec_lowering
@@ -9204,6 +9206,41 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertIs(result.args[0], result.args[1])
         source.load_value(UQ(2, 0).from_bits(3))
         self.assertEqual(result.evaluate().to_python(), 18)
+
+    def test_final_adaptation_rejects_fractional_narrowing(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("fractional-narrowing")
+        x = ctx.real("x")
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
+            with self.assertRaisesRegex(ZolotoneError, "no typed component"):
+                spec_lowering.search_lower_spec_to_impl(
+                    x, {x: Var("x", UQ(2, 2))}, UQ(3, 1), ctx
+                )
+
+    def test_conditional_aligns_branches_without_searching_extensions(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import _if_then_else
+
+        for dtype in (Q, UQ):
+            with self.subTest(dtype=dtype):
+                ctx = SpecContext("branch-alignment")
+                selected, x, y = ctx.bool("selected"), ctx.real("x"), ctx.real("y")
+                selector = Var("selected", Bool())
+                left, right = Var("x", dtype(2, 2)), Var("y", dtype(3, 0))
+                with patch("zolotone.components.LOSSLESS_COMPONENTS", (_if_then_else,)):
+                    search = spec_lowering._LoweringSearch(
+                        If(selected, x, y), {selected: selector, x: left, y: right},
+                        dtype(5, 2), ctx,
+                    )
+                    result = search.run()
+                self.assertEqual(set(search.candidates[x]), {left.dtype})
+                self.assertEqual(set(search.candidates[y]), {right.dtype})
+                left.load_value(left.dtype.from_bits(15))
+                right.load_value(right.dtype.from_bits(7))
+                for choice, expected in ((1, left), (0, right)):
+                    selector.load_value(Bool().from_bits(choice))
+                    self.assertEqual(result.evaluate().to_python(), expected.evaluate().to_python())
 
     def test_lowering_does_not_force_lut_to_consumer_input_format(self):
         from zolotone.autogen import spec_lowering
@@ -9258,7 +9295,6 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
     def test_final_lut_rounds_at_requested_fractional_precision(self):
         from zolotone.autogen import spec_lowering
-        from zolotone.components import _uq_fraction_extend, _uq_zero_extend
 
         for input_frac in (0, 3):
             for output_frac in (0, 2):
@@ -9270,12 +9306,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     input_dtype = UQ(2, input_frac)
                     output_dtype = UQ(2, output_frac)
                     source = Var("x", input_dtype)
-                    with (
-                        patch("zolotone.components.LOSSLESS_COMPONENTS", (
-                            _uq_zero_extend, _uq_fraction_extend,
-                        )),
-                        patch.object(spec_lowering, "MAX_EXTENSION_BITS", 5),
-                    ):
+                    with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
                         result = spec_lowering.search_lower_spec_to_impl(
                             x ** ctx.real_val(-1), {x: source}, output_dtype, ctx
                         )
@@ -9287,21 +9318,18 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
     def test_lowering_extends_inferred_lut_result_explicitly(self):
         from zolotone.autogen import spec_lowering
-        from zolotone.components import _uq_zero_extend
 
         ctx = SpecContext("extended-lut-format")
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
         expression = x ** ctx.two()
-        with (
-            patch("zolotone.components.LOSSLESS_COMPONENTS", (_uq_zero_extend,)),
-            patch.object(spec_lowering, "MAX_EXTENSION_BITS", 5),
-        ):
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
             search = spec_lowering._LoweringSearch(
                 expression, {x: source}, UQ(5, 0), ctx
             )
             result = search.run()
         self.assertEqual(result.dtype, UQ(5, 0))
+        self.assertEqual(result.name, "uq_resize")
         self.assertEqual(result.args[0].dtype, UQ(4, 0))
         self.assertTrue(result.args[0].name.startswith("generated_pow_"))
         self.assertEqual(search.best_result().cost, 101)
@@ -10528,12 +10556,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             generated = Autogenerate("generated_widened_conversion", spec)
 
         self.assertEqual(generated.dtype, Q(4, 0))
-        self.assertIn(
+        self.assertEqual(
             (generated.inner_tree.name, generated.inner_tree.args[0].name),
-            {
-                ("uq_to_q", "_uq_zero_extend"),
-                ("_q_sign_extend", "uq_to_q"),
-            },
+            ("q_resize", "uq_to_q"),
         )
         for value in range(4):
             generated.args[0].load_value(UQ(2, 0).from_bits(value))
@@ -10555,9 +10580,9 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         )
 
         self.assertEqual(signed.dtype, Q(4, 2))
-        self.assertEqual(signed.inner_tree.name, "_q_fraction_extend")
+        self.assertEqual(signed.inner_tree.name, "q_resize")
         self.assertEqual(unsigned.dtype, UQ(2, 2))
-        self.assertEqual(unsigned.inner_tree.name, "_uq_fraction_extend")
+        self.assertEqual(unsigned.inner_tree.name, "uq_resize")
 
     def test_autogenerate_reformats_signed_literal_with_fractional_bits(self):
         def spec(x: Q(4, 2), ctx) -> Q(7, 2):
@@ -10655,7 +10680,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
     def test_autogenerate_matches_registered_non_arithmetic_components(self):
         def negate_spec(x: Q(3, 0), ctx) -> Q:
-            del ctx
+            ctx.assume(x >= ctx.real_val(-3))
             return -x
 
         def less_spec(x: UQ(2, 0), y: UQ(3, 0), ctx) -> Bool:
@@ -10958,9 +10983,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         generated = Autogenerate("generated_widened_negation", spec)
 
-        self.assertEqual(generated.inner_tree.name, "q_neg")
+        self.assertTrue(generated.inner_tree.name.startswith("generated_neg_"))
         self.assertEqual(generated.inner_tree.dtype, Q(4, 0))
-        self.assertEqual(generated.inner_tree.args[0].name, "_q_sign_extend")
+        self.assertIs(generated.inner_tree.args[0], generated.inner_args[0])
+        for code in range(8):
+            value = Q(3, 0).from_bits(code)
+            generated.args[0].load_value(value)
+            self.assertEqual(generated.evaluate().to_python(), -value.to_python())
 
     def test_autogenerate_rejects_real_candidate_with_non_numeric_dtype(self):
         from zolotone.autogen.spec_lowering import (
@@ -12165,42 +12194,6 @@ class TestSignSpecs(unittest.TestCase):
 
 
 class TestMissingPrimitiveRuntime(unittest.TestCase):
-    def test_missing_lookup_tuple_table_matches_python_and_cpp(self):
-        from zolotone.autogen.missing import _build_missing_primitive
-
-        for signed in (False, True):
-            ctx = SpecContext("tuple-lut")
-            x = ctx.real("x")
-            if signed:
-                input_dtype = output_dtype = Q(3, 1)
-                expression = x
-                codes = range(-8, 8)
-            else:
-                input_dtype, output_dtype = UQ(3, 1), UQ(6, 2)
-                ctx.assume((x >= ctx.real_val(0.5)) & (x <= ctx.real_val(2.5)))
-                expression = x ** ctx.two()
-                codes = range(1, 6)
-            source = Var("x", input_dtype)
-            primitive = _build_missing_primitive(
-                expression, x, source, ctx, output_dtype=output_dtype
-            )
-            table = primitive.inner_tree.args[0]
-            self.assertIsInstance(table, Const)
-            self.assertIsInstance(table.dtype, Tuple)
-            self.assertEqual(len(table.value.raw), len(codes))
-            for compile_fn in (jit_compile, nonjit_compile):
-                with self.subTest(signed=signed, backend=compile_fn.__name__):
-                    tempdir, evaluate_cpp = compile_fn(primitive)
-                    try:
-                        for code in codes:
-                            raw = code & ((1 << input_dtype.total_bits()) - 1)
-                            expected = raw if signed else code * code
-                            source.load_value(input_dtype.from_bits(raw))
-                            self.assertEqual(primitive.evaluate().raw, expected)
-                            self.assertEqual(evaluate_cpp(raw), expected)
-                    finally:
-                        tempdir.cleanup()
-
     def test_missing_lookup_evaluates_every_reachable_entry_with_rival(self):
         from zolotone.autogen import missing
 

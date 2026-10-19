@@ -109,7 +109,6 @@ def _operation_cost(arguments, operation_cost):
 
 
 MAX_SPEC_PROBES = 5_000
-MAX_EXTENSION_BITS = 32
 LUT_COST = 100
 
 
@@ -192,17 +191,6 @@ def _probe_input_category(annotation: object) -> type[SpecNode] | None:
         return None
 
 
-def _matches_result(
-    candidate: _Candidate,
-    spec_ast: SpecNode,
-    return_annotation: object,
-) -> bool:
-    return (
-        candidate.spec.identical(spec_ast)
-        and _annotation_matches(candidate.node.dtype, return_annotation)
-    )
-
-
 def _candidate_output_range_fits(
     candidate: _Candidate,
     range_ctx: SpecContext,
@@ -283,6 +271,8 @@ class _LoweringSearch:
         #     },
         # }
         self.candidates = {}
+        # Final adaptations never enter the operand pools for further search.
+        self.result = None
 
         # Constants/Variables
         sources = _initial_candidates(self.expressions, spec_input_nodes)
@@ -318,16 +308,31 @@ class _LoweringSearch:
         )
 
     def best_result(self):
-        return min(
-            (
-                candidate
-                for formats in self.candidates.values()
-                for candidate in formats.values()
-                if _matches_result(candidate, self.root, self.return_annotation)
-            ),
-            key=lambda candidate: candidate.cost,
-            default=None,
-        )
+        return self.result
+
+    def consider_result(self, candidate):
+        if not candidate.spec.identical(self.root):
+            return
+        if not _annotation_matches(candidate.node.dtype, self.return_annotation):
+            source = candidate.node.dtype
+            target = self.return_annotation
+            if not (
+                isinstance(source, (Q, UQ))
+                and type(target) is type(source)
+                and target.int_bits >= source.int_bits
+                and target.frac_bits >= source.frac_bits
+            ):
+                return
+            if not self.worth_trying(candidate.cost + 1):
+                return
+            from ..components.Q import q_resize
+            from ..components.UQ import uq_resize
+
+            resize = q_resize if isinstance(source, Q) else uq_resize
+            node = resize(candidate.node, target.int_bits, target.frac_bits)
+            candidate = _Candidate.from_operation(node, self.root, (candidate,), 1)
+        if self.result is None or candidate.cost < self.result.cost:
+            self.result = candidate
 
     # Add candidate if it is cheaper than previous one
     def add(self, candidate):
@@ -336,6 +341,7 @@ class _LoweringSearch:
         if previous is not None and previous.cost <= candidate.cost:
             return False
         formats[candidate.node.dtype] = candidate
+        self.consider_result(candidate)
         return True
 
     def worth_trying(self, cost):
@@ -364,18 +370,17 @@ class _LoweringSearch:
         return self.component_matches[key]
 
     def allows_format(self, node, expression, arguments):
-        """Allow extensions up to the cap; arithmetic may produce wider values."""
+        """Leave same-format widening to final adaptation, not operand search."""
         if not isinstance(node.dtype, (Q, UQ)):
             return True
         for arg in arguments:
             if (
                 arg.spec != expression
-                or not isinstance(arg.node.dtype, (Q, UQ))
+                or type(arg.node.dtype) is not type(node.dtype)
                 or node.dtype.total_bits() <= arg.node.dtype.total_bits()
             ):
                 continue
-            if node.dtype.total_bits() > MAX_EXTENSION_BITS:
-                return False
+            return False
         return True
 
     def fits(self, candidate):

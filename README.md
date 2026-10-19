@@ -133,6 +133,14 @@ return annotation, rounding directly to that precision. Its sign and integer
 width are still inferred from the result range. Intermediate LUTs and results
 with a family annotation (`Q` or `UQ`) use the input's fractional width.
 
+Search uses components' natural output formats. Once a candidate implements the
+complete result expression, lowering widens it directly to the requested format
+if needed. These final extensions do not become operands for further search.
+Components can align their own operands (including conditional branches), but
+search does not explore intermediate extensions to satisfy component input
+widths or avoid intermediate overflow. Such cases may use a generated LUT when
+the finite-domain limits allow it. Final widening never discards fractional bits.
+
 Proof obligations can be simplified, rewritten with egglog, discharged with
 Z3, and checked with dReal. Floating-point results are split into observable
 classification cases so finite values, zeros, infinities, and NaNs are compared

@@ -71,6 +71,16 @@ def _if_then_else_component_spec(
 
 @Composite(name="_if_then_else", spec=_if_then_else_component_spec)
 def _if_then_else(sel: Node, in1: Node, in0: Node) -> Node:
+    if (
+        isinstance(in1.dtype, (Q, UQ))
+        and type(in1.dtype) is type(in0.dtype)
+        and in1.dtype != in0.dtype
+    ):
+        int_bits = max(in1.dtype.int_bits, in0.dtype.int_bits)
+        frac_bits = max(in1.dtype.frac_bits, in0.dtype.frac_bits)
+        resize = q_resize if isinstance(in1.dtype, Q) else uq_resize
+        in1 = resize(in1, int_bits, frac_bits)
+        in0 = resize(in0, int_bits, frac_bits)
     return if_then_else(sel, in1, in0)
 
 
@@ -116,11 +126,4 @@ LOSSLESS_COMPONENTS = (
     bit_or,
     bit_xor,
     bit_neg,
-
-    # Format extensions are valid but should be considered only after
-    # operations that may keep the original representation longer.
-    _uq_zero_extend,
-    _uq_fraction_extend,
-    _q_sign_extend,
-    _q_fraction_extend,
 )
