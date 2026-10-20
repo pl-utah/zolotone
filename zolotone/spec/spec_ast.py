@@ -9,6 +9,7 @@ import sys
 from typing import Any
 
 from ..egglog import *
+from ..errors import MissingError
 
 import z3
 import dreal
@@ -451,12 +452,14 @@ class RoundingMode(Enum):
 class Round(RealExpr):
     value: RealExpr
     mode: RoundingMode
-    frac_bits: int
+    frac_bits: int | None = None
 
     def __post_init__(self):
         RealExpr._coerce_real_expr(self.value)
         if not isinstance(self.mode, RoundingMode):
             raise TypeError("Round mode must be a RoundingMode")
+        if self.frac_bits is None:
+            return
         if type(self.frac_bits) is not int:
             raise TypeError("frac_bits must be an integer")
         if self.frac_bits < 0:
@@ -466,6 +469,8 @@ class Round(RealExpr):
         raise NotImplementedError("egglog does not support explicit fixed-point rounding")
 
     def to_z3(self, env):
+        if self.frac_bits is None:
+            raise MissingError("Rounding precision is unresolved; provide frac_bits explicitly")
         scale = 1 << self.frac_bits
         scaled = self.value.to_z3(env) * scale
         # Z3's ToInt is floor, including for negative reals.
@@ -492,6 +497,8 @@ class Round(RealExpr):
         raise NotImplementedError("dReal does not support exact fixed-point rounding")
 
     def fold(self):
+        if self.frac_bits is None:
+            return lambda value: None
         def quantize(value):
             scaled = value * (1 << self.frac_bits)
             if self.mode is RoundingMode.RNE:

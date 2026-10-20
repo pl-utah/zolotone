@@ -5,13 +5,12 @@ from __future__ import annotations
 from fractions import Fraction
 import hashlib
 import math
-import re
 
 import z3
 
 from ..errors import MissingError, ZolotoneError
 from ..rival import build_integer_machine, rival_range_analysis
-from ..spec.spec_ast import RealExpr, RealLit, RealVar, substitute_spec_node
+from ..spec.spec_ast import RealExpr, RealLit, RealVar, Round, substitute_spec_node
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
 from ..ast.helpers import integer_lookup
@@ -79,6 +78,10 @@ def _build_missing_primitive(
     output_dtype: Q | UQ,
 ) -> Node:
     """Generate a univariate typed LUT from one materialized input."""
+    if not isinstance(missing, Round):
+        raise MissingError(
+            "LUT synthesis requires explicit ctx.rne, ctx.rtz, or ctx.raz with frac_bits"
+        )
     dtype = input_node.dtype
     if not isinstance(dtype, (Q, UQ)):
         raise MissingError("Missing component input requires a Q or UQ descriptor")
@@ -107,8 +110,8 @@ def _build_missing_primitive(
         missing,
         input_expr,
         raw * (RealLit(2) ** RealLit(-dtype.frac_bits)),
-    ) * (RealLit(2) ** RealLit(output_dtype.frac_bits))
-    pattern = re.sub(r"[^a-z0-9]+", "_", type(missing).__name__.lower())
+    )
+    pattern = f"{missing.mode.value.lower()}_f{missing.frac_bits}"
     dtype_part = "_".join(
         f"{type(format_).__name__.lower()}{format_.int_bits}_{format_.frac_bits}"
         for format_ in (dtype, output_dtype)
@@ -162,7 +165,8 @@ def _build_missing_primitive(
             entries.append(raw_value)
     except ValueError as exc:
         raise ZolotoneError(
-            f"Could not evaluate generated component {component_name!r}"
+            f"Could not evaluate generated component {component_name!r} "
+            f"at input code {point}: {exc}"
         ) from exc
     dtype_minimum = (
         -(1 << (dtype.total_bits() - 1)) if isinstance(dtype, Q) else 0
@@ -173,7 +177,7 @@ def _build_missing_primitive(
     table = tuple(full_table)
 
     def generated_spec(x, ctx):
-        """Describe the real-valued function approximated by the table."""
+        """Describe the explicitly rounded function implemented by the table."""
         scale = 1 << dtype.frac_bits
         ctx.assume(
             (x >= ctx.real_val(Fraction(lower, scale)))

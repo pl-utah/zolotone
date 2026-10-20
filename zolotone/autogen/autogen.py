@@ -2,8 +2,9 @@ from dataclasses import dataclass, replace
 import inspect
 import typing as tp
 
-from ..spec.spec_ast import Round, SpecNode, children, identical_nodes
+from ..spec.spec_ast import Round, SpecNode, children, identical_nodes, substitute_spec_node
 from ..spec.spec_context import SpecContext
+from ..errors import MissingError
 from ..types import Q, UQ
 from ..ast.nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
@@ -17,6 +18,7 @@ from .spec_validation import (
     _check_spec_reachability,
     _simplify_spec_ast,
     _validate_spec_requirements,
+    _validate_rounding_precision,
     _validate_spec_shape,
     _warn_about_domain_errors,
     add_input_ranges,
@@ -98,6 +100,7 @@ def get_spec(
 ) -> Spec:
     contract = _build_spec_contract(name, function)
     reject_untyped_inputs(contract)
+    output_dtype = contract.annotations["return"]
     spec_ctx = SpecContext(contract.display_name)
     input_parameters = list(contract.signature.parameters.values())[:-1]
     spec_inputs = tuple(
@@ -108,6 +111,23 @@ def get_spec(
         for parameter in input_parameters
     )
     spec_ast = function(*spec_inputs, spec_ctx)
+    if isinstance(spec_ast, Round):
+        if isinstance(output_dtype, (Q, UQ)):
+            unresolved = replace(spec_ast, frac_bits=None)
+            inferred = replace(spec_ast, frac_bits=output_dtype.frac_bits)
+            if spec_ast.frac_bits is None:
+                spec_ast = inferred
+            for location in ("assumes", "checks", "requirements"):
+                conditions = getattr(spec_ctx, location)
+                conditions[:] = [
+                    substitute_spec_node(condition, unresolved, inferred)
+                    for condition in conditions
+                ]
+        elif spec_ast.frac_bits is None:
+            raise MissingError(
+                "Cannot infer rounding precision; provide frac_bits explicitly "
+                "or use a concrete Q or UQ return annotation"
+            )
     return Spec(
         name=name,
         function=function,
@@ -170,6 +190,7 @@ def Autogenerate(
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
     _reject_notimplemented_roundings(current_spec)
+    _validate_rounding_precision(current_spec)
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 

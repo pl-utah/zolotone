@@ -24,6 +24,7 @@ from ..spec.spec_ast import (
     RealExpr,
     RealLit,
     RealVar,
+    Round,
     SpecNode,
     children,
     substitute_spec_node,
@@ -299,12 +300,22 @@ class _LoweringSearch:
         result = self.result
         if result is not None:
             return result.node
+        if (
+            isinstance(self.root, Round)
+            and isinstance(self.return_annotation, (Q, UQ))
+            and self.return_annotation.frac_bits < self.root.frac_bits
+        ):
+            raise ZolotoneError(
+                "Requested output cannot discard the spec's fractional precision; "
+                "add explicit rounding to the requested precision"
+            )
         if self.errors:
             raise self.errors[0]
         raise ZolotoneError(
             f"Cannot lower specification {self.root!r} to "
             f"{self.return_annotation!r}; no typed component or supported "
-            "missing primitive was found"
+            "missing primitive was found. LUT synthesis requires explicit "
+            "ctx.rne, ctx.rtz, or ctx.raz with frac_bits."
         )
 
     def consider_result(self, candidate):
@@ -437,18 +448,14 @@ class _LoweringSearch:
                         changed |= self.add(candidate)
         return changed
 
-    def lut_output_type(self, expression, input_dtype):
-        """Use requested fractional bits for a final LUT; infer its integer width."""
+    def lut_output_type(self, expression):
+        """Honor the spec's explicit rounding precision; infer integer width."""
         from .missing import _suggest_missing_output_dtype
 
-        key = (expression, input_dtype)
+        key = expression
         if key not in self.suggested_lut_types:
             try:
-                precision_dtype = input_dtype
-                if expression.identical(self.root) and isinstance(
-                    self.return_annotation, (Q, UQ)
-                ):
-                    precision_dtype = self.return_annotation
+                precision_dtype = UQ(1, expression.frac_bits)
                 self.suggested_lut_types[key] = _suggest_missing_output_dtype(
                     expression, precision_dtype, self.ctx
                 )
@@ -462,6 +469,8 @@ class _LoweringSearch:
         # Consider whole regions before their children so a cheap fused LUT can
         # prune more expensive chains. Components still compete by total cost.
         for expression in self.expressions:
+            if not isinstance(expression, Round):
+                continue
             # Does it worth trying a LUT
             existing = self.candidates.get(expression, {})
             if any(candidate.cost < LUT_COST for candidate in existing.values()):
@@ -480,7 +489,7 @@ class _LoweringSearch:
                 cost = argument.cost + LUT_COST
                 if not self.worth_trying(cost):
                     continue
-                dtype = self.lut_output_type(expression, argument.node.dtype)
+                dtype = self.lut_output_type(expression)
                 if dtype is None:
                     continue
                 existing = self.candidates.get(expression, {}).get(dtype)

@@ -16,6 +16,7 @@ from ..spec.spec_ast import (
     Eq,
     Not,
     RealExpr,
+    Round,
     SpecNode,
     children,
     identical_nodes,
@@ -599,6 +600,21 @@ def _validate_spec_shape(
         f"Output format {spec.return_annotation!r} is not supported by "
         "autogeneration"
     )
+
+
+def _validate_rounding_precision(spec: Spec) -> None:
+    """Reject an output contract that would narrow explicit root rounding."""
+    if (
+        isinstance(spec.spec_ast, Round)
+        and isinstance(spec.return_annotation, (Q, UQ))
+        and spec.spec_ast.frac_bits > spec.return_annotation.frac_bits
+    ):
+        raise InfeasibleError(
+            f"Root rounding uses frac_bits={spec.spec_ast.frac_bits}, but output "
+            f"{spec.return_annotation!r} has frac_bits={spec.return_annotation.frac_bits}; "
+            "the output cannot discard fractional precision. "
+            "Round explicitly to the requested output precision instead"
+        )
 
 
 def _validate_spec_requirements(spec: Spec) -> None:
