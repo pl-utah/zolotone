@@ -31,12 +31,12 @@ class SpecNode:
     def identical(self, other: object) -> bool:
         return identical_nodes(self, other)
     
-    def constant_fold(self) -> "SpecNode":
+    def _constant_fold(self) -> "SpecNode":
         args = children(self)
         if args == ():
             return self
         
-        folded_args = tuple(arg.constant_fold() for arg in args)
+        folded_args = tuple(arg._constant_fold() for arg in args)
         rebuilt = (
             self
             if all(old is new for old, new in zip(args, folded_args))
@@ -159,11 +159,11 @@ class FPExpr(SpecNode, ABC):
     def decode(self) -> tuple[SpecNode, ...]:
         """Return this FP value's mathematical value and format fields."""
 
-    def constant_fold(self) -> "FPExpr":
+    def _constant_fold(self) -> "FPExpr":
         """Fold each scalar field of this structured expression."""
 
         old_fields = self.decode()
-        folded_fields = tuple(field.constant_fold() for field in old_fields)
+        folded_fields = tuple(field._constant_fold() for field in old_fields)
         if all(old is new for old, new in zip(old_fields, folded_fields)):
             return self
         return type(self)(*folded_fields)
@@ -1265,7 +1265,7 @@ def substitute_literals(
     # avoids revisiting the full subtree at each parent of a deep expression.
     if isinstance(rebuilt, (RealExpr, BoolExpr)):
         return _fold_node_with_folded_args(rebuilt, substituted_args)
-    return rebuilt.constant_fold()
+    return rebuilt._constant_fold()
 
 
 def _fold_node_with_folded_args(
@@ -1275,7 +1275,7 @@ def _fold_node_with_folded_args(
     """Apply one node's fold rules when its children are already folded."""
     shortcut = _shortcut_fold(node, folded_args)
     if shortcut is not None:
-        return shortcut.constant_fold()
+        return shortcut._constant_fold()
 
     output_type = _literal_type(node)
     fold = node.fold()
@@ -1397,7 +1397,7 @@ def _shortcut_fold(
             return lhs
         # 0 - x -> -x
         if isinstance(lhs, RealLit) and lhs.value == 0:
-            return Neg(rhs).constant_fold()
+            return Neg(rhs)._constant_fold()
         return None
 
     if isinstance(node, And):

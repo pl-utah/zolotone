@@ -199,6 +199,8 @@ def build_integer_machine(
 
     rounding_mode = None
     if isinstance(expr, Round):
+        if expr.mode is RoundingMode.FR:
+            raise NotImplementedError("Rival lowering of faithful rounding is not implemented")
         rounding_mode = expr.mode.value
         expr = expr.value * (RealLit(2) ** RealLit(expr.frac_bits))
 
@@ -512,7 +514,7 @@ def _rewrite_proven_expressions(
         return None
 
     def prove(predicate: BoolExpr) -> bool | None:
-        predicate = predicate.constant_fold()
+        predicate = predicate._constant_fold()
         if isinstance(predicate, BoolLit):
             return predicate.value
         if not rects:
@@ -533,7 +535,7 @@ def _rewrite_proven_expressions(
             # An asserted predicate that always errors may be either false or
             # undefined. Prove falsity by successfully asserting its negation
             # instead of interpreting an error status as Boolean false.
-            negated = (~predicate).constant_fold()
+            negated = (~predicate)._constant_fold()
             if isinstance(negated, BoolLit):
                 result = not negated.value
             else:
@@ -552,7 +554,7 @@ def _rewrite_proven_expressions(
             node
             if all(old is new for old, new in zip(old_children, new_children))
             else rebuild_spec_node(node, new_children)
-        ).constant_fold()
+        )._constant_fold()
 
         if isinstance(rewritten, BoolLit):
             return rewritten
@@ -581,11 +583,11 @@ def _rewrite_proven_expressions(
             if nonnegative is True:
                 return rewritten.value
             if nonnegative is False:
-                return (-rewritten.value).constant_fold()
+                return (-rewritten.value)._constant_fold()
 
             nonpositive = prove(rewritten.value <= zero)
             if nonpositive is True:
-                return (-rewritten.value).constant_fold()
+                return (-rewritten.value)._constant_fold()
             if nonpositive is False:
                 return rewritten.value
             return rewritten
@@ -972,7 +974,7 @@ def _rival_boolean_rect_alternatives(
             var: BoolLit(value)
             for var, value in zip(bool_vars, values)
         }
-        folded = substitute_literals(expr, replacements).constant_fold()
+        folded = substitute_literals(expr, replacements)._constant_fold()
         if not isinstance(folded, BoolLit):
             return None
         if not folded.value:
@@ -1091,6 +1093,8 @@ def _intersect_rival_rects(
 
 def to_rival_ir(node: SpecNode) -> RivalIR:
     if isinstance(node, Round):
+        if node.mode is RoundingMode.FR:
+            raise NotImplementedError("Rival lowering of faithful rounding is not implemented")
         scale = RealLit(2) ** RealLit(node.frac_bits)
         scaled = to_rival_ir(node.value * scale)
         if node.mode is RoundingMode.RNE:

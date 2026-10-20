@@ -1,11 +1,21 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import inspect
 import typing as tp
 
-from ..spec.spec_ast import Round, SpecNode, substitute_spec_node
+from ..spec.spec_ast import (
+    BoolVar,
+    FPExpr,
+    If,
+    Round,
+    RoundingMode,
+    SpecNode,
+    children,
+    rebuild_spec_node,
+    substitute_spec_node,
+)
 from ..spec.spec_context import SpecContext
 from ..errors import MissingError
-from ..types import Q, UQ
+from ..types import Bool, Q, UQ
 from ..ast.nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
     attach_lowered_conditions,
@@ -17,6 +27,7 @@ from .spec_validation import (
     _check_spec_obligations,
     _check_spec_reachability,
     _simplify_spec_ast,
+    _spec_value_variables,
     _validate_spec_requirements,
     _validate_rounding_precision,
     _validate_spec_shape,
@@ -37,13 +48,80 @@ def _format_annotation(annotation: object) -> str:
 @dataclass(frozen=True)
 class Spec:
     name: str
-    function: tp.Callable[..., tp.Any]
     annotations: dict[str, tp.Any]
     signature: inspect.Signature
     display_name: str
     spec_ast: SpecNode
     spec_inputs: tuple[tp.Any, ...]
     spec_ctx: SpecContext
+    rounding_choices: dict[Round, BoolVar] = field(default_factory=dict)
+
+    def to_function(self) -> tp.Callable[..., tp.Any]:
+        """Derive a callable from this AST and contract, without replaying source."""
+        signature = self.signature
+        parameters = tuple(signature.parameters.values())
+        inputs = self.spec_inputs
+        spec_ast = self.spec_ast
+        source_ctx = self.spec_ctx.copy()
+
+        def derived_spec(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            ctx = bound.arguments[parameters[-1].name]
+            replacements = {}
+
+            def bind_input(source, target):
+                if isinstance(source, tuple):
+                    for old, new in zip(source, target, strict=True):
+                        bind_input(old, new)
+                    return
+                replacements[source] = target
+                if isinstance(source, FPExpr):
+                    for old, new in zip(children(source), children(target), strict=True):
+                        bind_input(old, new)
+
+            for source, parameter in zip(inputs, parameters[:-1], strict=True):
+                bind_input(source, bound.arguments[parameter.name])
+
+            rewritten = {}
+
+            def substitute(node):
+                # Return replacements directly: never substitute into a new input.
+                if node in replacements:
+                    return replacements[node]
+                if node not in rewritten:
+                    old_children = children(node)
+                    new_children = tuple(substitute(child) for child in old_children)
+                    rewritten[node] = (
+                        node
+                        if all(old is new for old, new in zip(old_children, new_children))
+                        else rebuild_spec_node(node, new_children)
+                    )
+                return rewritten[node]
+
+            for location in ("assumes", "checks", "requirements"):
+                getattr(ctx, location).extend(
+                    substitute(condition) for condition in getattr(source_ctx, location)
+                )
+            ctx.case_partitions.extend(
+                replace(
+                    partition,
+                    entries=tuple(
+                        replace(entry, condition=substitute(entry.condition), value=substitute(entry.value))
+                        for entry in partition.entries
+                    ),
+                    value=substitute(partition.value),
+                )
+                for partition in source_ctx.case_partitions
+            )
+            return substitute(spec_ast)
+
+        derived_spec.__name__ = f"{self.name}_spec"
+        derived_spec.__qualname__ = derived_spec.__name__
+        derived_spec.__signature__ = signature
+        derived_spec.__annotations__ = {
+            **self.annotations, parameters[-1].name: SpecContext,
+        }
+        return derived_spec
 
     @property
     def contract(self) -> _SpecContract:
@@ -91,6 +169,12 @@ class Spec:
         lines.extend(
             format_section("requirements", self.spec_ctx.requirements)
         )
+        if self.rounding_choices:
+            lines.extend(["", "  rounding choices:"])
+            lines.extend(
+                f"    {choice}: {expression}"
+                for expression, choice in self.rounding_choices.items()
+            )
         return "\n".join(lines)
 
 
@@ -111,32 +195,130 @@ def get_spec(
         for parameter in input_parameters
     )
     spec_ast = function(*spec_inputs, spec_ctx)
-    if isinstance(spec_ast, Round):
+    if isinstance(spec_ast, Round) and spec_ast.frac_bits is None:
         if isinstance(output_dtype, (Q, UQ)):
-            unresolved = replace(spec_ast, frac_bits=None)
+            unresolved = spec_ast
             inferred = replace(spec_ast, frac_bits=output_dtype.frac_bits)
-            if spec_ast.frac_bits is None:
-                spec_ast = inferred
+            spec_ast = inferred
             for location in ("assumes", "checks", "requirements"):
                 conditions = getattr(spec_ctx, location)
                 conditions[:] = [
                     substitute_spec_node(condition, unresolved, inferred)
                     for condition in conditions
                 ]
-        elif spec_ast.frac_bits is None:
+            spec_ctx.case_partitions = [
+                replace(
+                    partition,
+                    entries=tuple(
+                        replace(
+                            entry,
+                            condition=substitute_spec_node(entry.condition, unresolved, inferred),
+                            value=substitute_spec_node(entry.value, unresolved, inferred),
+                        )
+                        for entry in partition.entries
+                    ),
+                    value=substitute_spec_node(partition.value, unresolved, inferred),
+                )
+                for partition in spec_ctx.case_partitions
+            ]
+        else:
             raise MissingError(
                 "Cannot infer rounding precision; provide frac_bits explicitly "
                 "or use a concrete Q or UQ return annotation"
             )
     return Spec(
         name=name,
-        function=function,
         annotations=dict(contract.annotations),
         signature=contract.signature,
         display_name=contract.display_name,
         spec_ast=spec_ast,
         spec_inputs=spec_inputs,
         spec_ctx=spec_ctx,
+    )
+
+
+def _expand_faithful_roundings(spec: Spec) -> Spec:
+    """Expand FR into explicit choices without adding ordinary function inputs."""
+    # Check the original root before an If could hide narrowing or missing precision.
+    _validate_rounding_precision(spec)
+    ctx = spec.spec_ctx.copy()
+    choices = dict(spec.rounding_choices)
+    occupied_names = {
+        variable.name
+        for variable in _spec_value_variables((
+            spec.spec_inputs, spec.spec_ast,
+            *ctx.assumes, *ctx.checks, *ctx.requirements,
+            *choices.values(),
+        ))
+    }
+    occupied_names.update(spec.signature.parameters)
+    rewritten: dict[SpecNode, SpecNode] = {}
+    expanded = False
+
+    def visit(node: SpecNode) -> SpecNode:
+        nonlocal expanded
+        if node in rewritten:
+            return rewritten[node]
+        old_children = children(node)
+        new_children = tuple(visit(child) for child in old_children)
+        result = (
+            node
+            if all(old is new for old, new in zip(old_children, new_children))
+            else rebuild_spec_node(node, new_children)
+        )
+        if isinstance(node, Round) and node.mode is RoundingMode.FR:
+            if node.frac_bits is None:
+                raise MissingError("Faithful rounding requires frac_bits explicitly")
+            if node not in choices:
+                choice = ctx.fresh_bool("rnd")
+                while choice.name in occupied_names:
+                    choice = ctx.fresh_bool("rnd")
+                occupied_names.add(choice.name)
+                choices[node] = choice
+            result = If(
+                choices[node],
+                replace(result, mode=RoundingMode.RAZ),
+                replace(result, mode=RoundingMode.RTZ),
+            )
+            expanded = True
+        rewritten[node] = result
+        return result
+
+    spec_ast = visit(spec.spec_ast)
+    for location in ("assumes", "checks", "requirements"):
+        conditions = getattr(ctx, location)
+        conditions[:] = [visit(condition) for condition in conditions]
+    ctx.case_partitions = [
+        replace(
+            partition,
+            entries=tuple(
+                replace(entry, condition=visit(entry.condition), value=visit(entry.value))
+                for entry in partition.entries
+            ),
+            value=visit(partition.value),
+        )
+        for partition in ctx.case_partitions
+    ]
+    if not expanded:
+        return spec
+    new_choices = tuple(choice for choice in choices.values() if choice not in spec.spec_inputs)
+    parameters = tuple(spec.signature.parameters.values())
+    choice_parameters = tuple(
+        inspect.Parameter(choice.name, parameters[-1].kind, annotation=Bool())
+        for choice in new_choices
+    )
+    return replace(
+        spec,
+        spec_ast=spec_ast,
+        spec_ctx=ctx,
+        spec_inputs=spec.spec_inputs + new_choices,
+        annotations={
+            **{name: dtype for name, dtype in spec.annotations.items() if name != "return"},
+            **{choice.name: Bool() for choice in new_choices},
+            "return": spec.return_annotation,
+        },
+        signature=spec.signature.replace(parameters=(*parameters[:-1], *choice_parameters, parameters[-1])),
+        rounding_choices=choices,
     )
 
 
@@ -157,7 +339,7 @@ def Autogenerate(
     current_spec = add_input_ranges(current_spec)
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
-    _validate_rounding_precision(current_spec)
+    current_spec = _expand_faithful_roundings(current_spec)
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 

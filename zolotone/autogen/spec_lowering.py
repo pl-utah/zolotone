@@ -572,8 +572,8 @@ def _tighten_literal_comparison(
     spec_input_nodes: dict[tp.Any, Node],
 ) -> BoolExpr | None:
     """Tighten a var–literal comparison using its representable input values."""
-    lhs = comparison.lhs.constant_fold()
-    rhs = comparison.rhs.constant_fold()
+    lhs = comparison.lhs._constant_fold()
+    rhs = comparison.rhs._constant_fold()
     operator = type(comparison)
     if isinstance(lhs, RealLit):
         lhs, rhs = rhs, lhs
@@ -651,7 +651,7 @@ def _make_conditions_bit_precise(
             if precise is not None:
                 rewritten = substitute_spec_node(rewritten, comparison, precise)
                 if isinstance(precise, BoolLit):
-                    rewritten = rewritten.constant_fold()
+                    rewritten = rewritten._constant_fold()
                 continue
             if not isinstance(comparison, (Lt, Gt)):
                 continue
@@ -682,7 +682,7 @@ def _make_conditions_bit_precise(
             rewritten = substitute_spec_node(
                 rewritten,
                 comparison,
-                precise.constant_fold(),
+                precise._constant_fold(),
             )
         rewritten_conditions.append(rewritten)
     return tuple(rewritten_conditions)
@@ -730,7 +730,12 @@ def rewrite_strict_conditions(
 def lower_spec_result(
     spec: Spec,
 ) -> Node:
-    @Composite(name=spec.name, spec=spec.function)
+    if spec.rounding_choices:
+        raise NotImplementedError(
+            "Implementation lowering with artificial rounding choices is not implemented"
+        )
+
+    @Composite(name=spec.name, spec=spec.to_function())
     def generated_impl(*impl_inputs: Node) -> Node:
         spec_input_nodes = dict(
             zip(spec.spec_inputs, impl_inputs, strict=True)

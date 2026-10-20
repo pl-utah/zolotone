@@ -187,7 +187,7 @@ def _simplify_spec_ast(
             "Specification simplification produced an invalid result carrier"
         )
 
-    simplified_spec_ast = simplified.constant_fold()
+    simplified_spec_ast = simplified._constant_fold()
     # Keep assumptions that justified the simplified result. Rewrite checks to
     # refer to that result without folding them away; they will be lowered as
     # runtime implementation checks later.

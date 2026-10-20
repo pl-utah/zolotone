@@ -179,7 +179,7 @@ class SpecContext:
             return None
 
         def learned_from(assume):
-            assume = assume.constant_fold()
+            assume = assume._constant_fold()
             if isinstance(assume, Eq):
                 return from_sides(assume.lhs, assume.rhs)
             if isinstance(assume, BoolEq):
@@ -201,7 +201,7 @@ class SpecContext:
     
     # learning facts like: RealExpr == RealLit
     def _canonical_learned_assumption(self, assume: BoolExpr):
-        assume = self._reject_false_assumption(assume.constant_fold())
+        assume = self._reject_false_assumption(assume._constant_fold())
         if isinstance(assume, BoolVar):
             return assume, BoolLit(True)
         # ``predicate == false`` folds to ``not predicate``. Preserve the
@@ -209,7 +209,7 @@ class SpecContext:
         if isinstance(assume, Not):
             return assume.value, BoolLit(False)
         if isinstance(assume, (Eq, BoolEq)):
-            # constant_fold() has reduced every constant expression to a literal.
+            # _constant_fold() has reduced every constant expression to a literal.
             for expr, literal in (
                 (assume.lhs, assume.rhs),
                 (assume.rhs, assume.lhs),
@@ -234,7 +234,7 @@ class SpecContext:
                 conjunct
                 for assume in self.assumes
                 for conjunct in _assumption_conjuncts(
-                    self._reject_false_assumption(assume.constant_fold())
+                    self._reject_false_assumption(assume._constant_fold())
                 )
             ]
         )
@@ -536,7 +536,7 @@ def _normalize_comparison(node: BoolExpr) -> BoolExpr:
         variable_terms = [(term, -sign) for term, sign in variable_terms]
         constant_terms = [(term, -sign) for term, sign in constant_terms]
     lhs = sum_terms(variable_terms)
-    rhs = sum_terms(constant_terms).constant_fold()
+    rhs = sum_terms(constant_terms)._constant_fold()
     result = operator(lhs, rhs)
     return node if result.identical(node) else result
 
