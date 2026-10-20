@@ -141,7 +141,7 @@ class RivalMachine:
 
 
 class RivalIntegerMachine:
-    """Evaluate exact signed integer inputs to nearest-even integer outputs."""
+    """Evaluate integer inputs to exact integer output codes."""
 
     def __init__(self, raw_machine: Any):
         self._raw_machine = raw_machine
@@ -178,15 +178,15 @@ def build_range_machine(
 
 def build_integer_machine(
     expr: RealExpr,
-    *,
     input_total_bits: int,
     output_total_bits: int,
 ) -> RivalIntegerMachine:
-    """Compile an expression from exact integer input to integer output.
+    """Compile an expression from integer input to integer output codes.
 
-    Rival evaluates real intervals internally and rounds once, to nearest-even
-    integer output. Callers are responsible for expressing any unit conversion
-    in ``expr`` before compiling it.
+    A final Round supplies the output discretization: evaluate its operand in
+    units of 2**-frac_bits and return the integer code in its specified mode.
+    Other expressions must already produce exact integers. Inner rounding
+    nodes remain part of the expression and retain their own semantics.
     """
     if not isinstance(expr, RealExpr):
         raise TypeError("integer evaluation requires a real expression")
@@ -197,11 +197,17 @@ def build_integer_machine(
         if total < 1:
             raise ValueError(f"invalid {label} integer bit width")
 
+    rounding_mode = None
+    if isinstance(expr, Round):
+        rounding_mode = expr.mode.value
+        expr = expr.value * (RealLit(2) ** RealLit(expr.frac_bits))
+
     native = _load_native_module()
     raw_machine = native.build_integer_machine(
         to_rival_ir(expr),
         input_total_bits,
         output_total_bits,
+        rounding_mode,
     )
     return RivalIntegerMachine(raw_machine)
 
@@ -545,7 +551,7 @@ def _rewrite_proven_expressions(
         rewritten = (
             node
             if all(old is new for old, new in zip(old_children, new_children))
-            else type(node)(*new_children)
+            else rebuild_spec_node(node, new_children)
         ).constant_fold()
 
         if isinstance(rewritten, BoolLit):
@@ -1084,6 +1090,24 @@ def _intersect_rival_rects(
 
 
 def to_rival_ir(node: SpecNode) -> RivalIR:
+    if isinstance(node, Round):
+        scale = RealLit(2) ** RealLit(node.frac_bits)
+        scaled = to_rival_ir(node.value * scale)
+        if node.mode is RoundingMode.RNE:
+            rounded = {"op": "round_even", "arg": scaled}
+        elif node.mode is RoundingMode.RTZ:
+            rounded = {"op": "trunc", "arg": scaled}
+        else:
+            rounded = {
+                "op": "if",
+                "cond": to_rival_ir(node.value >= RealLit(0)),
+                "on_true": {"op": "ceil", "arg": scaled},
+                "on_false": {"op": "neg", "arg": {
+                    "op": "ceil", "arg": {"op": "neg", "arg": scaled},
+                }},
+            }
+        return {"op": "mul", "lhs": rounded,
+                "rhs": to_rival_ir(RealLit(2) ** RealLit(-node.frac_bits))}
     if isinstance(node, (RealVar, BoolVar)):
         return {"op": "var", "name": node.name}
     if isinstance(node, RealLit):
