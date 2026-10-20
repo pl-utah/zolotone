@@ -479,13 +479,14 @@ def normalize_ctx(ctx: SpecContext) -> SpecContext:
         negate_args = negated and isinstance(node, (And, Or))
         normalized = tuple(normalize(arg, negate_args) for arg in args)
         operator = complements[type(node)] if negated else type(node)
-        result = (
-            node
-            if operator is type(node) and all(
-                old is new for old, new in zip(args, normalized)
+        if operator is type(node):
+            result = (
+                node
+                if all(old is new for old, new in zip(args, normalized))
+                else rebuild_spec_node(node, normalized)
             )
-            else operator(*normalized)
-        )
+        else:
+            result = operator(*normalized)
         if type(result) in _REVERSE_COMPARISON:
             result = _normalize_comparison(result)
         return result
