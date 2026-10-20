@@ -24,7 +24,7 @@ def _fp32_mantissa(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"({args[0]} & 8388607)",
+        c_lowering=lambda args, jittable: f"({args[0]} & 0x7fffff)",
         args=[x],
         name="_fp32_mantissa",
     )
@@ -40,7 +40,7 @@ def _fp32_exponent(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 23) & 255)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 23) & 0xff)",
         args=[x],
         name="_fp32_exponent",
     )
@@ -56,7 +56,7 @@ def _fp32_sign(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 31) & 1)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 31) & 0x1)",
         args=[x],
         name="_fp32_sign",
     )

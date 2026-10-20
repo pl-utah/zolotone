@@ -281,7 +281,7 @@ class _CppEmitter:
                     + "}"
                 )
             return f"std::make_tuple({', '.join(arg.expr for arg in args)})"
-        return self._cast(value.dtype, str(value.raw))
+        return self._cast(value.dtype, hex(value.raw))
 
     def _lower_op(
         self,
@@ -357,13 +357,13 @@ class _CppEmitter:
         return f"({expr}) & {self._mask_literal(type_.total_bits())}"
 
     def _mask_literal(self, bits: int) -> str:
-        return str((1 << bits) - 1)
+        return hex((1 << bits) - 1)
 
     def _public_width_assertions(self, args: list[Var]) -> list[str]:
         if not self.jittable:
             return []
         return [
-            f"assert({arg.name} >= 0 && "
+            f"assert({arg.name} >= 0x0 && "
             f"{arg.name} <= {self._mask_literal(arg.dtype.total_bits())});"
             for arg in args
             if not isinstance(arg.dtype, Tuple)

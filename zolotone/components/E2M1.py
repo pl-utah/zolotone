@@ -19,7 +19,7 @@ def _e2m1_mantissa(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"({args[0]} & 1)",
+        c_lowering=lambda args, jittable: f"({args[0]} & 0x1)",
         args=[x],
         name="_e2m1_mantissa",
     )
@@ -35,7 +35,7 @@ def _e2m1_exponent(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 1) & 3)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 1) & 0x3)",
         args=[x],
         name="_e2m1_exponent",
     )
@@ -51,7 +51,7 @@ def _e2m1_sign(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 3) & 1)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 3) & 0x1)",
         args=[x],
         name="_e2m1_sign",
     )

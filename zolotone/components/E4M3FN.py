@@ -19,7 +19,7 @@ def _e4m3fn_mantissa(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"({args[0]} & 7)",
+        c_lowering=lambda args, jittable: f"({args[0]} & 0x7)",
         args=[x],
         name="_e4m3fn_mantissa",
     )
@@ -35,7 +35,7 @@ def _e4m3fn_exponent(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 3) & 15)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 3) & 0xf)",
         args=[x],
         name="_e4m3fn_exponent",
     )
@@ -51,7 +51,7 @@ def _e4m3fn_sign(x: Node) -> Op:
     return Op(
         impl=impl,
         sign=sign,
-        c_lowering=lambda args, jittable: f"(({args[0]} >> 7) & 1)",
+        c_lowering=lambda args, jittable: f"(({args[0]} >> 7) & 0x1)",
         args=[x],
         name="_e4m3fn_sign",
     )

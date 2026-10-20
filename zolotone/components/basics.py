@@ -17,11 +17,11 @@ def _cpp_cast(type_: DataType, expr: str, jittable: bool) -> str:
 
 
 def _cpp_zero(type_: DataType, jittable: bool) -> str:
-    return _cpp_cast(type_, "0", jittable=jittable)
+    return _cpp_cast(type_, "0x0", jittable=jittable)
 
 
 def _mask_literal(bits: int) -> str:
-    return str((1 << bits) - 1)
+    return hex((1 << bits) - 1)
 
 
 def _impl_constructor(op, out: DataType):
@@ -112,7 +112,7 @@ def basic_mux_2_1(sel: Node, in0: Node, in1: Node, out: DataType) -> Op:
         z=in1,
         out=out,
         c_lowering=lambda lowered_args, jittable: (
-            f"({lowered_args[0]} != 0 ? "
+            f"({lowered_args[0]} != 0x0 ? "
             f"{_cpp_cast(out, lowered_args[2], jittable=jittable)} : "
             f"{_cpp_cast(out, lowered_args[1], jittable=jittable)})"
         ),
@@ -363,7 +363,7 @@ def basic_or_reduce(x: Node, out: DataType) -> Op:
         op=lambda x: 1 if x > 0 else 0,
         x=x,
         out=out,
-        c_lowering=_format_c_lowering("({} != 0)", 0),
+        c_lowering=_format_c_lowering("({} != 0x0)", 0),
         name="basic_or_reduce",
     )
 
