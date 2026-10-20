@@ -2379,6 +2379,291 @@ class TestFingerprint(unittest.TestCase):
         self.assertEqual(before, after)
 
 
+class TestRejectNestedRoundings(unittest.TestCase):
+    def test_rejects_every_combination_of_nested_rounding_modes(self):
+        from zolotone.autogen.autogen import _reject_nested_roundings
+
+        ctx = SpecContext("nested-roundings")
+        x = ctx.real("x")
+        for outer in ("rne", "rtz", "raz"):
+            for inner in ("rne", "rtz", "raz"):
+                with self.subTest(outer=outer, inner=inner):
+                    expression = getattr(ctx, outer)(getattr(ctx, inner)(x, 3), 2)
+                    with self.assertRaisesRegex(NotImplementedError, "Nested rounding"):
+                        _reject_nested_roundings(_spec_state(expression, (x,), ctx))
+
+    def test_rejects_nested_rounding_through_arithmetic_and_conditionals(self):
+        from zolotone.autogen.autogen import _reject_nested_roundings
+
+        ctx = SpecContext("indirect-nested-roundings")
+        x = ctx.real("x")
+        inner = ctx.rtz(x, 2)
+        for value in (
+            inner + ctx.one(),
+            -inner,
+            If(x >= ctx.zero(), inner, x),
+            If(inner >= ctx.zero(), x, -x),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(NotImplementedError, "Nested rounding"):
+                    _reject_nested_roundings(_spec_state(ctx.rne(value, 1), (x,), ctx))
+
+    def test_scans_assumptions_checks_and_requirements(self):
+        from zolotone.autogen.autogen import _reject_nested_roundings
+
+        for location in ("assumes", "checks", "requirements"):
+            with self.subTest(location=location):
+                ctx = SpecContext("nested-rounding-condition")
+                x = ctx.real("x")
+                condition = ctx.rne(ctx.raz(x, 3), 2) >= ctx.zero()
+                getattr(ctx, location).append(condition)
+                with self.assertRaisesRegex(NotImplementedError, "Nested rounding"):
+                    _reject_nested_roundings(_spec_state(x, (x,), ctx))
+
+    def test_allows_root_rounding_and_structurally_identical_condition_rounding(self):
+        from zolotone.autogen.autogen import _reject_nested_roundings
+
+        for mode in ("rne", "rtz", "raz"):
+            with self.subTest(mode=mode):
+                ctx = SpecContext("matching-roundings")
+                x = ctx.real("x")
+                rounding = getattr(ctx, mode)
+                result = rounding(x + ctx.one(), 2)
+                repeated = rounding(x + ctx.one(), 2)
+                self.assertIsNot(result, repeated)
+                ctx.assume(repeated >= ctx.zero())
+                ctx.check((rounding(x + ctx.one(), 2) + ctx.one()) >= ctx.zero())
+                ctx.require(rounding(x + ctx.one(), 2) <= ctx.two())
+                _reject_nested_roundings(_spec_state(result, (x,), ctx))
+
+    def test_allows_specs_without_rounding(self):
+        from zolotone.autogen.autogen import _reject_nested_roundings
+
+        ctx = SpecContext("unrounded")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.zero())
+        ctx.check(x <= ctx.one())
+        ctx.require(x <= ctx.two())
+        _reject_nested_roundings(_spec_state(x + ctx.one(), (x,), ctx))
+
+    def test_rejects_non_root_result_rounding(self):
+        from zolotone.autogen.autogen import _reject_nested_roundings
+
+        ctx = SpecContext("non-root-roundings")
+        x = ctx.real("x")
+        rounded = ctx.rne(x, 2)
+        for expression in (
+            rounded + ctx.one(),
+            rounded + rounded,
+            rounded + ctx.rtz(x, 1),
+            -rounded,
+            If(x >= ctx.zero(), rounded, x),
+            If(rounded >= ctx.zero(), x, -x),
+            rounded >= ctx.zero(),
+        ):
+            with self.subTest(expression=expression):
+                with self.assertRaisesRegex(NotImplementedError, "root operation"):
+                    _reject_nested_roundings(_spec_state(expression, (x,), ctx))
+
+    def test_rejects_condition_rounding_that_does_not_match_result(self):
+        from zolotone.autogen.autogen import _reject_nested_roundings
+
+        for location in ("assumes", "checks", "requirements"):
+            for difference in ("mode", "precision", "operand", "unrounded_result"):
+                with self.subTest(location=location, difference=difference):
+                    ctx = SpecContext("mismatched-roundings")
+                    x = ctx.real("x")
+                    result = ctx.rne(x, 2)
+                    other = {
+                        "mode": ctx.rtz(x, 2),
+                        "precision": ctx.rne(x, 3),
+                        "operand": ctx.rne(x + ctx.one(), 2),
+                        "unrounded_result": ctx.rne(x, 2),
+                    }[difference]
+                    if difference == "unrounded_result":
+                        result = x
+                    getattr(ctx, location).append(other >= ctx.zero())
+                    with self.assertRaisesRegex(NotImplementedError, "must match"):
+                        _reject_nested_roundings(_spec_state(result, (x,), ctx))
+
+    def test_shared_rounding_is_still_rejected_when_nested_elsewhere(self):
+        from zolotone.autogen.autogen import _reject_nested_roundings
+
+        ctx = SpecContext("shared-nested-rounding")
+        x = ctx.real("x")
+        inner = ctx.rtz(x, 2)
+        expression = inner + ctx.rne(inner + ctx.one(), 1)
+        with self.assertRaisesRegex(NotImplementedError, "root operation"):
+            _reject_nested_roundings(_spec_state(expression, (x,), ctx))
+
+    def test_autogenerate_rejects_before_constant_folding(self):
+        from zolotone.autogen import autogen
+
+        def spec(x: UQ(2, 2), ctx) -> UQ:
+            return ctx.rne(ctx.rtz(ctx.one(), 2), 1) + x
+
+        with patch.object(autogen, "_simplify_spec_ast") as simplify:
+            with self.assertRaisesRegex(NotImplementedError, "Nested rounding"):
+                Autogenerate("nested-roundings", spec)
+        simplify.assert_not_called()
+
+    def test_autogenerate_rejects_non_root_and_mismatched_rounding_before_simplification(self):
+        from zolotone.autogen import autogen
+
+        for invalid in ("non_root", "mismatched_condition"):
+            with self.subTest(invalid=invalid):
+                def spec(x: UQ(2, 2), ctx) -> UQ:
+                    result = ctx.rne(x, 2)
+                    if invalid == "non_root":
+                        return result + ctx.zero()
+                    ctx.check(ctx.rtz(x, 2) >= ctx.zero())
+                    return result
+
+                with patch.object(autogen, "_simplify_spec_ast") as simplify:
+                    with self.assertRaises(NotImplementedError):
+                        Autogenerate("invalid-rounding", spec)
+                simplify.assert_not_called()
+
+    def test_autogenerate_accepts_matching_rounding_conditions(self):
+        for mode in ("rne", "rtz", "raz"):
+            with self.subTest(mode=mode):
+                def spec(x: UQ(2, 2), ctx) -> UQ(1, 2):
+                    ctx.assume(x >= ctx.one())
+                    rounding = getattr(ctx, mode)
+                    result = rounding(x ** -ctx.one(), 2)
+                    ctx.assume(rounding(x ** -ctx.one(), 2) >= ctx.zero())
+                    ctx.check(rounding(x ** -ctx.one(), 2) >= ctx.zero())
+                    ctx.require(rounding(x ** -ctx.one(), 2) >= ctx.zero())
+                    return result
+
+                result = Autogenerate("matching-rounding", spec)
+                self.assertEqual(result.dtype, UQ(1, 2))
+
+
+class TestRoundSpecZ3(unittest.TestCase):
+    def assert_rounds_to(self, expression, value, expected):
+        env = {}
+        result = expression.to_z3(env)
+        self.assertEqual(result.sort(), z3.RealSort())
+        value = Fraction(value)
+        expected = Fraction(expected)
+        actual = z3.substitute(
+            result,
+            (env[("real", "x")], z3.RealVal(f"{value.numerator}/{value.denominator}")),
+        )
+        self.assertTrue(z3.is_true(z3.simplify(
+            actual == z3.RealVal(f"{expected.numerator}/{expected.denominator}")
+        )))
+
+    def test_rounding_modes_on_positive_and_negative_values(self):
+        ctx = SpecContext("z3-rounding-values")
+        x = ctx.real("x")
+        for mode in ("rne", "rtz", "raz"):
+            for frac_bits in (0, 2, 60):
+                scale = 1 << frac_bits
+                expression = getattr(ctx, mode)(x, frac_bits)
+                for numerator in range(-25, 26):
+                    scaled = Fraction(numerator, 8)
+                    if mode == "rne":
+                        code = round(scaled)
+                    elif mode == "rtz":
+                        code = math.trunc(scaled)
+                    else:
+                        code = math.ceil(scaled) if scaled >= 0 else math.floor(scaled)
+                    with self.subTest(mode=mode, frac_bits=frac_bits, scaled=scaled):
+                        self.assert_rounds_to(expression, scaled / scale, Fraction(code, scale))
+
+    def test_rne_distinguishes_exact_ties_from_arbitrarily_close_values(self):
+        ctx = SpecContext("z3-rounding-ties")
+        x = ctx.real("x")
+        epsilon = Fraction(1, 1 << 100)
+        for frac_bits in (0, 3, 60):
+            scale = 1 << frac_bits
+            expression = ctx.rne(x, frac_bits)
+            for lower in range(-3, 3):
+                tie = Fraction(2 * lower + 1, 2)
+                for offset, code in (
+                    (-epsilon, lower),
+                    (Fraction(0), lower if lower % 2 == 0 else lower + 1),
+                    (epsilon, lower + 1),
+                ):
+                    with self.subTest(frac_bits=frac_bits, lower=lower, offset=offset):
+                        self.assert_rounds_to(
+                            expression, (tie + offset) / scale, Fraction(code, scale)
+                        )
+
+    def test_symbolic_rounding_grid_and_error_bounds(self):
+        ctx = SpecContext("z3-rounding-bounds")
+        x = ctx.real("x")
+        for mode in ("rne", "rtz", "raz"):
+            for frac_bits in (0, 3):
+                with self.subTest(mode=mode, frac_bits=frac_bits):
+                    env = {}
+                    result = getattr(ctx, mode)(x, frac_bits).to_z3(env)
+                    value = x.to_z3(env)
+                    scaled = value * (1 << frac_bits)
+                    code = result * (1 << frac_bits)
+                    if mode == "rne":
+                        valid = z3.And(code - scaled <= z3.RealVal("1/2"),
+                                       scaled - code <= z3.RealVal("1/2"))
+                    elif mode == "rtz":
+                        valid = z3.If(scaled >= 0,
+                                      z3.And(code <= scaled, scaled - code < 1),
+                                      z3.And(code >= scaled, code - scaled < 1))
+                    else:
+                        valid = z3.If(scaled >= 0,
+                                      z3.And(code >= scaled, code - scaled < 1),
+                                      z3.And(code <= scaled, scaled - code < 1))
+                    solver = z3.Solver()
+                    solver.set(timeout=10_000)
+                    solver.add(z3.Not(z3.And(z3.IsInt(code), valid)))
+                    self.assertEqual(solver.check(), z3.unsat)
+
+    def test_nested_rounding_is_not_stripped(self):
+        ctx = SpecContext("z3-nested-rounding")
+        x = ctx.real("x")
+        expression = ctx.rne(ctx.raz(x, 1), 0)
+        self.assert_rounds_to(expression, Fraction(5, 4), 2)
+        self.assert_rounds_to(expression, Fraction(-5, 4), -2)
+        self.assert_rounds_to(ctx.rne(x, 0), Fraction(5, 4), 1)
+
+    def test_validation_accepts_rounded_results_requirements_and_obligations(self):
+        from zolotone.autogen.autogen import get_spec
+        from zolotone.autogen import spec_validation as validation
+
+        for mode in ("rne", "rtz", "raz"):
+            with self.subTest(mode=mode):
+                def spec(x: UQ(2, 2), ctx) -> UQ(1, 2):
+                    ctx.assume(x >= ctx.one())
+                    exact = x ** -ctx.one()
+                    result = getattr(ctx, mode)(exact, 2)
+                    ctx.require(result >= ctx.zero())
+                    error = ctx.real_val(0.125 if mode == "rne" else 0.25)
+                    ctx.check(result >= exact - error)
+                    return result
+
+                current = validation.add_input_ranges(get_spec("rounded-validation", spec))
+                validation._check_spec_reachability(current)
+                validation._warn_about_domain_errors(current)
+                validation._validate_spec_requirements(current)
+                validation._check_spec_obligations(current)
+                validation._check_output_format(current)
+
+    def test_rounded_assumptions_are_translated(self):
+        ctx = SpecContext("z3-rounded-assumptions")
+        x = ctx.real("x")
+        ctx.assume(ctx.rtz(x, 0).eq(ctx.one()))
+        ctx.check((x >= ctx.one()) & (x < ctx.two()))
+        self.assertEqual(z3_check_eq(ctx, timeout_ms=10_000)["status"], "unsat")
+
+    def test_false_rounded_obligations_are_rejected(self):
+        ctx = SpecContext("z3-false-rounded-obligation")
+        x = ctx.real("x")
+        ctx.assume(x.eq(ctx.real_val(1.5)))
+        ctx.check(ctx.rne(x, 0).eq(ctx.one()))
+        self.assertEqual(z3_check_eq(ctx, timeout_ms=10_000)["status"], "sat")
+
+
 class TestPowSpecOp(unittest.TestCase):
     def test_if_constant_fold_prunes_nonliteral_branch(self):
         x = RealVar("x")
@@ -3297,6 +3582,27 @@ class TestSpecContextLearning(unittest.TestCase):
         self.assertEqual(simplified.checks, [p])
 
 class TestContextNormalization(unittest.TestCase):
+    def test_normalize_ctx_preserves_rounding_metadata_when_children_change(self):
+        for mode in ("rne", "rtz", "raz"):
+            for frac_bits in (0, 3):
+                with self.subTest(mode=mode, frac_bits=frac_bits):
+                    ctx = SpecContext("normalize-rounding")
+                    x = ctx.real("x")
+                    rounding = getattr(ctx, mode)
+                    value = rounding(If(~(x < ctx.zero()), x, ctx.zero()), frac_bits)
+                    original = ~(value < ctx.zero())
+                    ctx.assume(original)
+                    ctx.check(original)
+
+                    normalized = normalize_ctx(ctx)
+                    expected_value = rounding(If(x >= ctx.zero(), x, ctx.zero()), frac_bits)
+                    self.assertEqual(normalized.assumes, [expected_value >= ctx.zero()])
+                    self.assertIs(normalized.assumes[0], normalized.checks[0])
+                    self.assertEqual(normalized.checks[0].lhs.mode, value.mode)
+                    self.assertEqual(normalized.checks[0].lhs.frac_bits, frac_bits)
+                    self.assertIs(normalize_ctx(normalized).checks[0], normalized.checks[0])
+                    self.assertIs(ctx.checks[0], original)
+
     def test_normalize_ctx_rewrites_comparisons_inside_boolean_expressions(self):
         ctx = SpecContext("normalize-compound-comparisons")
         x, y = ctx.real("x"), ctx.real("y")
@@ -6861,9 +7167,9 @@ class TestRivalIntegerCodes(unittest.TestCase):
         x = RealVar("x")
         integer_expr = substitute_spec_node(
             expr, x, x * (RealLit(2) ** RealLit(-input_frac))
-        ) * (RealLit(2) ** RealLit(output_frac))
+        )
         return build_integer_machine(
-            integer_expr,
+            Round(integer_expr, RoundingMode.RNE, output_frac),
             input_total_bits=input_bits,
             output_total_bits=output_bits,
         )
@@ -6922,7 +7228,7 @@ class TestRivalIntegerCodes(unittest.TestCase):
     def test_generated_reciprocal_matches_python_and_cpp(self):
         def reciprocal(x: UQ(3, 2), ctx) -> UQ:
             ctx.assume(x >= ctx.one())
-            return x ** ctx.real_val(-1)
+            return ctx.rne(x ** ctx.real_val(-1), frac_bits=2)
 
         node = Autogenerate("integer_code_reciprocal", reciprocal)
         for compile_fn in (jit_compile, nonjit_compile):
@@ -6939,6 +7245,43 @@ class TestRivalIntegerCodes(unittest.TestCase):
 
 
 class TestRivalTranslation(unittest.TestCase):
+    def test_nearest_even_expression_rounds_points_and_ties(self):
+        ctx = SpecContext("rival-nearest-even")
+        x = ctx.real("x")
+        for frac_bits in (0, 2, 60):
+            scale = 1 << frac_bits
+            machine = build_range_machine(ctx.rne(x, frac_bits), ["x"])
+            values = [numerator / 8 for numerator in range(-25, 26)]
+            for lower in range(-3, 3):
+                tie = lower + 0.5
+                values.extend((math.nextafter(tie, -math.inf),
+                               math.nextafter(tie, math.inf)))
+            for scaled in values:
+                with self.subTest(frac_bits=frac_bits, scaled=scaled):
+                    value = scaled / scale
+                    expected = round(scaled) / scale
+                    self.assertEqual(
+                        machine.apply_range([(value, value)]),
+                        (expected, expected),
+                    )
+
+    def test_nearest_even_expression_encloses_rounded_intervals(self):
+        ctx = SpecContext("rival-nearest-even-intervals")
+        x = ctx.real("x")
+        for frac_bits in (0, 2):
+            scale = 1 << frac_bits
+            machine = build_range_machine(ctx.rne(x, frac_bits), ["x"])
+            for lower, upper in (
+                (1.125, 1.375), (1.25, 1.75), (1.5, 2.5),
+                (-1.375, -1.125), (-1.75, -1.25), (-2.5, -1.5),
+                (-0.5, 0.5), (-2.5, 2.5),
+            ):
+                with self.subTest(frac_bits=frac_bits, lower=lower, upper=upper):
+                    self.assertEqual(
+                        machine.apply_range([(lower / scale, upper / scale)]),
+                        (round(lower) / scale, round(upper) / scale),
+                    )
+
     def test_real_expression_translates_to_rival_ir(self):
         x = RealVar("x")
         y = RealVar("y")
@@ -9017,13 +9360,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             patch("zolotone.components.LOSSLESS_COMPONENTS", (unused_component, uq_add)),
         ):
             lowered = spec_lowering.search_lower_spec_to_impl(
-                x + y ** ctx.real_val(-1),
+                x + ctx.rne(y ** ctx.real_val(-1), frac_bits=0),
                 {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
                 UQ,
                 ctx,
             )
         self.assertEqual(lowered.name, "uq_add")
-        self.assertTrue(lowered.args[1].name.startswith("LUT_pow_"))
+        self.assertTrue(lowered.args[1].name.startswith("LUT_rne_"))
 
     def test_lowering_accepts_operation_supplied_as_input(self):
         from zolotone.autogen import spec_lowering
@@ -9120,11 +9463,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             (uq_add, square, _uq_zero_extend),
         ):
             search = spec_lowering._LoweringSearch(
-                (x + ctx.one()) ** ctx.two(), {x: source}, UQ, ctx
+                ctx.rne((x + ctx.one()) ** ctx.two(), frac_bits=0), {x: source}, UQ, ctx
             )
             result = search.run()
 
-        self.assertTrue(result.name.startswith("LUT_pow_"))
+        self.assertTrue(result.name.startswith("LUT_rne_"))
         self.assertEqual(search.result.cost, 100)
         self.assertIs(result.args[0], source)
         self.assertEqual(set(search.candidates[x]), {UQ(2, 0)})
@@ -9156,7 +9499,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             ):
                 source = Var("x", UQ(input_bits, 0))
                 search = spec_lowering._LoweringSearch(
-                    x ** ctx.two(), {x: source}, UQ, ctx
+                    ctx.rne(x ** ctx.two(), frac_bits=0) if input_bits == 2 else x ** ctx.two(),
+                    {x: source}, UQ, ctx
                 )
                 result = search.run()
                 self.assertEqual(search.result.cost, expected_cost)
@@ -9196,7 +9540,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         ctx = SpecContext("shared-lut")
         x, y = ctx.real("x"), ctx.real("y")
-        squared = x ** ctx.two()
+        squared = ctx.rne(x ** ctx.two(), frac_bits=0)
         source = Var("x", UQ(2, 0))
         other = Var("y", UQ(2, 0))
         with patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add,)):
@@ -9285,7 +9629,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ctx = SpecContext("inferred-lut-format")
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
-        expression = x ** ctx.two()
+        expression = ctx.rne(x ** ctx.two(), frac_bits=0)
         with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
             search = spec_lowering._LoweringSearch(
                 expression, {x: source}, UQ(2, 0), ctx
@@ -9311,7 +9655,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     source = Var("x", input_dtype)
                     with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
                         result = spec_lowering.search_lower_spec_to_impl(
-                            x ** ctx.real_val(-1), {x: source}, output_dtype, ctx
+                            ctx.rne(x ** ctx.real_val(-1), frac_bits=output_frac),
+                            {x: source}, output_dtype, ctx
                         )
                     self.assertEqual(result.dtype, output_dtype)
                     for code in range(1 << input_frac, (3 << input_frac) + 1):
@@ -9325,7 +9670,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ctx = SpecContext("extended-lut-format")
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
-        expression = x ** ctx.two()
+        expression = ctx.rne(x ** ctx.two(), frac_bits=0)
         with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
             search = spec_lowering._LoweringSearch(
                 expression, {x: source}, UQ(5, 0), ctx
@@ -9334,7 +9679,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(result.dtype, UQ(5, 0))
         self.assertEqual(result.name, "uq_resize")
         self.assertEqual(result.args[0].dtype, UQ(4, 0))
-        self.assertTrue(result.args[0].name.startswith("LUT_pow_"))
+        self.assertTrue(result.args[0].name.startswith("LUT_rne_"))
         self.assertEqual(search.result.cost, 101)
         source.load_value(UQ(2, 0).from_bits(3))
         self.assertEqual(result.evaluate().to_python(), 9)
@@ -9388,11 +9733,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             patch.object(spec_lowering, "_candidate_output_range_fits", return_value=True),
         ):
             inputs = {x: Var("x", UQ(2, 0))}
-            powered = spec_lowering.search_lower_spec_to_impl(power, inputs, UQ, ctx)
+            powered = spec_lowering.search_lower_spec_to_impl(ctx.rne(power, frac_bits=0), inputs, UQ, ctx)
             lowered = spec_lowering.search_lower_spec_to_impl(
                 composite, inputs, UQ, ctx,
             )
-        self.assertTrue(powered.name.startswith("LUT_pow_"))
+        self.assertTrue(powered.name.startswith("LUT_rne_"))
         self.assertEqual(lowered.name, "composite")
 
     def test_lowering_reuses_spec_matches_with_unhashable_component(self):
@@ -10982,11 +11327,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
     def test_autogenerate_rejects_other_overflowing_component_outputs(self):
         def spec(x: Q(3, 0), ctx) -> Q:
-            return -x
+            return ctx.rne(-x, frac_bits=0)
 
         generated = Autogenerate("generated_widened_negation", spec)
 
-        self.assertTrue(generated.inner_tree.name.startswith("LUT_neg_"))
+        self.assertTrue(generated.inner_tree.name.startswith("LUT_rne_"))
         self.assertEqual(generated.inner_tree.dtype, Q(4, 0))
         self.assertIs(generated.inner_tree.args[0], generated.inner_args[0])
         for code in range(8):
@@ -11025,10 +11370,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
     def test_autogenerate_creates_missing_real_operation(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
-            return x ** ctx.two()
+            return ctx.rne(x ** ctx.two(), frac_bits=0)
 
         generated = Autogenerate("generated_pow", spec)
-        self.assertTrue(generated.inner_tree.name.startswith("LUT_pow_"))
+        self.assertTrue(generated.inner_tree.name.startswith("LUT_rne_"))
 
     def test_complete_exact_and_family_contracts_are_accepted(self):
         def exact_spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
@@ -12022,6 +12367,27 @@ class TestSolverApis(unittest.TestCase):
         self.assertEqual(report["tool"], "dreal")
         self.assertEqual(report["status"], "unsat")
 
+    def test_dreal_rejects_rounding_in_assumptions_and_checks(self):
+        for mode in ("rne", "rtz", "raz"):
+            for location in ("assumes", "checks"):
+                with self.subTest(mode=mode, location=location):
+                    ctx = SpecContext("dreal-rounding")
+                    x = ctx.real("x")
+                    rounded = getattr(ctx, mode)(x + ctx.one(), 2)
+                    getattr(ctx, location).append(rounded >= ctx.zero())
+                    if not ctx.checks:
+                        ctx.check(ctx.true())
+
+                    with self.assertRaisesRegex(NotImplementedError, "dReal does not support"):
+                        dreal_check_eq(ctx, precision=0.001)
+
+    def test_dreal_schedule_propagates_unsupported_rounding(self):
+        ctx = SpecContext("dreal-rounding-schedule")
+        ctx.check(ctx.rne(ctx.real("x"), 2) >= ctx.zero())
+
+        with self.assertRaisesRegex(NotImplementedError, "dReal does not support"):
+            solver_engine.check_equivalence(ctx, schedule=[{"tool": "dreal"}])
+
 
 class TestSignSpecs(unittest.TestCase):
     def test_bool_uq_converters_preserve_one_bit_encoding(self):
@@ -12221,7 +12587,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
         ctx.assume(x >= ctx.one())
         ctx.assume(x <= ctx.real_val(3))
-        expression = (x ** ctx.real_val(0.5)) ** ctx.real_val(-1)
+        expression = ctx.rne((x ** ctx.real_val(0.5)) ** ctx.real_val(-1), frac_bits=2)
         source = Var("x", UQ(2, 0))
         with patch.object(
             spec_lowering, "_build_missing_primitive",
@@ -12243,12 +12609,12 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx = SpecContext("fused-lut-arithmetic")
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
-        expression = ((x + ctx.one()) ** ctx.real_val(-1)) * ctx.two()
+        expression = ctx.rne(((x + ctx.one()) ** ctx.real_val(-1)) * ctx.two(), frac_bits=3)
         search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(2, 3), ctx)
         result = search.run()
 
         self.assertEqual(search.result.cost, 100)
-        self.assertTrue(result.name.startswith("LUT_mul_"))
+        self.assertTrue(result.name.startswith("LUT_rne_"))
         self.assertIs(result.args[0], source)
         for value, expected in ((0, 2), (1, 1), (2, 0.625), (3, 0.5)):
             source.load_value(UQ(2, 0).from_bits(value))
@@ -12258,19 +12624,26 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         from zolotone.autogen import spec_lowering
         from zolotone.components import uq_add, uq_mul
 
+        def rounded_add_spec(lhs: UQ, rhs: UQ, ctx) -> UQ:
+            return ctx.rne(lhs + rhs, frac_bits=0)
+
+        @Composite(name="rounded_integer_add", spec=rounded_add_spec)
+        def rounded_add(lhs, rhs):
+            return uq_add(lhs, rhs)
+
         ctx = SpecContext("components-beat-fused-lut")
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
         # Addition precedes multiplication, so finding the exact result needs
         # another search iteration after the whole-expression LUT is available.
-        with patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add, uq_mul)):
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (rounded_add, uq_mul)):
             search = spec_lowering._LoweringSearch(
-                x + x * x, {x: source}, UQ, ctx
+                ctx.rne(x + x * x, frac_bits=0), {x: source}, UQ, ctx
             )
             result = search.run()
 
         self.assertEqual(search.result.cost, 2)
-        self.assertEqual(result.name, "uq_add")
+        self.assertEqual(result.name, "rounded_integer_add")
         self.assertEqual(result.args[1].name, "uq_mul")
         for value in range(4):
             source.load_value(UQ(2, 0).from_bits(value))
@@ -12286,7 +12659,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         materialized = Var("shifted", UQ(2, 0))
         with patch("zolotone.components.LOSSLESS_COMPONENTS", ()):
             search = spec_lowering._LoweringSearch(
-                shifted ** ctx.real_val(-1),
+                ctx.rne(shifted ** ctx.real_val(-1), frac_bits=2),
                 {x: Var("x", UQ(13, 0)), shifted: materialized},
                 UQ(1, 2), ctx,
             )
@@ -12314,7 +12687,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
 
         with patch.object(missing, "build_integer_machine", side_effect=track_machine):
             primitive = missing._build_missing_primitive(
-                x ** ctx.two(), x, source, ctx, output_dtype=UQ(4, 0)
+                ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=UQ(4, 0)
             )
         self.assertEqual(evaluator.apply.call_args_list, [call(1), call(2), call(3)])
         for value in (1, 2, 3):
@@ -12331,7 +12704,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         with patch.object(missing, "build_integer_machine", return_value=evaluator):
             with self.assertRaisesRegex(ZolotoneError, "Could not evaluate generated component"):
                 missing._build_missing_primitive(
-                    x ** ctx.two(), x, Var("x", UQ(2, 0)), ctx,
+                    ctx.rne(x ** ctx.two(), frac_bits=0), x, Var("x", UQ(2, 0)), ctx,
                     output_dtype=UQ(4, 0),
                 )
         evaluator.apply.assert_called_once_with(0)
@@ -12343,9 +12716,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
         with self.assertRaises(TypeError):
-            _build_missing_primitive(x ** ctx.two(), x, source, ctx)
+            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx)
         with self.assertRaisesRegex(MissingError, "output requires a Q or UQ"):
-            _build_missing_primitive(x ** ctx.two(), x, source, ctx, output_dtype=None)
+            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=None)
 
     def test_missing_lookup_rejects_output_overflow(self):
         from zolotone.autogen.missing import _build_missing_primitive
@@ -12362,7 +12735,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             with self.subTest(expression=expression, output_dtype=output_dtype):
                 with self.assertRaisesRegex(ZolotoneError, "does not fit"):
                     _build_missing_primitive(
-                        expression, x, source, ctx, output_dtype=output_dtype
+                        ctx.rne(expression, frac_bits=0), x, source, ctx, output_dtype=output_dtype
                     )
 
     def test_lossy_lookup_rounds_to_even(self):
@@ -12373,11 +12746,11 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
         rounded = _build_missing_primitive(
-            x * ctx.real_val(0.5), x, source, ctx, output_dtype=UQ(2, 0)
+            ctx.rne(x * ctx.real_val(0.5), frac_bits=0), x, source, ctx, output_dtype=UQ(2, 0)
         )
         generated_spec = get_spec(rounded.name, rounded.spec)
         self.assertTrue(generated_spec.spec_ast.identical(
-            generated_spec.spec_inputs[0] * RealLit(0.5)
+            ctx.rne(generated_spec.spec_inputs[0] * RealLit(0.5), frac_bits=0)
         ))
         source.load_value(UQ(2, 0).from_bits(1))
         self.assertEqual(rounded.evaluate().to_python(), 0)
@@ -12395,7 +12768,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume((y >= ctx.zero()) & (y <= ctx.real_val(3)))
         lhs, rhs = Var("x", UQ(2, 0)), Var("y", UQ(2, 0))
         primitive = _build_missing_primitive(
-            (x + y) ** ctx.two(),
+            ctx.rne((x + y) ** ctx.two(), frac_bits=0),
             x + y,
             uq_add(lhs, rhs),
             ctx,
@@ -12407,7 +12780,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         self.assertEqual(generated_spec.annotations["x"], UQ(3, 0))
         self.assertEqual(generated_spec.return_annotation, UQ(6, 0))
         self.assertTrue(generated_spec.spec_ast.identical(
-            generated_spec.spec_inputs[0] ** RealLit(2)
+            ctx.rne(generated_spec.spec_inputs[0] ** RealLit(2), frac_bits=0)
         ))
         lhs.load_value(UQ(2, 0).from_int(2))
         rhs.load_value(UQ(2, 0).from_int(3))
@@ -12421,7 +12794,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
         source = Var("x", Q(2, 1))
         primitive = _build_missing_primitive(
-            x ** ctx.real_val(-1), x, source, ctx, output_dtype=Q(3, 0)
+            ctx.rne(x ** ctx.real_val(-1), frac_bits=0), x, source, ctx, output_dtype=Q(3, 0)
         )
         for value in (-0.5, 0.5):
             with self.subTest(value=value):
@@ -12437,7 +12810,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x.ne(ctx.real_val(Fraction(1, 4))))
         ctx.assume(x.ne(ctx.one()))
         primitive = _build_missing_primitive(
-            x ** ctx.two(), x, Var("x", UQ(2, 2)), ctx,
+            ctx.rne(x ** ctx.two(), frac_bits=2), x, Var("x", UQ(2, 2)), ctx,
             output_dtype=UQ(4, 2),
         )
         generated_spec = get_spec(primitive.name, primitive.spec)
@@ -12456,10 +12829,10 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
     def test_disjoint_input_skips_undefined_lookup_codes(self):
         def reciprocal(x: Q(2, 1), ctx) -> Q:
             ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
-            return x ** ctx.real_val(-1)
+            return ctx.rne(x ** ctx.real_val(-1), frac_bits=1)
 
         result = Autogenerate("disjoint_reciprocal", reciprocal)
-        self.assertTrue(result.inner_tree.name.startswith("LUT_pow_"))
+        self.assertTrue(result.inner_tree.name.startswith("LUT_rne_"))
         for value in (-0.5, 0.5):
             with self.subTest(value=value):
                 result.args[0].load_value(Q(2, 1).from_float(value))
@@ -12471,7 +12844,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
 
         def reciprocal(x: UQ(3, 2), ctx) -> UQ:
             ctx.assume(x >= ctx.real_val(1))
-            return x ** ctx.real_val(-1)
+            return ctx.rne(x ** ctx.real_val(-1), frac_bits=2)
 
         result = Autogenerate("reciprocal", reciprocal)
         primitive = result.inner_tree
@@ -12480,7 +12853,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         self.assertEqual(generated_spec.annotations["x"], UQ(3, 2))
         self.assertEqual(generated_spec.return_annotation, UQ(1, 2))
         self.assertTrue(generated_spec.spec_ast.identical(
-            generated_spec.spec_inputs[0] ** RealLit(-1)
+            SpecContext("expected").rne(generated_spec.spec_inputs[0] ** RealLit(-1), frac_bits=2)
         ))
         assumptions = " ".join(map(str, generated_spec.spec_ctx.assumes))
         self.assertIn("(real(x_0) >= 1)", assumptions)
@@ -12495,7 +12868,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         from zolotone.autogen.autogen import get_spec
 
         def nested_reciprocal(x: UQ(2, 2), ctx) -> UQ:
-            return (x + ctx.one()) ** ctx.real_val(-1)
+            return ctx.rne((x + ctx.one()) ** ctx.real_val(-1), frac_bits=2)
 
         result = Autogenerate("nested_reciprocal", nested_reciprocal)
         primitive = result.inner_tree
@@ -12503,17 +12876,17 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
 
         self.assertEqual(generated_spec.annotations["x"], UQ(2, 2))
         self.assertTrue(generated_spec.spec_ast.identical(
-            (generated_spec.spec_inputs[0] + RealLit(1)) ** RealLit(-1)
+            SpecContext("expected").rne((generated_spec.spec_inputs[0] + RealLit(1)) ** RealLit(-1), frac_bits=2)
         ))
         self.assertIs(primitive.args[0], result.inner_args[0])
 
     def test_reciprocal_absorbs_multiplication_into_cheaper_lut(self):
         def reciprocal_of_product(x: UQ(2, 2), ctx) -> UQ:
             ctx.assume(x >= ctx.real_val(0.5))
-            return (ctx.two() * x) ** ctx.real_val(-1)
+            return ctx.rne((ctx.two() * x) ** ctx.real_val(-1), frac_bits=2)
 
         result = Autogenerate("reciprocal_of_product", reciprocal_of_product)
-        self.assertTrue(result.inner_tree.name.startswith("LUT_pow_"))
+        self.assertTrue(result.inner_tree.name.startswith("LUT_rne_"))
         self.assertIs(result.inner_tree.args[0], result.inner_args[0])
 
     def test_structural_match_without_compatible_dtypes_is_a_typed_gap(self):
@@ -12531,9 +12904,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         incompatible._spec_fn = lambda lhs, rhs, component_ctx: lhs ** rhs
         with patch("zolotone.components.LOSSLESS_COMPONENTS", (incompatible,)):
             result = spec_lowering.search_lower_spec_to_impl(
-                x ** ctx.real_val(-1), {x: Var("x", UQ(2, 0))}, UQ, ctx
+                ctx.rne(x ** ctx.real_val(-1), frac_bits=0), {x: Var("x", UQ(2, 0))}, UQ, ctx
             )
-        self.assertTrue(result.name.startswith("LUT_pow_"))
+        self.assertTrue(result.name.startswith("LUT_rne_"))
 
     def test_failed_known_component_construction_or_range_uses_typed_hole(self):
         from zolotone.autogen import spec_lowering
@@ -12559,9 +12932,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
                 patch("zolotone.components.LOSSLESS_COMPONENTS", (component,)),
             ):
                 result = spec_lowering.search_lower_spec_to_impl(
-                    x ** ctx.two(), {x: Var("x", UQ(2, 0))}, UQ, ctx
+                    ctx.rne(x ** ctx.two(), frac_bits=0), {x: Var("x", UQ(2, 0))}, UQ, ctx
                 )
-                self.assertTrue(result.name.startswith("LUT_pow_"))
+                self.assertTrue(result.name.startswith("LUT_rne_"))
                 self.assertEqual(result.dtype, UQ(4, 0))
 
     def test_generates_first_typed_frontier_then_uses_known_composition(self):
@@ -12574,7 +12947,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(y <= ctx.real_val(3))
 
         def finish_with_reciprocal(lhs, rhs, component_ctx):
-            return lhs + rhs ** component_ctx.real_val(-1)
+            return lhs + component_ctx.rne(rhs ** component_ctx.real_val(-1), frac_bits=0)
 
         def finish_component(*args):
             return Var("known_result", UQ(5, 0))
@@ -12589,7 +12962,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             ) as create,
         ):
             result = spec_lowering.search_lower_spec_to_impl(
-                (x ** ctx.two()) + (y ** ctx.real_val(-1)),
+                ctx.rne(x ** ctx.two(), frac_bits=0) + ctx.rne(y ** ctx.real_val(-1), frac_bits=0),
                 {x: Var("x", UQ(2, 0)), y: Var("y", UQ(2, 0))},
                 UQ,
                 ctx,
@@ -12601,20 +12974,12 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         self.assertTrue(any("value=-1" in expression for expression in generated))
         self.assertTrue(any("value=2" in expression for expression in generated))
 
-    def test_autogenerate_uses_multiple_runtime_components(self):
+    def test_autogenerate_rejects_independently_rounded_runtime_components(self):
         def two_missing(x: UQ(2, 0), y: UQ(2, 0), ctx) -> UQ:
-            return (x ** ctx.two()) + ((y + ctx.one()) ** ctx.real_val(-1))
+            return ctx.rne(x ** ctx.two(), frac_bits=0) + ctx.rne((y + ctx.one()) ** ctx.real_val(-1), frac_bits=0)
 
-        result = Autogenerate("two_missing", two_missing)
-
-        self.assertEqual(result.inner_tree.name, "uq_add")
-        self.assertEqual(result.dtype, UQ(5, 0))
-        self.assertTrue(
-            all(
-                argument.name.startswith("LUT_pow_")
-                for argument in result.inner_tree.args
-            )
-        )
+        with self.assertRaisesRegex(NotImplementedError, "root operation"):
+            Autogenerate("two_missing", two_missing)
 
     def test_lowering_generates_component_from_typed_input(self):
         from zolotone.autogen.spec_lowering import search_lower_spec_to_impl
@@ -12623,18 +12988,18 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
 
         node = search_lower_spec_to_impl(
-            x ** ctx.two(),
+            ctx.rne(x ** ctx.two(), frac_bits=0),
             {x: Var("x", UQ(2, 0))},
             UQ,
             ctx,
         )
 
-        self.assertTrue(node.name.startswith("LUT_pow_"))
+        self.assertTrue(node.name.startswith("LUT_rne_"))
         self.assertEqual(node.dtype, UQ(4, 0))
 
     def test_unbounded_reciprocal_creates_no_component(self):
         def reciprocal(x: UQ(3, 2), ctx) -> UQ:
-            return x ** ctx.real_val(-1)
+            return ctx.rne(x ** ctx.real_val(-1), frac_bits=2)
 
         with self.assertRaisesRegex(ZolotoneError, "output range"):
             Autogenerate("unbounded", reciprocal)
@@ -12642,7 +13007,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
     def test_runtime_component_is_created_only_on_lowering_failure(self):
         def reciprocal(x: UQ(3, 2), ctx) -> UQ:
             ctx.assume(x >= ctx.real_val(1))
-            return x ** ctx.real_val(-1)
+            return ctx.rne(x ** ctx.real_val(-1), frac_bits=2)
 
         def identity(x: UQ(3, 2), ctx) -> UQ:
             return x

@@ -264,13 +264,13 @@ def bit_precise_infeasible(x: UQ(4, 0), ctx) -> UQ(4, 0):
 def tightened_bound_avoids_domain_error(x: UQ(1, 0), ctx) -> UQ(3, 0):
     ctx.assume(x >= ctx.real_val(0.5))
     denominator = x - ctx.real_val(0.75)
-    return denominator ** ctx.real_val(-1)
+    return ctx.rne(denominator ** ctx.real_val(-1), frac_bits=0)
 
 
 # Domain error
-@Test(ZolotoneError)
+@Test(NotImplementedError)
 def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
-    return x ** (ctx.real_val(-1)) + ctx.one()
+    return ctx.rne(x ** ctx.real_val(-1), frac_bits=2) + ctx.one()
 
 
 # # Domain error

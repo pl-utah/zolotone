@@ -1,5 +1,16 @@
 ### Type notation
 
+Specification rounding uses `ctx.rne(value, frac_bits=F)`,
+`ctx.rtz(value, frac_bits=F)`, or `ctx.raz(value, frac_bits=F)` and returns a
+`RealExpr` on the `2**-F` grid. Precision is required. The modes mean nearest
+with ties to even, toward zero, and away from zero respectively. These are spec
+nodes, not hardware components; explicit rounding nodes enable LUT synthesis.
+Z3 supports all three modes exactly, including nested rounding and negative
+ties. Autogeneration only allows rounding at the result root, with no nested
+rounding. Rounding in assumptions, checks, and requirements must structurally
+match that rounded result, including its mode and precision. Translation to
+egglog and dReal remains unsupported.
+
 - `Q<I,F>`: signed fixed-point with `I` integer and `F` fractional bits; `UQ<I,F>` unsigned.
 - `Float16`, `BFloat16`, `Float32`: IEEE754 formats; `E4M3FN` is the
   finite-only 8-bit `S.EEEE.MMM` format (bias 7, signed zeros, subnormals,

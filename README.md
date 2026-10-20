@@ -119,19 +119,39 @@ Zolotone connects golden specifications to typed implementation models:
    specification produce equivalent results for the same symbolic inputs.
 5. Call `check_spec()` to compare the implementation with its golden model.
 
-Lowering first searches for dtype-compatible, range-valid implementations of
-specification expressions using known components. If a real expression still
-needs a component, lowering creates a typed `Primitive` in memory at the first
-provable typed frontier, then searches known components again. The generated
-node contains an in-memory Rival lookup table with at most 4,096 valid input
-encodings. Its provisional implementation may be lossy and is not registered
-as a lossless component. This first pass supports one typed reachable
-fixed-point input plus literals.
+Lowering searches for dtype-compatible, range-valid implementations using known
+components. LUT synthesis requires an explicit rounding operation in the spec:
 
-A LUT for the final result uses the fractional width of a concrete `Q` or `UQ`
-return annotation, rounding directly to that precision. Its sign and integer
-width are still inferred from the result range. Intermediate LUTs and results
-with a family annotation (`Q` or `UQ`) use the input's fractional width.
+```python
+def reciprocal(x: UQ(3, 2), ctx) -> UQ:
+    ctx.assume(x >= ctx.one())
+    return ctx.rne(x ** ctx.real_val(-1), frac_bits=4)
+```
+
+`ctx.rne`, `ctx.rtz`, and `ctx.raz` return real-valued spec expressions rounded
+to multiples of `2**-frac_bits`. The precision is mandatory. RNE rounds to
+nearest with ties to even, RTZ toward zero, and RAZ away from zero. Integer
+width and signedness are inferred from the rounded range; rounding does not
+saturate or wrap. An output descriptor can widen the result exactly, but cannot
+silently discard its fractional precision.
+
+An unrounded missing operation such as `x ** -1` is rejected. Existing exact
+components can still implement ordinary expressions. A generated `Primitive`
+contains a Rival lookup table with at most 4,096 input encodings and implements
+the explicit rounded spec exactly. Search considers single materialized input
+boundaries across the whole rounded expression and chooses by total cost.
+Independent inputs must first be combined by existing components.
+
+Rounding placement is significant: wrapping a complete reciprocal-of-square-root
+expression in one `ctx.rne(..., frac_bits=2)` requests final rounding only.
+Wrapping the square root in another rounding node requests intermediate
+rounding too; autogeneration currently rejects such nested rounding with
+`NotImplementedError`, before simplification. Rounding must be the root operation
+of the result. Any rounding subtree in assumptions, checks, or requirements must
+structurally match the complete rounded result, including its mode and precision.
+
+Constant folding currently uses Python arithmetic and may lose precision before
+explicit rounding. Exact constant folding is deferred.
 
 Search uses components' natural output formats. Once a candidate implements the
 complete result expression, lowering widens it directly to the requested format
@@ -294,13 +314,18 @@ ignored by Git.
 
 ## Rival3 bridge
 
-Generated lookup tables compile the integer-code expression
-`e(n * 2**(-F_input)) * 2**F_output`, where `n` is the exact input code
-(a signed integer for `Q`). Rival still evaluates real intervals internally;
-it rounds once to the nearest integer output code, with ties to even.
-`F_output` is the primitive's actual output fractional width, so there is no
-intermediate rounding at a shared maximum precision. This transformation is
-local to table construction and does not change the primitive's exact-real spec.
+Generated lookup tables normalize integer input codes as `n * 2**(-F_input)`
+(signed for `Q`). For a final `Round(e, mode, F)`, Rival evaluates `e * 2**F`
+and applies the specified mode in output discretization and integer extraction.
+It refines the real interval until both endpoints map to the same output code.
+Any inner rounding nodes remain part of `e`, preserving intermediate rounding.
+Widening to a larger output fractional field uses an exact integer shift.
+
+The `build_integer_machine` API follows the same rule: a final rounding node
+selects its mode and output-code scale. Without a final rounding node, the
+expression must already produce a unique exact integer. There is no implicit
+rounding default or exactness flag. Undefined reachable results and output
+overflow are errors.
 
 `zolotone.rival` translates specification expressions into Rival3 for
 interval-based feasibility checks. `make install` builds the PyO3 extension;
