@@ -301,6 +301,9 @@ class SpecContext:
     def raz(self, value: RealExpr, frac_bits: int | None = None) -> Round:
         return Round(value, RoundingMode.RAZ, frac_bits)
 
+    def fr(self, value: RealExpr, frac_bits: int | None = None) -> Round:
+        return Round(value, RoundingMode.FR, frac_bits)
+
     def zero(self) -> RealLit:
         return self.real_val(0)
 

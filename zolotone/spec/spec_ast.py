@@ -446,6 +446,7 @@ class RoundingMode(Enum):
     RNE = "RNE"
     RTZ = "RTZ"
     RAZ = "RAZ"
+    FR = "FR"
 
 
 @dataclass(frozen=True)
@@ -471,6 +472,8 @@ class Round(RealExpr):
     def to_z3(self, env):
         if self.frac_bits is None:
             raise MissingError("Rounding precision is unresolved; provide frac_bits explicitly")
+        if self.mode is RoundingMode.FR:
+            raise NotImplementedError("Z3 lowering of faithful rounding is not implemented")
         scale = 1 << self.frac_bits
         scaled = self.value.to_z3(env) * scale
         # Z3's ToInt is floor, including for negative reals.
@@ -497,7 +500,8 @@ class Round(RealExpr):
         raise NotImplementedError("dReal does not support exact fixed-point rounding")
 
     def fold(self):
-        if self.frac_bits is None:
+        if self.frac_bits is None or self.mode is RoundingMode.FR:
+            # Faithful rounding does not specify one result to fold to.
             return lambda value: None
         def quantize(value):
             scaled = value * (1 << self.frac_bits)
