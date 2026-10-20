@@ -2,7 +2,7 @@ from dataclasses import dataclass, replace
 import inspect
 import typing as tp
 
-from ..spec.spec_ast import Round, SpecNode, children
+from ..spec.spec_ast import Round, SpecNode, children, identical_nodes
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
 from ..ast.nodes import _build_spec_contract, _SpecContract
@@ -120,25 +120,36 @@ def get_spec(
     )
 
 
-def _reject_nested_roundings(spec: Spec) -> None:
-    """Reject rounding inside another rounding, including in spec conditions."""
-    def visit(node: SpecNode, inside_rounding: bool = False) -> None:
-        if isinstance(node, Round):
-            if inside_rounding:
-                raise NotImplementedError(
-                    "Nested rounding is not supported by autogeneration"
-                )
-            inside_rounding = True
+def _reject_nonimplemented_roundings(spec: Spec) -> None:
+    """Allow only result-root rounding and identical rounding in conditions."""
+    def visit(
+        node: SpecNode, in_result: bool, inside_rounding: bool = False
+    ) -> None:
+        is_rounding = isinstance(node, Round)
+        if is_rounding and inside_rounding:
+            raise NotImplementedError(
+                "Nested rounding is not supported by autogeneration"
+            )
         for child in children(node):
-            visit(child, inside_rounding)
+            visit(child, in_result=in_result, inside_rounding=inside_rounding or is_rounding)
+        if is_rounding:
+            if in_result and node is not spec.spec_ast:
+                raise NotImplementedError(
+                    "Rounding must be the root operation of the specification result"
+                )
+            if not in_result and not identical_nodes(node, spec.spec_ast):
+                raise NotImplementedError(
+                    "Rounding in assumptions, checks, and requirements must match "
+                    "the specification result's rounding subtree"
+                )
 
+    visit(spec.spec_ast, in_result=True)
     for root in (
-        spec.spec_ast,
         *spec.spec_ctx.assumes,
         *spec.spec_ctx.checks,
         *spec.spec_ctx.requirements,
     ):
-        visit(root)
+        visit(root, in_result=False)
 
 
 def Autogenerate(
@@ -158,7 +169,7 @@ def Autogenerate(
     current_spec = add_input_ranges(current_spec)
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
-    _reject_nested_roundings(current_spec)
+    _reject_nonimplemented_roundings(current_spec)
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 
