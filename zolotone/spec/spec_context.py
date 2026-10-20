@@ -292,6 +292,15 @@ class SpecContext:
     def real_val(self, value: int | float):
         return RealLit(value=value)
 
+    def rne(self, value: RealExpr, frac_bits: int) -> Round:
+        return Round(value, RoundingMode.RNE, frac_bits)
+
+    def rtz(self, value: RealExpr, frac_bits: int) -> Round:
+        return Round(value, RoundingMode.RTZ, frac_bits)
+
+    def raz(self, value: RealExpr, frac_bits: int) -> Round:
+        return Round(value, RoundingMode.RAZ, frac_bits)
+
     def zero(self) -> RealLit:
         return self.real_val(0)
 

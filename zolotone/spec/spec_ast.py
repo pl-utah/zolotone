@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields, is_dataclass, replace
 from fractions import Fraction
+from enum import Enum
 import math
 import sys
 from typing import Any
@@ -38,7 +39,7 @@ class SpecNode:
         rebuilt = (
             self
             if all(old is new for old, new in zip(args, folded_args))
-            else type(self)(*folded_args)
+            else rebuild_spec_node(self, folded_args)
         )
         return _fold_node_with_folded_args(rebuilt, folded_args)
     
@@ -438,6 +439,52 @@ class BoolLit(BoolExpr):
     
     def __str__(self):
         return "true" if self.value else "false"
+
+
+class RoundingMode(Enum):
+    RNE = "RNE"
+    RTZ = "RTZ"
+    RAZ = "RAZ"
+
+
+@dataclass(frozen=True)
+class Round(RealExpr):
+    value: RealExpr
+    mode: RoundingMode
+    frac_bits: int
+
+    def __post_init__(self):
+        RealExpr._coerce_real_expr(self.value)
+        if not isinstance(self.mode, RoundingMode):
+            raise TypeError("Round mode must be a RoundingMode")
+        if type(self.frac_bits) is not int:
+            raise TypeError("frac_bits must be an integer")
+        if self.frac_bits < 0:
+            raise ValueError("frac_bits must be non-negative")
+
+    def to_egglog(self):
+        raise NotImplementedError("egglog does not support explicit fixed-point rounding")
+
+    def to_z3(self, env):
+        raise NotImplementedError("Z3 translation does not support exact fixed-point rounding")
+
+    def to_dreal(self, env):
+        raise NotImplementedError("dReal does not support exact fixed-point rounding")
+
+    def fold(self):
+        def quantize(value):
+            scaled = value * (1 << self.frac_bits)
+            if self.mode is RoundingMode.RNE:
+                code = round(scaled)
+            elif self.mode is RoundingMode.RTZ:
+                code = int(scaled)
+            else:
+                code = math.ceil(scaled) if scaled >= 0 else math.floor(scaled)
+            return code if self.frac_bits == 0 else code / (1 << self.frac_bits)
+        return quantize
+
+    def __str__(self):
+        return f"{self.mode.value}({self.value}, frac_bits={self.frac_bits})"
 
 
 @dataclass(frozen=True)
@@ -1152,7 +1199,7 @@ def substitute_spec_node(
     return (
         node
         if all(old is new for old, new in zip(args, substituted_args))
-        else type(node)(*substituted_args)
+        else rebuild_spec_node(node, substituted_args)
     )
 
 
@@ -1181,7 +1228,7 @@ def substitute_literals(
     rebuilt = (
         node
         if all(old is new for old, new in zip(args, substituted_args))
-        else type(node)(*substituted_args)
+        else rebuild_spec_node(node, substituted_args)
     )
     # The recursive calls already folded every child. Folding only this node
     # avoids revisiting the full subtree at each parent of a deep expression.
@@ -1413,6 +1460,13 @@ def children(node: SpecNode) -> tuple[SpecNode, ...]:
         for field in fields(node)
         if isinstance(value := getattr(node, field.name), SpecNode)
     )
+
+
+def rebuild_spec_node(node: SpecNode, new_children: tuple[SpecNode, ...]) -> SpecNode:
+    """Replace expression children while preserving non-expression metadata."""
+    child_fields = [field.name for field in fields(node)
+                    if isinstance(getattr(node, field.name), SpecNode)]
+    return replace(node, **dict(zip(child_fields, new_children, strict=True)))
 
 
 def variables(node: SpecNode) -> set[RealVar | BoolVar]:
