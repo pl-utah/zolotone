@@ -2,7 +2,7 @@ from dataclasses import dataclass, replace
 import inspect
 import typing as tp
 
-from ..spec.spec_ast import SpecNode
+from ..spec.spec_ast import Round, SpecNode, children
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
 from ..ast.nodes import _build_spec_contract, _SpecContract
@@ -120,6 +120,27 @@ def get_spec(
     )
 
 
+def _reject_nested_roundings(spec: Spec) -> None:
+    """Reject rounding inside another rounding, including in spec conditions."""
+    def visit(node: SpecNode, inside_rounding: bool = False) -> None:
+        if isinstance(node, Round):
+            if inside_rounding:
+                raise NotImplementedError(
+                    "Nested rounding is not supported by autogeneration"
+                )
+            inside_rounding = True
+        for child in children(node):
+            visit(child, inside_rounding)
+
+    for root in (
+        spec.spec_ast,
+        *spec.spec_ctx.assumes,
+        *spec.spec_ctx.checks,
+        *spec.spec_ctx.requirements,
+    ):
+        visit(root)
+
+
 def Autogenerate(
     name: str,
     spec: tp.Callable[..., tp.Any],
@@ -137,6 +158,7 @@ def Autogenerate(
     current_spec = add_input_ranges(current_spec)
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
+    _reject_nested_roundings(current_spec)
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 
