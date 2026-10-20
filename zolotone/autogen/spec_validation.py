@@ -603,7 +603,22 @@ def _validate_spec_shape(
 
 
 def _validate_rounding_precision(spec: Spec) -> None:
-    """Reject an output contract that would narrow explicit root rounding."""
+    """Require resolved precision everywhere and reject narrowing root rounding."""
+    pending = [
+        spec.spec_ast,
+        *spec.spec_ctx.assumes,
+        *spec.spec_ctx.checks,
+        *spec.spec_ctx.requirements,
+    ]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Round) and node.frac_bits is None:
+            raise MissingError(
+                "Cannot infer rounding precision for non-root rounding; "
+                "provide frac_bits explicitly"
+            )
+        pending.extend(children(node))
+
     if (
         isinstance(spec.spec_ast, Round)
         and isinstance(spec.return_annotation, (Q, UQ))
