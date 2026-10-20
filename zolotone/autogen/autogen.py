@@ -120,7 +120,7 @@ def get_spec(
     )
 
 
-def _reject_nonimplemented_roundings(spec: Spec) -> None:
+def _reject_notimplemented_roundings(spec: Spec) -> None:
     """Allow only result-root rounding and identical rounding in conditions."""
     def visit(
         node: SpecNode, in_result: bool, inside_rounding: bool = False
@@ -169,7 +169,7 @@ def Autogenerate(
     current_spec = add_input_ranges(current_spec)
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
-    _reject_nonimplemented_roundings(current_spec)
+    _reject_notimplemented_roundings(current_spec)
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 
