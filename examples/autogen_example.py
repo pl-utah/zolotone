@@ -277,3 +277,41 @@ def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
 # @Test()
 # def domain_error2(x: Q(4, 0), ctx) -> Q:
 #     return (x + ctx.one()) ** (ctx.real_val(-1)) + ctx.one()
+
+
+@Test(InfeasibleError)
+def infeasible_truncation(x: UQ(3, 0), y: UQ(2, 0), ctx) -> UQ(2, 3):
+    ctx.assume(x >= ctx.real_val(0.5))
+    denominator = x + y
+    return ctx.rne((denominator ** ctx.real_val(-1)) * ctx.real_val(2), frac_bits=4)
+
+
+@Test(MissingError)
+def missing_output_precision(x: UQ(3, 0), ctx) -> UQ:
+    ctx.assume(x > ctx.zero())
+    return ctx.rne((x ** ctx.real_val(-1)))
+
+@Test()
+def spec_frac_bits(x: UQ(3, 0), ctx) -> UQ:
+    ctx.assume(x > ctx.zero())
+    return ctx.rne((x ** ctx.real_val(-1)), frac_bits=5)
+
+
+@Test()
+def spec_frac_bits(x: UQ(3, 0), ctx) -> UQ:
+    ctx.assume(x > ctx.zero())
+    return ctx.rne((x ** ctx.real_val(-1)), frac_bits=5)
+
+
+@Test(MissingError)
+def missing_frac_bits(x: UQ(2, 2), ctx) -> UQ(2, 3):
+    result = ctx.fr(x, frac_bits=1)
+    ctx.check(ctx.fr(x).eq(result))
+    return result
+
+
+@Test()
+def should_pass_fr(x: UQ(2, 2), ctx) -> UQ(2, 3):
+    result = ctx.fr(x)
+    ctx.check(result >= ctx.real_val(0))
+    return result

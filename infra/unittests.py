@@ -135,7 +135,6 @@ def _spec_state(
     )
     return Spec(
         name=spec_ctx.name,
-        function=lambda *args: None,
         annotations=contract.annotations,
         signature=contract.signature,
         display_name=contract.display_name,
@@ -1867,20 +1866,20 @@ class TestConstantFolding(unittest.TestCase):
                 outer_result = bf16x8_dot_fp32_spec(
                     *(value.to_spec(outer_ctx) for value in (*a_values, *b_values)),
                     ctx=outer_ctx,
-                ).constant_fold()
+                )._constant_fold()
                 expected_result = Float32().from_bits(expected).to_spec(outer_ctx)
                 if (
-                    expected_result.is_inf.constant_fold().value
-                    or expected_result.is_nan.constant_fold().value
+                    expected_result.is_inf._constant_fold().value
+                    or expected_result.is_nan._constant_fold().value
                 ):
                     self.assertEqual(
                         outer_result.classification_flags(),
                         expected_result.classification_flags(),
                     )
-                if expected_result.is_inf.constant_fold().value:
+                if expected_result.is_inf._constant_fold().value:
                     self.assertEqual(
-                        outer_result.sign.constant_fold(),
-                        expected_result.sign.constant_fold(),
+                        outer_result.sign._constant_fold(),
+                        expected_result.sign._constant_fold(),
                     )
                 outer_ctx.validate_requirements()
 
@@ -2379,9 +2378,258 @@ class TestFingerprint(unittest.TestCase):
         self.assertEqual(before, after)
 
 
-class TestRejectNestedRoundings(unittest.TestCase):
-    def test_rejects_every_combination_of_nested_rounding_modes(self):
-        from zolotone.autogen.autogen import _reject_nested_roundings
+class TestRoundingPrecisionInference(unittest.TestCase):
+    def test_get_spec_infers_all_modes_from_concrete_output_annotations(self):
+        from zolotone.autogen.autogen import get_spec
+
+        for output in (UQ(2, 3), Q(3, 3), UQ(3, 0), Q(4, 0)):
+            for mode in ("rne", "rtz", "raz", "fr"):
+                with self.subTest(output=output, mode=mode):
+                    def spec(x: UQ(2, 0), ctx) -> output:
+                        return getattr(ctx, mode)(x + ctx.one())
+
+                    current = get_spec("inferred-rounding", spec)
+                    self.assertIsInstance(current.spec_ast, Round)
+                    self.assertEqual(current.spec_ast.frac_bits, output.frac_bits)
+                    self.assertEqual(current.spec_ast.mode.value.lower(), mode)
+                    self.assertIs(spec.__annotations__["return"], output)
+
+    def test_explicit_precision_overrides_output_precision(self):
+        from zolotone.autogen.autogen import get_spec
+
+        for mode in ("rne", "rtz", "raz", "fr"):
+            for frac_bits in (0, 1, 3, 5):
+                with self.subTest(mode=mode, frac_bits=frac_bits):
+                    def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+                        return getattr(ctx, mode)(x, frac_bits=frac_bits)
+
+                    current = get_spec("explicit-rounding", spec)
+                    self.assertEqual(current.spec_ast.frac_bits, frac_bits)
+
+    def test_explicit_root_does_not_infer_rounding_precision_in_conditions(self):
+        from zolotone.autogen.autogen import get_spec
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
+
+        for mode in ("rne", "rtz", "raz", "fr"):
+            for location in ("assume", "check", "require"):
+                for frac_bits in (1, 3):
+                    with self.subTest(mode=mode, location=location, frac_bits=frac_bits):
+                        def spec(x: UQ(2, 2), ctx) -> UQ(2, 3):
+                            rounding = getattr(ctx, mode)
+                            result = rounding(x, frac_bits=frac_bits)
+                            getattr(ctx, location)(rounding(x).eq(result))
+                            return result
+
+                        current = get_spec("explicit-root-unresolved-condition", spec)
+                        conditions = getattr(current.spec_ctx, {
+                            "assume": "assumes", "check": "checks", "require": "requirements",
+                        }[location])
+                        self.assertIsNone(conditions[0].lhs.frac_bits)
+                        self.assertIs(conditions[0].rhs, current.spec_ast)
+                        with self.assertRaisesRegex(MissingError, "non-root rounding"):
+                            _validate_rounding_precision(current)
+
+    def test_rounding_conditions_cannot_infer_precision_from_non_round_root(self):
+        from zolotone.autogen.autogen import get_spec
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
+
+        for mode in ("rne", "rtz", "raz", "fr"):
+            with self.subTest(mode=mode):
+                def spec(x: UQ(2, 2), ctx) -> UQ(2, 3):
+                    ctx.check(getattr(ctx, mode)(x).eq(x))
+                    return x
+
+                current = get_spec("non-round-root-unresolved-condition", spec)
+                self.assertIsNone(current.spec_ctx.checks[0].lhs.frac_bits)
+                with self.assertRaisesRegex(MissingError, "non-root rounding"):
+                    _validate_rounding_precision(current)
+
+    def test_family_outputs_require_explicit_precision(self):
+        from zolotone.autogen.autogen import get_spec
+
+        for mode in ("rne", "rtz", "raz", "fr"):
+            for output in (Q, UQ):
+                with self.subTest(mode=mode, output=output):
+                    def spec(x: UQ(2, 0), ctx) -> output:
+                        return getattr(ctx, mode)(x)
+
+                    with self.assertRaisesRegex(MissingError, "Cannot infer rounding precision"):
+                        get_spec("missing-rounding-precision", spec)
+
+                    def explicit(x: UQ(2, 0), ctx) -> output:
+                        return getattr(ctx, mode)(x, frac_bits=2)
+
+                    self.assertEqual(get_spec("explicit-precision", explicit).spec_ast.frac_bits, 2)
+
+            ctx = SpecContext("standalone-rounding")
+            unresolved = getattr(ctx, mode)(ctx.real("x"))
+            self.assertIsNone(unresolved.frac_bits)
+            with self.assertRaisesRegex(MissingError, "provide frac_bits explicitly"):
+                unresolved.to_z3({})
+
+    def test_unresolved_rounding_is_not_constant_folded(self):
+        from zolotone.autogen.autogen import get_spec
+
+        ctx = SpecContext("unresolved-rounding")
+        unresolved = ctx.rne(ctx.real_val(2.5))
+        self.assertIsNone(unresolved._constant_fold().frac_bits)
+        self.assertIsNone(pickle.loads(pickle.dumps(unresolved)).frac_bits)
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+            return ctx.rne(ctx.real_val(2.5))._constant_fold()
+
+        resolved = get_spec("constant-rounding", spec).spec_ast
+        self.assertEqual(resolved.frac_bits, 3)
+        self.assertEqual(resolved._constant_fold(), RealLit(2.5))
+
+    def test_resolution_updates_matching_conditions_without_mutating_nodes(self):
+        from zolotone.autogen.autogen import get_spec
+
+        captured = {}
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(3, 3):
+            result = ctx.rne(x + ctx.one())
+            captured["original"] = result
+            captured["lookup"] = {result: "unchanged"}
+            ctx.assume(result >= ctx.zero())
+            ctx.check(ctx.rne(x + ctx.one()) >= ctx.zero())
+            ctx.require(ctx.rne(x + ctx.one()) <= ctx.real_val(4))
+            return result
+
+        current = get_spec("resolved-rounding-conditions", spec)
+        self.assertIsNone(captured["original"].frac_bits)
+        self.assertEqual(captured["lookup"][captured["original"]], "unchanged")
+        self.assertEqual(current.spec_ast.frac_bits, 3)
+        for condition in (*current.spec_ctx.assumes, *current.spec_ctx.checks,
+                          *current.spec_ctx.requirements):
+            self.assertIs(condition.lhs, current.spec_ast)
+
+    def test_get_spec_derives_a_function_with_resolved_precision(self):
+        from zolotone.autogen.autogen import get_spec
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+            return ctx.rne(x)
+
+        current = get_spec("replayed-rounding", spec)
+        self.assertFalse(hasattr(current, "function"))
+        ctx = SpecContext("replayed-rounding")
+        result = current.to_function()(ctx.real("new_x"), ctx)
+        self.assertEqual(result.frac_bits, 3)
+        self.assertEqual(current.spec_ast.frac_bits, 3)
+
+    def test_root_precision_inference_updates_case_partition_metadata(self):
+        from zolotone.autogen.autogen import get_spec
+        from zolotone.spec.spec_ast import children
+
+        for mode in ("rne", "rtz", "raz", "fr"):
+            for frac_bits in (0, 3):
+                with self.subTest(mode=mode, frac_bits=frac_bits):
+                    captured = {}
+
+                    def spec(x: UQ(2, 0), select: Bool(), ctx) -> UQ(2, frac_bits):
+                        rounded = getattr(ctx, mode)(x)
+                        captured["original"] = rounded
+                        condition = select & (rounded >= ctx.zero())
+                        result = Cases(
+                            case(condition, rounded),
+                            case(~condition, rounded),
+                            ctx=ctx,
+                        )
+                        captured["partition"] = ctx.case_partitions[0]
+                        return result._constant_fold()
+
+                    current = get_spec("inferred-case-rounding", spec)
+                    partition, = current.spec_ctx.case_partitions
+                    self.assertEqual(current.spec_ast.frac_bits, frac_bits)
+                    self.assertIsNone(captured["original"].frac_bits)
+                    self.assertIs(captured["partition"].entries[0].value, captured["original"])
+                    self.assertIs(partition.entries[0].value, current.spec_ast)
+                    self.assertIs(partition.entries[1].value, current.spec_ast)
+                    self.assertIs(partition.value.on_true, current.spec_ast)
+                    self.assertIs(partition.value.on_false, current.spec_ast)
+                    pending = [partition.value, *(entry.condition for entry in partition.entries)]
+                    while pending:
+                        node = pending.pop()
+                        if isinstance(node, Round):
+                            self.assertEqual(node.frac_bits, frac_bits)
+                        pending.extend(children(node))
+
+    def test_matching_conditions_resolve_precision_before_validation(self):
+        for mode in ("rne", "rtz", "raz"):
+            with self.subTest(mode=mode):
+                def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+                    rounding = getattr(ctx, mode)
+                    result = rounding(x)
+                    ctx.assume(rounding(x, 3) >= ctx.zero())
+                    ctx.check(rounding(x) >= ctx.zero())
+                    ctx.require(rounding(x, 3) <= ctx.real_val(3))
+                    return result
+
+                generated = Autogenerate("matching-inferred-rounding", spec)
+                self.assertEqual(generated.dtype, UQ(2, 3))
+
+    def test_user_reciprocal_example_infers_precision_and_evaluates(self):
+        def spec(x: UQ(3, 0), y: UQ(2, 0), ctx) -> UQ(2, 3):
+            ctx.assume(x >= ctx.real_val(0.5))
+            denominator = x + y
+            return ctx.rne((denominator ** ctx.real_val(-1)) * ctx.real_val(2))
+
+        generated = Autogenerate("inferred-reciprocal", spec)
+        self.assertEqual(generated.dtype, UQ(2, 3))
+        tempdir, compiled = jit_compile(generated)
+        try:
+            for x in range(1, 8):
+                for y in range(4):
+                    with self.subTest(x=x, y=y):
+                        expected = round(Fraction(16, x + y))
+                        generated.args[0].load_value(UQ(3, 0).from_bits(x))
+                        generated.args[1].load_value(UQ(2, 0).from_bits(y))
+                        self.assertEqual(generated.evaluate().raw, expected)
+                        self.assertEqual(compiled(x, y), expected)
+        finally:
+            tempdir.cleanup()
+
+    def test_inference_does_not_supply_non_root_rounding_precision(self):
+        for invalid in ("nested", "non_root"):
+            with self.subTest(invalid=invalid):
+                def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+                    result = ctx.rne(x)
+                    return ctx.rtz(result) if invalid == "nested" else result + ctx.zero()
+
+                with self.assertRaisesRegex(MissingError, "provide frac_bits explicitly"):
+                    Autogenerate("invalid-inferred-rounding", spec)
+
+    def test_coarser_explicit_rounding_is_widened_exactly(self):
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+            return ctx.rne(x * ctx.real_val(0.625), frac_bits=1)
+
+        generated = Autogenerate("coarse-explicit-rounding", spec)
+        for raw in range(4):
+            generated.args[0].load_value(UQ(2, 0).from_bits(raw))
+            self.assertEqual(generated.evaluate().raw, round(Fraction(5 * raw, 4)) << 2)
+
+    def test_rejects_finer_root_precision_before_simplification_and_lowering(self):
+        from zolotone.autogen import autogen
+
+        for mode in ("rne", "rtz", "raz"):
+            for output in (Q(3, 3), UQ(2, 3)):
+                with self.subTest(mode=mode, output=output):
+                    def spec(x: UQ(2, 0), ctx) -> output:
+                        return getattr(ctx, mode)(x * ctx.zero(), frac_bits=5)
+
+                    with (
+                        patch.object(autogen, "_simplify_spec_ast") as simplify,
+                        patch.object(autogen, "lower_spec_result") as lower,
+                    ):
+                        with self.assertRaisesRegex(InfeasibleError, "frac_bits=5.*frac_bits=3"):
+                            Autogenerate("narrow-output-rounding", spec)
+                    simplify.assert_not_called()
+                    lower.assert_not_called()
+
+
+class TestRoundingPlacement(unittest.TestCase):
+    def test_allows_every_combination_of_nested_rounding_modes(self):
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
 
         ctx = SpecContext("nested-roundings")
         x = ctx.real("x")
@@ -2389,11 +2637,10 @@ class TestRejectNestedRoundings(unittest.TestCase):
             for inner in ("rne", "rtz", "raz"):
                 with self.subTest(outer=outer, inner=inner):
                     expression = getattr(ctx, outer)(getattr(ctx, inner)(x, 3), 2)
-                    with self.assertRaisesRegex(NotImplementedError, "Nested rounding"):
-                        _reject_nested_roundings(_spec_state(expression, (x,), ctx))
+                    _validate_rounding_precision(_spec_state(expression, (x,), ctx))
 
-    def test_rejects_nested_rounding_through_arithmetic_and_conditionals(self):
-        from zolotone.autogen.autogen import _reject_nested_roundings
+    def test_allows_nested_rounding_through_arithmetic_and_conditionals(self):
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
 
         ctx = SpecContext("indirect-nested-roundings")
         x = ctx.real("x")
@@ -2405,23 +2652,22 @@ class TestRejectNestedRoundings(unittest.TestCase):
             If(inner >= ctx.zero(), x, -x),
         ):
             with self.subTest(value=value):
-                with self.assertRaisesRegex(NotImplementedError, "Nested rounding"):
-                    _reject_nested_roundings(_spec_state(ctx.rne(value, 1), (x,), ctx))
+                _validate_rounding_precision(_spec_state(ctx.rne(value, 1), (x,), ctx))
 
     def test_scans_assumptions_checks_and_requirements(self):
-        from zolotone.autogen.autogen import _reject_nested_roundings
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
 
         for location in ("assumes", "checks", "requirements"):
             with self.subTest(location=location):
                 ctx = SpecContext("nested-rounding-condition")
                 x = ctx.real("x")
-                condition = ctx.rne(ctx.raz(x, 3), 2) >= ctx.zero()
+                condition = ctx.rne(ctx.raz(x), 2) >= ctx.zero()
                 getattr(ctx, location).append(condition)
-                with self.assertRaisesRegex(NotImplementedError, "Nested rounding"):
-                    _reject_nested_roundings(_spec_state(x, (x,), ctx))
+                with self.assertRaisesRegex(MissingError, "provide frac_bits explicitly"):
+                    _validate_rounding_precision(_spec_state(x, (x,), ctx))
 
     def test_allows_root_rounding_and_structurally_identical_condition_rounding(self):
-        from zolotone.autogen.autogen import _reject_nested_roundings
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
 
         for mode in ("rne", "rtz", "raz"):
             with self.subTest(mode=mode):
@@ -2434,20 +2680,20 @@ class TestRejectNestedRoundings(unittest.TestCase):
                 ctx.assume(repeated >= ctx.zero())
                 ctx.check((rounding(x + ctx.one(), 2) + ctx.one()) >= ctx.zero())
                 ctx.require(rounding(x + ctx.one(), 2) <= ctx.two())
-                _reject_nested_roundings(_spec_state(result, (x,), ctx))
+                _validate_rounding_precision(_spec_state(result, (x,), ctx))
 
     def test_allows_specs_without_rounding(self):
-        from zolotone.autogen.autogen import _reject_nested_roundings
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
 
         ctx = SpecContext("unrounded")
         x = ctx.real("x")
         ctx.assume(x >= ctx.zero())
         ctx.check(x <= ctx.one())
         ctx.require(x <= ctx.two())
-        _reject_nested_roundings(_spec_state(x + ctx.one(), (x,), ctx))
+        _validate_rounding_precision(_spec_state(x + ctx.one(), (x,), ctx))
 
-    def test_rejects_non_root_result_rounding(self):
-        from zolotone.autogen.autogen import _reject_nested_roundings
+    def test_allows_non_root_result_rounding(self):
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
 
         ctx = SpecContext("non-root-roundings")
         x = ctx.real("x")
@@ -2462,11 +2708,10 @@ class TestRejectNestedRoundings(unittest.TestCase):
             rounded >= ctx.zero(),
         ):
             with self.subTest(expression=expression):
-                with self.assertRaisesRegex(NotImplementedError, "root operation"):
-                    _reject_nested_roundings(_spec_state(expression, (x,), ctx))
+                _validate_rounding_precision(_spec_state(expression, (x,), ctx))
 
-    def test_rejects_condition_rounding_that_does_not_match_result(self):
-        from zolotone.autogen.autogen import _reject_nested_roundings
+    def test_allows_condition_rounding_that_does_not_match_result(self):
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
 
         for location in ("assumes", "checks", "requirements"):
             for difference in ("mode", "precision", "operand", "unrounded_result"):
@@ -2483,44 +2728,42 @@ class TestRejectNestedRoundings(unittest.TestCase):
                     if difference == "unrounded_result":
                         result = x
                     getattr(ctx, location).append(other >= ctx.zero())
-                    with self.assertRaisesRegex(NotImplementedError, "must match"):
-                        _reject_nested_roundings(_spec_state(result, (x,), ctx))
+                    _validate_rounding_precision(_spec_state(result, (x,), ctx))
 
-    def test_shared_rounding_is_still_rejected_when_nested_elsewhere(self):
-        from zolotone.autogen.autogen import _reject_nested_roundings
+    def test_allows_shared_rounding_nested_elsewhere(self):
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
 
         ctx = SpecContext("shared-nested-rounding")
         x = ctx.real("x")
         inner = ctx.rtz(x, 2)
         expression = inner + ctx.rne(inner + ctx.one(), 1)
-        with self.assertRaisesRegex(NotImplementedError, "root operation"):
-            _reject_nested_roundings(_spec_state(expression, (x,), ctx))
+        _validate_rounding_precision(_spec_state(expression, (x,), ctx))
 
     def test_autogenerate_rejects_before_constant_folding(self):
         from zolotone.autogen import autogen
 
         def spec(x: UQ(2, 2), ctx) -> UQ:
-            return ctx.rne(ctx.rtz(ctx.one(), 2), 1) + x
+            return ctx.rne(ctx.rtz(ctx.one()), 1) + x
 
         with patch.object(autogen, "_simplify_spec_ast") as simplify:
-            with self.assertRaisesRegex(NotImplementedError, "Nested rounding"):
+            with self.assertRaisesRegex(MissingError, "provide frac_bits explicitly"):
                 Autogenerate("nested-roundings", spec)
         simplify.assert_not_called()
 
-    def test_autogenerate_rejects_non_root_and_mismatched_rounding_before_simplification(self):
+    def test_autogenerate_rejects_unresolved_rounding_before_simplification(self):
         from zolotone.autogen import autogen
 
-        for invalid in ("non_root", "mismatched_condition"):
+        for invalid in ("non_root", "condition"):
             with self.subTest(invalid=invalid):
-                def spec(x: UQ(2, 2), ctx) -> UQ:
-                    result = ctx.rne(x, 2)
+                def spec(x: UQ(2, 2), ctx) -> UQ(2, 2):
+                    result = ctx.rne(x)
                     if invalid == "non_root":
                         return result + ctx.zero()
-                    ctx.check(ctx.rtz(x, 2) >= ctx.zero())
+                    ctx.check(ctx.rtz(x) >= ctx.zero())
                     return result
 
                 with patch.object(autogen, "_simplify_spec_ast") as simplify:
-                    with self.assertRaises(NotImplementedError):
+                    with self.assertRaisesRegex(MissingError, "provide frac_bits explicitly"):
                         Autogenerate("invalid-rounding", spec)
                 simplify.assert_not_called()
 
@@ -2538,6 +2781,752 @@ class TestRejectNestedRoundings(unittest.TestCase):
 
                 result = Autogenerate("matching-rounding", spec)
                 self.assertEqual(result.dtype, UQ(1, 2))
+
+    def test_independent_condition_rounding_requires_explicit_precision(self):
+        from zolotone.autogen import autogen
+
+        for location in ("assumes", "checks", "requirements"):
+            for mode in ("rne", "rtz", "raz"):
+                with self.subTest(location=location, mode=mode):
+                    def spec(x: UQ(2, 2), ctx) -> UQ(2, 2):
+                        getattr(ctx, location).append(
+                            getattr(ctx, mode)(x + ctx.one()) >= ctx.zero()
+                        )
+                        return ctx.rne(x)
+
+                    with patch.object(autogen, "_simplify_spec_ast") as simplify:
+                        with self.assertRaisesRegex(MissingError, "provide frac_bits explicitly"):
+                            Autogenerate("unresolved-condition-rounding", spec)
+                    simplify.assert_not_called()
+
+    def test_autogenerate_accepts_independent_rounding_conditions(self):
+        def spec(x: UQ(2, 2), ctx) -> UQ(2, 2):
+            ctx.assume(ctx.rtz(ctx.raz(x, 2), 1) >= ctx.zero())
+            ctx.check(ctx.raz(x, 0) <= ctx.real_val(4))
+            ctx.require(ctx.rne(x + ctx.one(), 3) >= ctx.one())
+            return ctx.rne(x)
+
+        generated = Autogenerate("independent-rounding-conditions", spec)
+        tempdir, compiled = jit_compile(generated)
+        try:
+            for raw in range(16):
+                generated.args[0].load_value(UQ(2, 2).from_bits(raw))
+                self.assertEqual(generated.evaluate().raw, raw)
+                self.assertEqual(compiled(raw), raw)
+        finally:
+            tempdir.cleanup()
+
+    def test_nested_rounding_preserves_both_stages_in_python_and_cpp(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.autogen.autogen import get_spec
+
+        def quantize(value, mode, frac_bits):
+            scaled = value * (1 << frac_bits)
+            if mode == "rne":
+                code = round(scaled)
+            elif mode == "rtz":
+                code = int(scaled)
+            else:
+                code = math.ceil(scaled) if scaled >= 0 else math.floor(scaled)
+            return Fraction(code, 1 << frac_bits)
+
+        for outer in ("rne", "rtz", "raz"):
+            for inner in ("rne", "rtz", "raz"):
+                with self.subTest(outer=outer, inner=inner):
+                    def spec(x: Q(3, 3), ctx) -> Q(4, 0):
+                        return getattr(ctx, outer)(getattr(ctx, inner)(x, 1))
+
+                    resolved = get_spec("nested-rounding", spec)
+                    self.assertEqual(resolved.spec_ast.frac_bits, 0)
+                    self.assertEqual(resolved.spec_ast.value.frac_bits, 1)
+                    with patch.object(
+                        spec_lowering, "_build_missing_primitive",
+                        wraps=spec_lowering._build_missing_primitive,
+                    ) as build:
+                        generated = Autogenerate("nested-rounding", spec)
+                    # The fused candidate must still contain the inner rounding.
+                    self.assertTrue(build.call_args_list[0].args[0].identical(resolved.spec_ast))
+                    tempdir, compiled = jit_compile(generated)
+                    try:
+                        for raw in range(64):
+                            value = Q(3, 3).from_bits(raw)
+                            inner_value = quantize(Fraction(value.to_python()), inner, 1)
+                            expected = int(quantize(inner_value, outer, 0))
+                            expected_raw = expected & 0xF
+                            generated.args[0].load_value(value)
+                            self.assertEqual(generated.evaluate().raw, expected_raw)
+                            self.assertEqual(compiled(raw), expected_raw)
+                    finally:
+                        tempdir.cleanup()
+
+    def test_rounding_in_conditional_predicate_and_branches(self):
+        def spec(x: UQ(2, 2), ctx) -> UQ(3, 0):
+            return If(
+                ctx.rtz(x, 0) >= ctx.one(),
+                ctx.rne(x, 0),
+                ctx.raz(x, 0),
+            )
+
+        generated = Autogenerate("conditional-rounding", spec)
+        tempdir, compiled = jit_compile(generated)
+        try:
+            for raw in range(16):
+                value = Fraction(raw, 4)
+                expected = round(value) if int(value) >= 1 else math.ceil(value)
+                generated.args[0].load_value(UQ(2, 2).from_bits(raw))
+                self.assertEqual(generated.evaluate().raw, expected)
+                self.assertEqual(compiled(raw), expected)
+        finally:
+            tempdir.cleanup()
+
+
+class TestFaithfulRoundingSpecNode(unittest.TestCase):
+    def test_context_builds_a_round_node_with_faithful_mode(self):
+        ctx = SpecContext("faithful-rounding")
+        x = ctx.real("x")
+        for frac_bits in (None, 0, 6):
+            with self.subTest(frac_bits=frac_bits):
+                node = ctx.fr(x, frac_bits)
+                self.assertIsInstance(node, Round)
+                self.assertIsInstance(node, RealExpr)
+                self.assertIs(node.mode, RoundingMode.FR)
+                self.assertIs(node.value, x)
+                self.assertEqual(node.frac_bits, frac_bits)
+                self.assertEqual(str(node), f"FR({x}, frac_bits={frac_bits})")
+        self.assertIsNone(ctx.fr(x).frac_bits)
+
+    def test_rejects_invalid_operands_and_precision(self):
+        ctx = SpecContext("invalid-faithful-rounding")
+        x = ctx.real("x")
+        for value in (1, 0.5, True, ctx.bool("condition")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, "Expected RealExpr"):
+                    ctx.fr(value, 3)
+        for frac_bits in (True, False, 1.5, "3"):
+            with self.subTest(frac_bits=frac_bits):
+                with self.assertRaisesRegex(TypeError, "frac_bits must be an integer"):
+                    ctx.fr(x, frac_bits)
+        with self.assertRaisesRegex(ValueError, "frac_bits must be non-negative"):
+            ctx.fr(x, -1)
+
+    def test_constant_folding_preserves_faithful_choice(self):
+        ctx = SpecContext("fold-faithful-rounding")
+        for value in (-1.25, -1, 0, 1, 1.25):
+            for frac_bits in (None, 0, 3):
+                with self.subTest(value=value, frac_bits=frac_bits):
+                    node = ctx.fr(ctx.real_val(value), frac_bits)
+                    self.assertIs(node._constant_fold(), node)
+
+        node = ctx.fr(ctx.one() + ctx.real_val(0.25), 0)._constant_fold()
+        self.assertIsInstance(node, Round)
+        self.assertIs(node.mode, RoundingMode.FR)
+        self.assertEqual(node.value, RealLit(1.25))
+        self.assertEqual(node.frac_bits, 0)
+
+    def test_traversal_rebuild_and_substitution_preserve_precision(self):
+        from zolotone.spec.spec_ast import children, rebuild_spec_node, substitute_spec_node, variables
+
+        ctx = SpecContext("rebuild-faithful-rounding")
+        x, y = ctx.real("x"), ctx.real("y")
+        node = ctx.fr(x, 6)
+        self.assertEqual(children(node), (x,))
+        self.assertEqual(variables(node), {x})
+        rebuilt = rebuild_spec_node(node, (y,))
+        self.assertTrue(rebuilt.identical(ctx.fr(y, 6)))
+        substituted = substitute_spec_node(node + x, x, y)
+        self.assertTrue(substituted.identical(ctx.fr(y, 6) + y))
+
+    def test_hashing_and_serialization_preserve_node(self):
+        ctx = SpecContext("serialize-faithful-rounding")
+        node = ctx.fr(ctx.real("x"), 6)
+        restored = pickle.loads(pickle.dumps(node))
+        self.assertTrue(restored.identical(node))
+        self.assertEqual(hash(restored), hash(node))
+        self.assertEqual({node: "faithful"}[restored], "faithful")
+        self.assertFalse(node.identical(ctx.fr(node.value, 5)))
+
+    def test_normalization_preserves_faithful_rounding_metadata(self):
+        ctx = SpecContext("normalize-faithful-rounding")
+        x = ctx.real("x")
+        p, q = ctx.bool("p"), ctx.bool("q")
+        ctx.check(~(ctx.fr(If(~(p & q), x, ctx.zero()), 6) < ctx.zero()))
+        normalized = normalize_ctx(ctx)
+        expected = ctx.fr(If((~p) | (~q), x, ctx.zero()), 6) >= ctx.zero()
+        self.assertTrue(normalized.checks[0].identical(expected))
+
+    def test_lowering_is_explicitly_unimplemented(self):
+        ctx = SpecContext("unsupported-faithful-rounding")
+        node = ctx.fr(ctx.real("x"), 6)
+        for translate in (
+            node.to_egglog,
+            lambda: node.to_z3({}),
+            lambda: node.to_dreal({}),
+            lambda: to_rival_ir(node),
+        ):
+            with self.subTest(translate=translate):
+                with self.assertRaises(NotImplementedError):
+                    translate()
+
+    def test_integer_machine_rejects_faithful_before_native_compilation(self):
+        from zolotone import rival
+
+        ctx = SpecContext("unsupported-faithful-output")
+        node = ctx.fr(ctx.real("x"), 6)
+        with patch.object(rival, "_load_native_module") as native:
+            with self.assertRaisesRegex(NotImplementedError, "faithful rounding"):
+                rival.build_integer_machine(node, 3, 8)
+        native.assert_not_called()
+
+    def test_faithful_precision_uses_shared_inference_and_validation(self):
+        from zolotone.autogen.autogen import get_spec
+        from zolotone.autogen.spec_validation import _validate_rounding_precision
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+            result = ctx.fr(x)
+            ctx.check(result >= ctx.zero())
+            return result
+
+        current = get_spec("inferred-faithful-rounding", spec)
+        self.assertEqual(current.spec_ast.frac_bits, 3)
+        self.assertIs(current.spec_ast.mode, RoundingMode.FR)
+        self.assertIs(current.spec_ctx.checks[0].lhs, current.spec_ast)
+        _validate_rounding_precision(current)
+
+        def non_root(x: UQ(2, 0), ctx) -> UQ(2, 3):
+            return ctx.fr(x) + ctx.zero()
+
+        with self.assertRaisesRegex(MissingError, "provide frac_bits explicitly"):
+            _validate_rounding_precision(get_spec("unresolved-faithful-rounding", non_root))
+
+        def finer_root(x: UQ(2, 0), ctx) -> UQ(2, 3):
+            return ctx.fr(x, 5)
+
+        with self.assertRaisesRegex(InfeasibleError, "frac_bits=5.*frac_bits=3"):
+            _validate_rounding_precision(get_spec("narrow-faithful-rounding", finer_root))
+
+
+class TestFaithfulRoundingExpansion(unittest.TestCase):
+    def test_expands_reciprocal_and_keeps_artificial_inputs_separate(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+        from zolotone.autogen.spec_validation import reject_undeclared_variables
+
+        def spec(x: UQ(3, 0), ctx) -> UQ:
+            ctx.assume(x > ctx.zero())
+            return ctx.fr(x ** ctx.real_val(-1), frac_bits=7)
+
+        original = get_spec("faithful-reciprocal", spec)
+        expanded = _expand_faithful_roundings(original)
+        choice, = expanded.rounding_choices.values()
+        self.assertIsInstance(expanded.spec_ast, If)
+        self.assertIs(expanded.spec_ast.cond, choice)
+        self.assertTrue(expanded.spec_ast.on_true.identical(
+            Round(original.spec_ast.value, RoundingMode.RAZ, 7)
+        ))
+        self.assertTrue(expanded.spec_ast.on_false.identical(
+            Round(original.spec_ast.value, RoundingMode.RTZ, 7)
+        ))
+        self.assertEqual(expanded.rounding_choices, {original.spec_ast: choice})
+        self.assertEqual(expanded.spec_inputs, original.spec_inputs + (choice,))
+        self.assertEqual(list(expanded.signature.parameters), ["x", choice.name, "ctx"])
+        self.assertEqual(expanded.annotations[choice.name], Bool())
+        self.assertFalse(hasattr(expanded, "function"))
+        self.assertIs(expanded.return_annotation, UQ)
+        self.assertEqual(len(expanded.spec_inputs), 2)
+        reject_undeclared_variables(expanded)
+        self.assertIn("  rounding choices:", str(expanded))
+        self.assertIn(choice.name, str(expanded.signature))
+        self.assertNotIn(choice.name, str(inspect.signature(spec)))
+        self.assertEqual(original.rounding_choices, {})
+        self.assertIs(original.spec_ast.mode, RoundingMode.FR)
+        self.assertEqual(original.spec_ctx._sym_counter, 1)
+
+    def test_choice_selects_raz_or_rtz_for_positive_and_negative_values(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings
+
+        ctx = SpecContext("faithful-choice-semantics")
+        x = ctx.real("x")
+        for frac_bits in (0, 3):
+            expanded = _expand_faithful_roundings(_spec_state(ctx.fr(x, frac_bits), (x,), ctx))
+            choice, = expanded.rounding_choices.values()
+            env = {}
+            term = expanded.spec_ast.to_z3(env)
+            for numerator in range(-25, 26):
+                value = Fraction(numerator, 8)
+                scaled = value * (1 << frac_bits)
+                for rnd in (False, True):
+                    with self.subTest(frac_bits=frac_bits, value=value, rnd=rnd):
+                        code = (
+                            math.ceil(scaled) if scaled >= 0 else math.floor(scaled)
+                        ) if rnd else int(scaled)
+                        expected = z3.RealVal(str(Fraction(code, 1 << frac_bits)))
+                        actual = z3.substitute(
+                            term,
+                            (x.to_z3(env), z3.RealVal(str(value))),
+                            (choice.to_z3(env), z3.BoolVal(rnd)),
+                        )
+                        self.assertTrue(z3.is_true(z3.simplify(actual == expected)))
+
+    def test_reuses_one_choice_across_result_and_all_conditions(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+            result = ctx.fr(x)
+            ctx.assume(ctx.fr(x) >= ctx.zero())
+            ctx.check(ctx.fr(x) >= ctx.zero())
+            ctx.require(ctx.fr(x) <= ctx.real_val(3))
+            return result
+
+        original = get_spec("shared-faithful-rounding", spec)
+        expanded = _expand_faithful_roundings(original)
+        self.assertEqual(len(expanded.rounding_choices), 1)
+        self.assertEqual(expanded.spec_ast.on_true.frac_bits, 3)
+        for location in ("assumes", "checks", "requirements"):
+            self.assertIs(getattr(expanded.spec_ctx, location)[0].lhs, expanded.spec_ast)
+            self.assertIs(getattr(original.spec_ctx, location)[0].lhs, original.spec_ast)
+
+    def test_expands_nested_rounding_without_losing_shared_inner_choices(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings
+
+        ctx = SpecContext("nested-faithful-rounding")
+        x = ctx.real("x")
+        inner = ctx.fr(x, 3)
+        outer = ctx.fr(inner + ctx.one(), 2)
+        expanded = _expand_faithful_roundings(_spec_state(outer + inner, (x,), ctx))
+        self.assertEqual(len(expanded.rounding_choices), 2)
+        expanded_outer, expanded_inner = expanded.spec_ast.lhs, expanded.spec_ast.rhs
+        self.assertIs(expanded_outer.cond, expanded.rounding_choices[outer])
+        self.assertIs(expanded_inner.cond, expanded.rounding_choices[inner])
+        self.assertIs(expanded_outer.on_true.value.lhs, expanded_inner)
+        self.assertIs(expanded_outer.on_false.value.lhs, expanded_inner)
+        self.assertIsNot(expanded_outer.cond, expanded_inner.cond)
+        expanded.spec_ast.to_z3({})
+
+    def test_distinct_precisions_and_operands_get_independent_choices(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings
+
+        ctx = SpecContext("distinct-faithful-rounding")
+        x = ctx.real("x")
+        terms = (ctx.fr(x, 2), ctx.fr(x, 3), ctx.fr(x + ctx.one(), 2))
+        expanded = _expand_faithful_roundings(_spec_state(sum(terms[1:], terms[0]), (x,), ctx))
+        self.assertEqual(set(expanded.rounding_choices), set(terms))
+        self.assertEqual(len(set(expanded.rounding_choices.values())), 3)
+
+    def test_choices_in_conditions_are_expanded_even_without_result_rounding(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings
+
+        for location in ("assumes", "checks", "requirements"):
+            with self.subTest(location=location):
+                ctx = SpecContext("faithful-condition")
+                x = ctx.real("x")
+                getattr(ctx, location).append(ctx.fr(x, 2) >= ctx.zero())
+                expanded = _expand_faithful_roundings(_spec_state(x, (x,), ctx))
+                self.assertIs(expanded.spec_ast, x)
+                self.assertIsInstance(getattr(expanded.spec_ctx, location)[0].lhs, If)
+                self.assertEqual(len(expanded.rounding_choices), 1)
+
+    def test_case_partition_metadata_uses_the_same_expanded_nodes(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+
+        def spec(x: UQ(2, 0), select: Bool(), ctx) -> UQ:
+            return Cases(
+                case(select, ctx.fr(x, 2)),
+                case(~select, ctx.fr(x + ctx.one(), 2)),
+                ctx=ctx,
+            )
+
+        expanded = _expand_faithful_roundings(get_spec("faithful-cases", spec))
+        partition, = expanded.spec_ctx.case_partitions
+        self.assertIs(partition.value, expanded.spec_ast)
+        self.assertEqual(len(expanded.rounding_choices), 2)
+        self.assertIs(partition.entries[0].value, expanded.spec_ast.on_true)
+        self.assertIs(partition.entries[1].value, expanded.spec_ast.on_false)
+
+    def test_folded_cases_with_inferred_fr_expand_with_one_shared_choice(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+
+        def spec(x: UQ(2, 0), select: Bool(), ctx) -> UQ(2, 3):
+            rounded = ctx.fr(x)
+            return Cases(case(select, rounded), case(~select, rounded), ctx=ctx)._constant_fold()
+
+        expanded = _expand_faithful_roundings(get_spec("inferred-faithful-cases", spec))
+        self.assertEqual(len(expanded.rounding_choices), 1)
+        self.assertEqual(expanded.spec_ast.on_true.frac_bits, 3)
+        self.assertEqual(expanded.spec_ast.on_false.frac_bits, 3)
+        partition, = expanded.spec_ctx.case_partitions
+        self.assertIs(partition.entries[0].value, expanded.spec_ast)
+        self.assertIs(partition.entries[1].value, expanded.spec_ast)
+        target = SpecContext("inferred-case-replay")
+        result = expanded.to_function()(target.real("x"), target.bool("select"), target.bool("rnd"), target)
+        self.assertIs(target.case_partitions[0].entries[0].value, result)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with self.assertRaisesRegex(NotImplementedError, "Implementation lowering"):
+                Autogenerate("inferred-faithful-cases", spec)
+
+    def test_artificial_choices_cannot_alias_regular_variables(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings
+        from zolotone.autogen.spec_validation import reject_undeclared_variables
+
+        ctx = SpecContext("faithful-name-collision")
+        x = ctx.real("x")
+        regular = ctx.bool("rnd_0")
+        expression = If(regular, ctx.fr(x, 2), x)
+        expanded = _expand_faithful_roundings(_spec_state(expression, (x, regular), ctx))
+        choice, = expanded.rounding_choices.values()
+        self.assertNotEqual(choice.name, regular.name)
+        self.assertIs(expanded.spec_ast.cond, regular)
+        self.assertEqual(expanded.spec_inputs, (x, regular, choice))
+        reject_undeclared_variables(expanded)
+        expanded.spec_ctx.check(ctx.bool("unregistered_choice"))
+        with self.assertRaisesRegex(MissingError, "unregistered_choice"):
+            reject_undeclared_variables(expanded)
+
+    def test_expansion_is_idempotent_and_metadata_survives_spec_copies(self):
+        from dataclasses import replace
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+        from zolotone.autogen.spec_validation import add_input_ranges
+
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            return ctx.fr(x, 3)
+
+        expanded = _expand_faithful_roundings(get_spec("copy-faithful-rounding", spec))
+        self.assertIs(_expand_faithful_roundings(expanded), expanded)
+        copied = add_input_ranges(replace(expanded, name="copied"))
+        self.assertEqual(copied.rounding_choices, expanded.rounding_choices)
+        self.assertEqual(copied.signature, expanded.signature)
+        restored = pickle.loads(pickle.dumps(expanded.rounding_choices))
+        self.assertEqual(restored, expanded.rounding_choices)
+
+    def test_ordinary_specs_are_unchanged(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings
+
+        ctx = SpecContext("ordinary-rounding")
+        x = ctx.real("x")
+        original = _spec_state(ctx.rne(x, 2), (x,), ctx)
+        self.assertIs(_expand_faithful_roundings(original), original)
+        other = _spec_state(x, (x,), ctx)
+        self.assertIsNot(original.rounding_choices, other.rounding_choices)
+
+    def test_combined_inputs_append_each_choice_once_after_original_inputs(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+
+        def spec(x: UQ(2, 0), select: Bool(), ctx) -> UQ:
+            return If(select, ctx.fr(x, 2), ctx.fr(x + ctx.one(), 3))
+
+        original = get_spec("combined-faithful-inputs", spec)
+        expanded = _expand_faithful_roundings(original)
+        choices = tuple(expanded.rounding_choices.values())
+        self.assertEqual(expanded.spec_inputs, original.spec_inputs + choices)
+        self.assertEqual(len(expanded.spec_inputs), 4)
+        self.assertEqual(_expand_faithful_roundings(expanded).spec_inputs, expanded.spec_inputs)
+        self.assertEqual(list(expanded.annotations), ["x", "select", *(choice.name for choice in choices), "return"])
+
+    def test_strict_rounding_check_receives_bool_typed_artificial_inputs(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+        from zolotone.autogen.spec_validation import add_input_ranges, _simplify_spec_ast
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(1, 2):
+            ctx.assume(x > ctx.zero())
+            result = ctx.fr(x ** ctx.real_val(-1), 2)
+            ctx.check(result > ctx.zero())
+            return result
+
+        expanded = _expand_faithful_roundings(add_input_ranges(get_spec("strict-faithful-check", spec)))
+        current = _simplify_spec_ast(expanded)
+        choice, = current.rounding_choices.values()
+        with patch.object(
+            spec_lowering, "search_lower_spec_to_impl", wraps=spec_lowering.search_lower_spec_to_impl,
+        ) as lower:
+            rewritten = spec_lowering.rewrite_strict_conditions(current)
+        self.assertTrue(lower.called)
+        for attempt in lower.call_args_list:
+            self.assertIsInstance(attempt.args[1][choice].dtype, Bool)
+        self.assertIsInstance(rewritten.spec_ctx.checks[0], Ge)
+        self.assertEqual(rewritten.spec_inputs, current.spec_inputs)
+        self.assertEqual(rewritten.rounding_choices, current.rounding_choices)
+        for code in (1, 2, 3):
+            for direction in (False, True):
+                env = {}
+                before = current.spec_ctx.checks[0].to_z3(env)
+                after = rewritten.spec_ctx.checks[0].to_z3(env)
+                substitutions = (
+                    (current.spec_inputs[0].to_z3(env), z3.RealVal(code)),
+                    (choice.to_z3(env), z3.BoolVal(direction)),
+                )
+                self.assertTrue(z3.is_true(z3.simplify(z3.substitute(before == after, *substitutions))))
+
+    def test_input_ranges_do_not_zip_artificial_choices_with_user_parameters(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+        from zolotone.autogen.spec_validation import add_input_ranges
+
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            return ctx.fr(x, 2)
+
+        original = get_spec("faithful-input-ranges", spec)
+        expanded = _expand_faithful_roundings(original)
+        ranged = add_input_ranges(expanded)
+        self.assertEqual(ranged.spec_ctx.assumes, add_input_ranges(original).spec_ctx.assumes)
+        self.assertEqual(ranged.spec_inputs, expanded.spec_inputs)
+
+    def test_unused_artificial_choices_are_reported_like_other_inputs(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+        from zolotone.autogen.spec_validation import _simplify_spec_ast, add_input_ranges, reject_undeclared_variables
+
+        def spec(x: UQ(2, 0), ctx) -> UQ:
+            return ctx.fr(ctx.one(), 0) + x
+
+        expanded = _expand_faithful_roundings(add_input_ranges(get_spec("unused-faithful-choice", spec)))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            simplified = _simplify_spec_ast(expanded)
+        self.assertEqual(len(simplified.rounding_choices), 1)
+        choice, = simplified.rounding_choices.values()
+        with self.assertWarnsRegex(UserWarning, f"unused input variables: bool\\({choice.name}\\)"):
+            reject_undeclared_variables(simplified)
+
+    def test_validates_precision_before_expansion(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+
+        for location in ("nested", "non_root", "condition", "narrow_output"):
+            with self.subTest(location=location):
+                def spec(x: UQ(2, 0), ctx) -> UQ(2, 3):
+                    if location == "nested":
+                        return ctx.fr(ctx.fr(x))
+                    if location == "non_root":
+                        return ctx.fr(x) + ctx.zero()
+                    if location == "condition":
+                        ctx.check(ctx.fr(x + ctx.one()) >= ctx.zero())
+                        return x
+                    return ctx.fr(x, 5)
+
+                expected = InfeasibleError if location == "narrow_output" else MissingError
+                with self.assertRaises(expected):
+                    _expand_faithful_roundings(get_spec("invalid-faithful-precision", spec))
+
+    def test_autogenerate_validates_then_rejects_unresolved_artificial_choices(self):
+        from zolotone.autogen import autogen
+
+        def spec(x: UQ(3, 0), ctx) -> UQ:
+            ctx.assume(x > ctx.zero())
+            result = ctx.fr(x ** ctx.real_val(-1), frac_bits=7)
+            ctx.check(result > ctx.zero())
+            return result
+
+        with (
+            patch.object(autogen, "_expand_faithful_roundings", wraps=autogen._expand_faithful_roundings) as expand,
+            patch.object(autogen, "_simplify_spec_ast", wraps=autogen._simplify_spec_ast) as simplify,
+            patch.object(autogen, "_check_output_format", wraps=autogen._check_output_format) as output,
+            patch.object(autogen, "lower_spec_result", wraps=autogen.lower_spec_result) as lower,
+        ):
+            with self.assertRaisesRegex(NotImplementedError, "artificial rounding choices"):
+                Autogenerate("unresolved-faithful-choices", spec)
+        expand.assert_called_once()
+        simplify.assert_called_once()
+        output.assert_called_once()
+        lower.assert_called_once()
+
+    def test_autogenerate_handles_a_choice_without_original_inputs(self):
+        from zolotone.autogen import autogen
+
+        def spec(ctx) -> UQ(2, 0):
+            result = ctx.fr(ctx.real_val(1.25), 0)
+            ctx.check(result > ctx.zero())
+            return result
+
+        with patch.object(autogen, "lower_spec_result", wraps=autogen.lower_spec_result) as lower:
+            with self.assertRaisesRegex(NotImplementedError, "Implementation lowering"):
+                Autogenerate("faithful-without-user-inputs", spec)
+        lower.assert_called_once()
+        current = lower.call_args.args[0]
+        self.assertEqual(current.spec_inputs, tuple(current.rounding_choices.values()))
+
+
+class TestDerivedSpecFunctions(unittest.TestCase):
+    def test_rebinds_result_and_conditions_without_replaying_the_source(self):
+        from zolotone.autogen.autogen import get_spec
+
+        calls = []
+
+        def spec(x: UQ(2, 0), y: UQ(2, 0), ctx) -> UQ(3, 0):
+            calls.append(ctx)
+            ctx.assume(x >= y)
+            ctx.check(x + y >= x)
+            ctx.require(y >= ctx.zero())
+            return x + y
+
+        current = get_spec("derived-add", spec)
+        derived = current.to_function()
+        target = SpecContext("new-context")
+        x, y = target.real("new_x"), target.real("new_y")
+        prior = y <= target.real_val(3)
+        target.assume(prior)
+        result = derived(x, y, target)
+        self.assertTrue(result.identical(x + y))
+        self.assertEqual(target.assumes, [prior, x >= y])
+        self.assertEqual(target.checks, [x + y >= x])
+        self.assertEqual(target.requirements, [y >= target.zero()])
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0], current.spec_ctx)
+        self.assertEqual(len(current.spec_ctx.assumes), 1)
+        self.assertFalse(hasattr(current, "function"))
+        contract = ast_nodes._build_spec_contract("derived-add", derived)
+        self.assertEqual(contract.annotations, current.annotations)
+        self.assertEqual(contract.signature, current.signature)
+
+    def test_substitution_is_simultaneous_for_swapped_input_variables(self):
+        from zolotone.autogen.autogen import get_spec
+
+        def spec(x: UQ(2, 0), y: UQ(2, 0), ctx) -> Q:
+            ctx.assume(x >= y)
+            return x - y
+
+        current = get_spec("swap-inputs", spec)
+        old_x, old_y = current.spec_inputs
+        target = SpecContext("swapped")
+        result = current.to_function()(old_y, old_x, target)
+        self.assertTrue(result.identical(old_y - old_x))
+        self.assertEqual(target.assumes, [old_y >= old_x])
+
+    def test_current_ast_annotations_and_conditions_are_used(self):
+        from dataclasses import replace
+        from zolotone.autogen.autogen import get_spec
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
+            return x
+
+        original = get_spec("updated-spec", spec)
+        old_x, = original.spec_inputs
+        updated_ctx = original.spec_ctx.copy(checks=[old_x >= RealLit(0)])
+        updated = replace(
+            original,
+            spec_ast=old_x + RealLit(1),
+            spec_ctx=updated_ctx,
+            annotations={**original.annotations, "return": UQ(3, 0)},
+            signature=original.signature.replace(return_annotation=UQ(3, 0)),
+        )
+        target = SpecContext("updated-replay")
+        new_x = target.real("new_x")
+        derived = updated.to_function()
+        self.assertTrue(derived(new_x, target).identical(new_x + RealLit(1)))
+        self.assertEqual(target.checks, [new_x >= RealLit(0)])
+        self.assertEqual(ast_nodes._build_spec_contract("updated-spec", derived).annotations["return"], UQ(3, 0))
+
+    def test_callable_snapshots_conditions_and_validates_arguments(self):
+        from zolotone.autogen.autogen import get_spec
+
+        def spec(x: UQ(2, 0), proof) -> UQ:
+            proof.assume(x >= proof.zero())
+            return x
+
+        current = get_spec("snapshot-spec", spec)
+        derived = current.to_function()
+        current.spec_ctx.check(current.spec_inputs[0] <= RealLit(3))
+        target = SpecContext("snapshot-replay")
+        new_x = target.real("new_x")
+        self.assertIs(derived(x=new_x, proof=target), new_x)
+        self.assertEqual(target.checks, [])
+        self.assertEqual(target.assumes, [new_x >= RealLit(0)])
+        with self.assertRaises(TypeError):
+            derived(new_x)
+        with self.assertRaises(TypeError):
+            derived(new_x, target, target)
+
+    def test_expanded_fr_callable_has_a_complete_contract_and_rebinds_choice(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+
+        def spec(x: UQ(3, 0), ctx) -> UQ:
+            ctx.assume(x > ctx.zero())
+            return ctx.fr(x ** ctx.real_val(-1), 7)
+
+        expanded = _expand_faithful_roundings(get_spec("expanded-function", spec))
+        choice, = expanded.rounding_choices.values()
+        derived = expanded.to_function()
+        contract = ast_nodes._build_spec_contract("expanded-function", derived)
+        self.assertEqual(contract.annotations[choice.name], Bool())
+        self.assertEqual(len(contract.signature.parameters), 3)
+        self.assertEqual(list(inspect.signature(spec).parameters), ["x", "ctx"])
+        target = SpecContext("expanded-replay")
+        new_x, new_choice = target.real("new_x"), target.bool("new_choice")
+        result = derived(new_x, new_choice, target)
+        self.assertIs(result.cond, new_choice)
+        self.assertTrue(result.on_true.identical(target.raz(new_x ** RealLit(-1), 7)))
+        self.assertTrue(result.on_false.identical(target.rtz(new_x ** RealLit(-1), 7)))
+        self.assertEqual(target.assumes, [new_x > RealLit(0)])
+        replayed = get_spec("expanded-replay", derived)
+        self.assertEqual(len(replayed.spec_inputs), 2)
+        self.assertIsInstance(replayed.spec_ast, If)
+
+    def test_expanded_signature_cannot_alias_original_parameter_names(self):
+        from zolotone.autogen.autogen import _expand_faithful_roundings, get_spec
+
+        def spec(x: UQ(2, 0), rnd_1) -> UQ:
+            return rnd_1.fr(x, 2)
+
+        expanded = _expand_faithful_roundings(get_spec("choice-parameter-collision", spec))
+        choice, = expanded.rounding_choices.values()
+        self.assertNotEqual(choice.name, "rnd_1")
+        ast_nodes._build_spec_contract("choice-parameter-collision", expanded.to_function())
+
+    def test_rebinds_nested_tuple_inputs(self):
+        from zolotone.autogen.autogen import get_spec
+
+        def spec(pair: Tuple(UQ(2, 0), Tuple(UQ(2, 0), Bool())), ctx) -> UQ:
+            x, (y, flag) = pair
+            ctx.assume(x >= y)
+            return If(flag, x, y)
+
+        current = get_spec("tuple-replay", spec)
+        target = SpecContext("tuple-target")
+        x, y, flag = target.real("x"), target.real("y"), target.bool("flag")
+        result = current.to_function()((x, (y, flag)), target)
+        self.assertTrue(result.identical(If(flag, x, y)))
+        self.assertEqual(target.assumes, [x >= y])
+
+    def test_rebinds_structured_fp_input_fields(self):
+        from zolotone.autogen.autogen import get_spec
+        from zolotone.spec.spec_ast import variables
+
+        def spec(x: Float32(), ctx) -> Q:
+            return x.value
+
+        current = get_spec("fp-input-replay", spec)
+        source_vars = variables(current.spec_inputs[0])
+        target = SpecContext("fp-target")
+        new_input = Float32().to_spec("new_input", target)
+        result = current.to_function()(new_input, target)
+        self.assertIs(result, new_input.value)
+        self.assertFalse(source_vars & set().union(*(variables(a) for a in target.assumes)))
+
+    def test_rebinds_case_partition_metadata_and_preserves_sharing(self):
+        from zolotone.autogen.autogen import get_spec
+
+        def spec(x: UQ(2, 0), select: Bool(), ctx) -> UQ:
+            return Cases(case(select, x), case(~select, x + ctx.one()), ctx=ctx)
+
+        current = get_spec("case-replay", spec)
+        target = SpecContext("case-target")
+        x, flag = target.real("new_x"), target.bool("new_flag")
+        result = current.to_function()(x, flag, target)
+        partition, = target.case_partitions
+        self.assertIs(partition.value, result)
+        self.assertIs(partition.entries[0].condition, flag)
+        self.assertIs(partition.entries[0].value, result.on_true)
+        self.assertIs(partition.entries[1].value, result.on_false)
+
+    def test_generated_component_proofs_replay_inferred_rounding_precision(self):
+        calls = []
+
+        def spec(x: UQ(2, 0), ctx) -> UQ(2, 2):
+            calls.append(ctx)
+            return ctx.rne(x)
+
+        generated = Autogenerate("inferred-rounding-replay", spec)
+        schedule = [{"tool": "z3", "timeout_ms": 3000}]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(generated.check_spec(schedule=schedule, max_workers=1)["proved"])
+            self.assertTrue(generated.check_determinism(schedule=schedule, max_workers=1)["proved"])
+        self.assertEqual(len(calls), 1)
 
 
 class TestRoundSpecZ3(unittest.TestCase):
@@ -2670,11 +3659,11 @@ class TestPowSpecOp(unittest.TestCase):
         y = RealVar("y")
 
         self.assertEqual(
-            If(BoolLit(False), x + RealLit(1), y + RealLit(2)).constant_fold(),
+            If(BoolLit(False), x + RealLit(1), y + RealLit(2))._constant_fold(),
             Add(y, RealLit(2)),
         )
         self.assertEqual(
-            If(BoolLit(True), x + RealLit(1), y + RealLit(2)).constant_fold(),
+            If(BoolLit(True), x + RealLit(1), y + RealLit(2))._constant_fold(),
             Add(x, RealLit(1)),
         )
 
@@ -2682,19 +3671,19 @@ class TestPowSpecOp(unittest.TestCase):
         p = BoolVar("p")
 
         self.assertEqual(
-            And(BoolLit(False), p).constant_fold(),
+            And(BoolLit(False), p)._constant_fold(),
             BoolLit(False),
         )
         self.assertEqual(
-            And(BoolLit(True), p).constant_fold(),
+            And(BoolLit(True), p)._constant_fold(),
             p,
         )
         self.assertEqual(
-            Or(BoolLit(True), p).constant_fold(),
+            Or(BoolLit(True), p)._constant_fold(),
             BoolLit(True),
         )
         self.assertEqual(
-            Or(BoolLit(False), p).constant_fold(),
+            Or(BoolLit(False), p)._constant_fold(),
             p,
         )
 
@@ -2702,11 +3691,11 @@ class TestPowSpecOp(unittest.TestCase):
         x = RealVar("x")
 
         self.assertEqual(
-            Mul(RealLit(0), x + RealLit(1)).constant_fold(),
+            Mul(RealLit(0), x + RealLit(1))._constant_fold(),
             RealLit(0),
         )
         self.assertEqual(
-            Mul(x + RealLit(1), RealLit(0)).constant_fold(),
+            Mul(x + RealLit(1), RealLit(0))._constant_fold(),
             RealLit(0),
         )
 
@@ -3646,7 +4635,7 @@ class TestContextNormalization(unittest.TestCase):
                 ctx.assume(expression)
                 ctx.check(expression)
                 normalized = normalize_ctx(ctx)
-                self.assertEqual(normalized.assumes, [expected.constant_fold()])
+                self.assertEqual(normalized.assumes, [expected._constant_fold()])
                 self.assertIs(normalized.assumes[0], normalized.checks[0])
                 solver = z3.Solver()
                 env = {}
@@ -3770,7 +4759,7 @@ class TestEgglogFloatLiterals(unittest.TestCase):
         egraph.register(lowered)
         egraph.run(1)
 
-        folded = from_egglog(egraph.extract(lowered)).constant_fold()
+        folded = from_egglog(egraph.extract(lowered))._constant_fold()
         self.assertEqual(folded, RealLit(0.1 + 0.2))
         self.assertEqual(folded.value.hex(), (0.1 + 0.2).hex())
 
@@ -3790,11 +4779,24 @@ class TestEgglogFloatLiterals(unittest.TestCase):
 
 
 class TestSpecAstConstantFolding(unittest.TestCase):
+    def test_constant_folding_is_internal_only(self):
+        ctx = SpecContext("private-constant-folding")
+        nodes = (
+            RealLit(1) + RealLit(2),
+            BoolLit(True) & BoolLit(False),
+            fp16.fresh("value", ctx),
+        )
+        for node in nodes:
+            with self.subTest(node_type=type(node).__name__):
+                self.assertTrue(callable(node._constant_fold))
+                with self.assertRaises(AttributeError):
+                    getattr(node, "constant_fold")
+
     def assert_check_simplifies_to(self, expr, expected):
         ctx = SpecContext("simplify-check-expression")
         ctx.check(expr)
 
-        expected = expected.constant_fold()
+        expected = expected._constant_fold()
         expected_checks = [] if expected == BoolLit(True) else [expected]
         self.assertEqual(
             simplify_ctx(ctx)["new_ctx"].checks,
@@ -3845,9 +4847,9 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         self.assertEqual(ctx.assumes, [at_least_one, *pairwise_exclusions])
 
     def test_fp_expr_constant_fold_is_shared_by_all_formats(self):
-        self.assertIs(fp16.constant_fold, FPExpr.constant_fold)
-        self.assertIs(bf16.constant_fold, FPExpr.constant_fold)
-        self.assertIs(fp32.constant_fold, FPExpr.constant_fold)
+        self.assertIs(fp16._constant_fold, FPExpr._constant_fold)
+        self.assertIs(bf16._constant_fold, FPExpr._constant_fold)
+        self.assertIs(fp32._constant_fold, FPExpr._constant_fold)
 
         value = fp16(
             value=RealLit(1) + RealLit(2),
@@ -3861,11 +4863,11 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             is_nan=BoolLit(False),
         )
 
-        folded = value.constant_fold()
+        folded = value._constant_fold()
 
         self.assertIsInstance(folded, fp16)
         self.assertEqual(folded.value, RealLit(3))
-        self.assertIs(folded.constant_fold(), folded)
+        self.assertIs(folded._constant_fold(), folded)
 
     def test_fp_expr_requires_a_declared_value_field(self):
         with self.assertRaisesRegex(TypeError, "must declare a value"):
@@ -3889,12 +4891,12 @@ class TestSpecAstConstantFolding(unittest.TestCase):
     def test_constant_fold_method_folds_literal_tree(self):
         expr = (RealLit(2) + RealLit(3)) * RealLit(4)
 
-        self.assertEqual(expr.constant_fold(), RealLit(20))
+        self.assertEqual(expr._constant_fold(), RealLit(20))
 
     def test_constant_fold_collapses_literal_subtrees(self):
         expr = ((RealLit(2) + RealLit(3)) * RealLit(4)).eq(RealLit(20))
 
-        self.assertEqual(expr.constant_fold(), BoolLit(True))
+        self.assertEqual(expr._constant_fold(), BoolLit(True))
 
     def test_boolean_inequality_round_trips_and_folds(self):
         p = BoolVar("p")
@@ -3903,10 +4905,10 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
         self.assertIsInstance(inequality, BoolNe)
         self.assertEqual(from_egglog(inequality.to_egglog()), inequality)
-        self.assertEqual(p.ne(BoolLit(True)).constant_fold(), ~p)
-        self.assertEqual(p.ne(BoolLit(False)).constant_fold(), p)
-        self.assertEqual(p.ne(p).constant_fold(), BoolLit(False))
-        self.assertEqual(p.ne(~p).constant_fold(), BoolLit(True))
+        self.assertEqual(p.ne(BoolLit(True))._constant_fold(), ~p)
+        self.assertEqual(p.ne(BoolLit(False))._constant_fold(), p)
+        self.assertEqual(p.ne(p)._constant_fold(), BoolLit(False))
+        self.assertEqual(p.ne(~p)._constant_fold(), BoolLit(True))
 
     def test_substitution_bottom_up_fold_matches_recursive_refold(self):
         x = RealVar("x")
@@ -3936,7 +4938,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 if all(old is new for old, new in zip(args, rebuilt_args))
                 else type(node)(*rebuilt_args)
             )
-            return rebuilt.constant_fold()
+            return rebuilt._constant_fold()
 
         for expression in expressions:
             with self.subTest(expression=str(expression)):
@@ -3948,17 +4950,17 @@ class TestSpecAstConstantFolding(unittest.TestCase):
     def test_constant_fold_can_produce_false(self):
         expr = (RealLit(2) + RealLit(3)).eq(RealLit(6))
 
-        self.assertEqual(expr.constant_fold(), BoolLit(False))
+        self.assertEqual(expr._constant_fold(), BoolLit(False))
 
     def test_constant_fold_cancels_identical_subtraction(self):
         x = RealVar("x")
 
-        self.assertEqual((x - x).constant_fold(), RealLit(0))
+        self.assertEqual((x - x)._constant_fold(), RealLit(0))
 
     def test_constant_fold_keeps_symbolic_if_shape(self):
         expr = If(BoolLit(True), RealVar("x"), RealVar("y"))
 
-        self.assertEqual(expr.constant_fold(), RealVar("x"))
+        self.assertEqual(expr._constant_fold(), RealVar("x"))
 
     def test_if_keeps_real_branches_as_if(self):
         expr = If(BoolVar("condition"), RealVar("x"), RealVar("y"))
@@ -3980,11 +4982,11 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
     def test_if_constant_folds_bool_branches(self):
         self.assertEqual(
-            If(BoolLit(True), BoolLit(False), BoolLit(True)).constant_fold(),
+            If(BoolLit(True), BoolLit(False), BoolLit(True))._constant_fold(),
             BoolLit(False),
         )
         self.assertEqual(
-            If(BoolLit(False), BoolLit(False), BoolLit(True)).constant_fold(),
+            If(BoolLit(False), BoolLit(False), BoolLit(True))._constant_fold(),
             BoolLit(True),
         )
 
@@ -3997,11 +4999,11 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         self.assertEqual(expression, (~lhs) | rhs)
         self.assertEqual(from_egglog(expression.to_egglog()), (~lhs) | rhs)
         self.assertEqual(
-            BoolLit(True).implies(BoolLit(False)).constant_fold(),
+            BoolLit(True).implies(BoolLit(False))._constant_fold(),
             BoolLit(False),
         )
         self.assertEqual(
-            BoolLit(False).implies(BoolLit(False)).constant_fold(),
+            BoolLit(False).implies(BoolLit(False))._constant_fold(),
             BoolLit(True),
         )
 
@@ -4051,7 +5053,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             ctx=ctx,
         )
 
-        self.assertEqual(expr.constant_fold(), RealLit(1))
+        self.assertEqual(expr._constant_fold(), RealLit(1))
 
     def test_cases_support_fp_values(self):
         ctx = SpecContext("fp-cases")
@@ -4062,7 +5064,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         )
 
         self.assertIsInstance(expr, fp32)
-        self.assertEqual(expr.is_ninf.constant_fold(), BoolLit(True))
+        self.assertEqual(expr.is_ninf._constant_fold(), BoolLit(True))
 
     def test_special_encoding_preserves_finite_value(self):
         ctx = SpecContext("finite-special-encoding")
@@ -4080,7 +5082,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
         encoded = special_encoding(finite, ctx)
 
-        self.assertEqual(encoded.constant_fold(), finite)
+        self.assertEqual(encoded._constant_fold(), finite)
 
     def test_special_encoding_freshens_nonfinite_value_per_collection(self):
         ctx = SpecContext("nonfinite-special-encoding")
@@ -4096,8 +5098,8 @@ class TestSpecAstConstantFolding(unittest.TestCase):
             is_nan=BoolLit(False),
         )
 
-        first = special_encoding(infinity, ctx).constant_fold()
-        second = special_encoding(infinity, ctx).constant_fold()
+        first = special_encoding(infinity, ctx)._constant_fold()
+        second = special_encoding(infinity, ctx)._constant_fold()
 
         self.assertIsInstance(first.value, RealVar)
         self.assertIsInstance(second.value, RealVar)
@@ -4212,7 +5214,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         decoded = fp32_decode(Const(Float32().Zero()))
 
         self.assertEqual(
-            tuple(ctx.spec_of(field).constant_fold() for field in decoded),
+            tuple(ctx.spec_of(field)._constant_fold() for field in decoded),
             tuple(RealLit(value) for value in (0, 0, 0, 0, 0, 1, 0, 0)),
         )
         self.assertIs(decoded.sign, decoded[0])
@@ -4399,7 +5401,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 result = spec_fp32_add(lhs, rhs, ctx)
                 ctx.validate_requirements(timeout_ms=1000)
                 self.assertEqual(
-                    getattr(result, expected_predicate).constant_fold(),
+                    getattr(result, expected_predicate)._constant_fold(),
                     BoolLit(True),
                 )
 
@@ -4430,18 +5432,18 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         x = RealVar("x")
         expr = x + (RealLit(2) + RealLit(3))
 
-        self.assertEqual(expr.constant_fold(), Add(x, RealLit(5)))
+        self.assertEqual(expr._constant_fold(), Add(x, RealLit(5)))
 
     def test_constant_fold_partially_rebuilds_symbolic_bool_expr(self):
         p = BoolVar("p")
         expr = p | RealLit(2).eq(RealLit(2))
 
-        self.assertEqual(expr.constant_fold(), BoolLit(True))
+        self.assertEqual(expr._constant_fold(), BoolLit(True))
 
     def test_constant_fold_folds_boolean_operator_trees(self):
         expr = RealLit(2).eq(RealLit(2)) & ~BoolLit(False)
 
-        self.assertEqual(expr.constant_fold(), BoolLit(True))
+        self.assertEqual(expr._constant_fold(), BoolLit(True))
 
     def test_constant_fold_factors_complementary_boolean_partitions(self):
         p = BoolVar("p")
@@ -4456,7 +5458,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
 
         for expr, expected in cases:
             with self.subTest(expr=str(expr)):
-                self.assertEqual(expr.constant_fold(), expected.constant_fold())
+                self.assertEqual(expr._constant_fold(), expected._constant_fold())
 
     def test_context_simplify_leaves_finite_if_equality_unchanged(self):
         select = BoolVar("select")
@@ -4472,12 +5474,12 @@ class TestSpecAstConstantFolding(unittest.TestCase):
     def test_constant_fold_leaves_finite_symbolic_equality_unchanged(self):
         equality = RealVar("x").eq(RealVar("y"))
 
-        self.assertIs(equality.constant_fold(), equality)
+        self.assertIs(equality._constant_fold(), equality)
 
     def test_constant_fold_leaves_unsupported_literal_pow_unchanged(self):
         expr = Pow(RealLit(-2), RealLit(0.5))
 
-        self.assertEqual(expr.constant_fold(), expr)
+        self.assertEqual(expr._constant_fold(), expr)
 
     def test_non_finite_real_literals_are_rejected_at_construction(self):
         for value in (float("inf"), float("-inf"), float("nan")):
@@ -4516,7 +5518,7 @@ class TestSpecAstConstantFolding(unittest.TestCase):
                 self.assertTrue(encoded.value.name.startswith("special_"))
                 special_names.add(encoded.value.name)
                 self.assertEqual(
-                    getattr(encoded, expected_predicate).constant_fold(),
+                    getattr(encoded, expected_predicate)._constant_fold(),
                     BoolLit(True),
                 )
         self.assertEqual(len(special_names), len(cases))
@@ -4560,9 +5562,9 @@ class TestSpecAstConstantFolding(unittest.TestCase):
         pnan = make_value(sign=0, nan=True).observables_for_classification("nan")
         nnan = make_value(sign=1, nan=True).observables_for_classification("nan")
 
-        self.assertNotEqual(pinf[0].constant_fold(), ninf[0].constant_fold())
-        self.assertNotEqual(pzero[0].constant_fold(), nzero[0].constant_fold())
-        self.assertEqual(pnan[0].constant_fold(), nnan[0].constant_fold())
+        self.assertNotEqual(pinf[0]._constant_fold(), ninf[0]._constant_fold())
+        self.assertNotEqual(pzero[0]._constant_fold(), nzero[0]._constant_fold())
+        self.assertEqual(pnan[0]._constant_fold(), nnan[0]._constant_fold())
 
     def test_fp32_known_classification_exposes_only_relevant_fields(self):
         value = fp32(
@@ -4728,7 +5730,7 @@ class TestFloat16Spec(unittest.TestCase):
         for value, predicate in cases:
             with self.subTest(predicate=predicate):
                 self.assertEqual(
-                    getattr(value, predicate).constant_fold(),
+                    getattr(value, predicate)._constant_fold(),
                     BoolLit(True),
                 )
                 if predicate in {"is_nan", "is_pinf", "is_ninf"}:
@@ -4754,7 +5756,7 @@ class TestFloat16Spec(unittest.TestCase):
                 value = runtime_value.to_spec(ctx)
                 self.assertIsInstance(value, fp16)
                 self.assertEqual(
-                    getattr(value, predicate).constant_fold(),
+                    getattr(value, predicate)._constant_fold(),
                     BoolLit(True),
                 )
 
@@ -4894,7 +5896,7 @@ class TestE4M3FNSpec(unittest.TestCase):
 
             spec = runtime.to_spec(SpecContext(f"e4m3fn-{bits}"))
             expected = spec.classification_flags()[names[fields[3:].index(1)]]
-            self.assertEqual(expected.constant_fold(), BoolLit(True))
+            self.assertEqual(expected._constant_fold(), BoolLit(True))
 
         self.assertEqual(counts, {"norm": 238, "sub": 14, "zero": 2, "nan": 2})
 
@@ -4930,8 +5932,8 @@ class TestE4M3FNSpec(unittest.TestCase):
         self.assertIsInstance(E4M3FN().to_spec("input", ctx), e4m3fn)
         self.assertIsInstance(E4M3FN().random_value(random.Random(1)), Value)
 
-        self.assertEqual(e4m3fn.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
-        self.assertEqual(e4m3fn.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e4m3fn.zero(ctx).is_pzero._constant_fold(), BoolLit(True))
+        self.assertEqual(e4m3fn.nzero(ctx).is_nzero._constant_fold(), BoolLit(True))
         with self.assertRaisesRegex(ValueError, "Unknown e4m3fn classification"):
             value.observables_for_classification("inf")
 
@@ -5113,7 +6115,7 @@ class TestUE4M3Spec(unittest.TestCase):
 
                 spec = runtime.to_spec(SpecContext(f"ue4m3-{bits}"))
                 self.assertEqual(
-                    spec.classification_flags()[classification].constant_fold(),
+                    spec.classification_flags()[classification]._constant_fold(),
                     BoolLit(True),
                 )
                 value.load_value(runtime)
@@ -5139,8 +6141,8 @@ class TestUE4M3Spec(unittest.TestCase):
         positive = ue4m3.encode(RealLit(1), positive_ctx)
         negative_ctx = SpecContext("negative-ue4m3")
         negative = ue4m3.encode(RealLit(-1), negative_ctx)
-        self.assertEqual(positive.value.constant_fold(), RealLit(1))
-        self.assertEqual(negative.value.constant_fold(), RealLit(1))
+        self.assertEqual(positive.value._constant_fold(), RealLit(1))
+        self.assertEqual(negative.value._constant_fold(), RealLit(1))
 
     def test_bit_level_encoder_rne_zero_and_saturation(self):
         exponent = Var("exponent", Q(8, 0))
@@ -5358,7 +6360,7 @@ class TestE5M2Spec(unittest.TestCase):
                 counts[classification] += 1
                 spec = runtime.to_spec(SpecContext(f"e5m2-{bits}"))
                 self.assertEqual(
-                    spec.classification_flags()[classification].constant_fold(),
+                    spec.classification_flags()[classification]._constant_fold(),
                     BoolLit(True),
                 )
                 value.load_value(runtime)
@@ -5387,11 +6389,11 @@ class TestE5M2Spec(unittest.TestCase):
             value.observables_for_classification("finite")
         self.assertIsInstance(E5M2().to_spec("input", ctx), e5m2)
         self.assertIsInstance(E5M2().random_value(random.Random(1)), Value)
-        self.assertEqual(e5m2.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
-        self.assertEqual(e5m2.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
-        self.assertEqual(e5m2.inf(ctx).is_pinf.constant_fold(), BoolLit(True))
-        self.assertEqual(e5m2.ninf(ctx).is_ninf.constant_fold(), BoolLit(True))
-        self.assertEqual(e5m2.nan(ctx).is_nan.constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.zero(ctx).is_pzero._constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.nzero(ctx).is_nzero._constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.inf(ctx).is_pinf._constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.ninf(ctx).is_ninf._constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2.nan(ctx).is_nan._constant_fold(), BoolLit(True))
 
     def test_encoder_rne_canonical_zero_infinity_and_all_finite_encodings(self):
         sign = Var("e5m2_sign", UQ(1, 0))
@@ -5538,7 +6540,7 @@ class TestE5M2FNUZSpec(unittest.TestCase):
                 counts[classification] += 1
                 spec = runtime.to_spec(SpecContext(f"e5m2fnuz-{bits}"))
                 self.assertEqual(
-                    spec.classification_flags()[classification].constant_fold(),
+                    spec.classification_flags()[classification]._constant_fold(),
                     BoolLit(True),
                 )
                 value.load_value(runtime)
@@ -5560,8 +6562,8 @@ class TestE5M2FNUZSpec(unittest.TestCase):
         self.assertIsInstance(
             E5M2FNUZ().random_value(random.Random(1)), Value
         )
-        self.assertEqual(e5m2fnuz.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
-        self.assertEqual(e5m2fnuz.nan(ctx).is_nan.constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2fnuz.zero(ctx).is_pzero._constant_fold(), BoolLit(True))
+        self.assertEqual(e5m2fnuz.nan(ctx).is_nan._constant_fold(), BoolLit(True))
         self.assertFalse(hasattr(e5m2fnuz, "nzero"))
         self.assertFalse(hasattr(e5m2fnuz, "inf"))
 
@@ -5713,7 +6715,7 @@ class TestE2M1Spec(unittest.TestCase):
                 counts[classification] += 1
                 spec = runtime.to_spec(SpecContext(f"e2m1-{bits}"))
                 self.assertEqual(
-                    spec.classification_flags()[classification].constant_fold(),
+                    spec.classification_flags()[classification]._constant_fold(),
                     BoolLit(True),
                 )
                 value.load_value(runtime)
@@ -5730,8 +6732,8 @@ class TestE2M1Spec(unittest.TestCase):
         self.assertEqual(value.observables_for_classification("zero"), (value.sign,))
         self.assertIsInstance(E2M1().to_spec("input", ctx), e2m1)
         self.assertIsInstance(E2M1().random_value(random.Random(1)), Value)
-        self.assertEqual(e2m1.zero(ctx).is_pzero.constant_fold(), BoolLit(True))
-        self.assertEqual(e2m1.nzero(ctx).is_nzero.constant_fold(), BoolLit(True))
+        self.assertEqual(e2m1.zero(ctx).is_pzero._constant_fold(), BoolLit(True))
+        self.assertEqual(e2m1.nzero(ctx).is_nzero._constant_fold(), BoolLit(True))
         self.assertFalse(hasattr(e2m1, "nan"))
         self.assertFalse(hasattr(e2m1, "inf"))
 
@@ -5858,7 +6860,7 @@ class TestBFloat16Spec(unittest.TestCase):
         decoded = bf16_decode(Const(BFloat16().Zero()))
 
         self.assertEqual(
-            tuple(ctx.spec_of(field).constant_fold() for field in decoded),
+            tuple(ctx.spec_of(field)._constant_fold() for field in decoded),
             tuple(RealLit(value) for value in (0, 0, 0, 0, 0, 1, 0, 0)),
         )
         self.assertIs(decoded.sign, decoded[0])
@@ -5887,7 +6889,7 @@ class TestBFloat16Spec(unittest.TestCase):
                 else:
                     self.assertEqual(value.value, RealLit(0))
                 self.assertEqual(
-                    getattr(value, predicate).constant_fold(),
+                    getattr(value, predicate)._constant_fold(),
                     BoolLit(True),
                 )
         self.assertEqual(len(special_names), 3)
@@ -12603,6 +13605,34 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(result.evaluate().to_python(), expected)
 
+    def test_chained_luts_include_rounded_intermediate_input_codes(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("rounded-intermediate-domain")
+        x = ctx.real("x")
+        ctx.assume((x >= ctx.one()) & (x <= ctx.real_val(3)))
+        inner = ctx.rne(x ** ctx.real_val(0.5), 0)
+        expression = ctx.rne(inner ** ctx.real_val(-1), 2)
+        source = Var("x", UQ(2, 0))
+        build = spec_lowering._build_missing_primitive
+
+        def require_materialized_inner(missing, input_expr, *args, **kwargs):
+            if missing.identical(expression) and input_expr.identical(x):
+                raise MissingError("Exercise the two-LUT derivation instead of fusion")
+            return build(missing, input_expr, *args, **kwargs)
+
+        with patch.object(
+            spec_lowering, "_build_missing_primitive", side_effect=require_materialized_inner,
+        ):
+            search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(1, 2), ctx)
+            result = search.run()
+
+        self.assertEqual(search.result.cost, 200)
+        self.assertTrue(result.args[0].name.startswith("LUT_rne_"))
+        for value, expected in ((1, 1), (2, 1), (3, 0.5)):
+            source.load_value(UQ(2, 0).from_bits(value))
+            self.assertEqual(result.evaluate().to_python(), expected)
+
     def test_lut_absorbs_surrounding_arithmetic_when_cheaper(self):
         from zolotone.autogen import spec_lowering
 
@@ -12974,12 +14004,22 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         self.assertTrue(any("value=-1" in expression for expression in generated))
         self.assertTrue(any("value=2" in expression for expression in generated))
 
-    def test_autogenerate_rejects_independently_rounded_runtime_components(self):
+    def test_autogenerate_combines_independently_rounded_runtime_components(self):
         def two_missing(x: UQ(2, 0), y: UQ(2, 0), ctx) -> UQ:
             return ctx.rne(x ** ctx.two(), frac_bits=0) + ctx.rne((y + ctx.one()) ** ctx.real_val(-1), frac_bits=0)
 
-        with self.assertRaisesRegex(NotImplementedError, "root operation"):
-            Autogenerate("two_missing", two_missing)
+        generated = Autogenerate("two_missing", two_missing)
+        tempdir, compiled = jit_compile(generated)
+        try:
+            for x in range(4):
+                for y in range(4):
+                    expected = x * x + round(Fraction(1, y + 1))
+                    generated.args[0].load_value(UQ(2, 0).from_bits(x))
+                    generated.args[1].load_value(UQ(2, 0).from_bits(y))
+                    self.assertEqual(generated.evaluate().to_python(), expected)
+                    self.assertEqual(compiled(x, y), expected)
+        finally:
+            tempdir.cleanup()
 
     def test_lowering_generates_component_from_typed_input(self):
         from zolotone.autogen.spec_lowering import search_lower_spec_to_impl

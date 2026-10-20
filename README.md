@@ -129,11 +129,17 @@ def reciprocal(x: UQ(3, 2), ctx) -> UQ:
 ```
 
 `ctx.rne`, `ctx.rtz`, and `ctx.raz` return real-valued spec expressions rounded
-to multiples of `2**-frac_bits`. The precision is mandatory. RNE rounds to
+to multiples of `2**-frac_bits`. At the result root, omitted `frac_bits` is inferred
+from a concrete `Q(I, F)` or `UQ(I, F)` return annotation. Family annotations (`Q` or
+`UQ`) require explicit precision. Inference resolves the AST after the spec
+function returns; standalone evaluation also requires explicit precision. RNE rounds to
 nearest with ties to even, RTZ toward zero, and RAZ away from zero. Integer
 width and signedness are inferred from the rounded range; rounding does not
 saturate or wrap. An output descriptor can widen the result exactly, but cannot
 silently discard its fractional precision.
+Root rounding with more fractional bits than the output descriptor is rejected
+before simplification or lowering. Explicitly supplying fewer fractional bits
+is allowed: the rounded result is widened exactly to the output format.
 
 An unrounded missing operation such as `x ** -1` is rejected. Existing exact
 components can still implement ordinary expressions. A generated `Primitive`
@@ -145,13 +151,21 @@ Independent inputs must first be combined by existing components.
 Rounding placement is significant: wrapping a complete reciprocal-of-square-root
 expression in one `ctx.rne(..., frac_bits=2)` requests final rounding only.
 Wrapping the square root in another rounding node requests intermediate
-rounding too; autogeneration currently rejects such nested rounding with
-`NotImplementedError`, before simplification. Rounding must be the root operation
-of the result. Any rounding subtree in assumptions, checks, or requirements must
-structurally match the complete rounded result, including its mode and precision.
+rounding too. Nested and non-root rounding require explicit `frac_bits`, including
+independent rounding in assumptions, checks, and requirements. References to an
+inferred root rounding in conditions receive that root's inferred precision.
+Intermediate rounding may use more fractional bits than the final output;
+each rounding stage is preserved, even when fused into one LUT.
+
+Known limitation: Rival's integer-rounding wrappers do not preserve outward
+interval bounds when an integer result exceeds the working floating-point
+precision. Large intermediate rounded values can therefore produce incorrect
+LUT entries, even when the final output is small. Fixing those wrappers is deferred.
 
 Constant folding currently uses Python arithmetic and may lose precision before
-explicit rounding. Exact constant folding is deferred.
+explicit rounding. Exact constant folding is deferred. Folding is an internal
+operation (`_constant_fold()`), not a public spec API; user specs should construct
+expressions and leave folding to the internal passes.
 
 Search uses components' natural output formats. Once a candidate implements the
 complete result expression, lowering widens it directly to the requested format
@@ -319,7 +333,8 @@ Generated lookup tables normalize integer input codes as `n * 2**(-F_input)`
 and applies the specified mode in output discretization and integer extraction.
 It refines the real interval until both endpoints map to the same output code.
 Any inner rounding nodes remain part of `e`, preserving intermediate rounding.
-Widening to a larger output fractional field uses an exact integer shift.
+LUTs keep the rounding node's fractional width. Widening to a larger requested
+output format happens afterward through lossless result adaptation.
 
 The `build_integer_machine` API follows the same rule: a final rounding node
 selects its mode and output-code scale. Without a final rounding node, the
