@@ -466,7 +466,27 @@ class Round(RealExpr):
         raise NotImplementedError("egglog does not support explicit fixed-point rounding")
 
     def to_z3(self, env):
-        raise NotImplementedError("Z3 translation does not support exact fixed-point rounding")
+        scale = 1 << self.frac_bits
+        scaled = self.value.to_z3(env) * scale
+        # Z3's ToInt is floor, including for negative reals.
+        lower = z3.ToInt(scaled)
+        if self.mode is RoundingMode.RNE:
+            remainder = scaled - z3.ToReal(lower)
+            half = z3.RealVal("1/2")
+            code = z3.If(
+                remainder < half,
+                lower,
+                z3.If(
+                    remainder > half,
+                    lower + 1,
+                    z3.If(lower % 2 == 0, lower, lower + 1),
+                ),
+            )
+        elif self.mode is RoundingMode.RTZ:
+            code = z3.If(scaled >= 0, lower, -z3.ToInt(-scaled))
+        else:
+            code = z3.If(scaled >= 0, -z3.ToInt(-scaled), lower)
+        return z3.ToReal(code) / scale
 
     def to_dreal(self, env):
         raise NotImplementedError("dReal does not support exact fixed-point rounding")
