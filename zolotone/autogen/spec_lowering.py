@@ -730,10 +730,6 @@ def rewrite_strict_conditions(
 def lower_spec_result(
     spec: Spec,
 ) -> Node:
-    if spec.rounding_choices:
-        raise NotImplementedError(
-            "Implementation lowering with artificial rounding choices is not implemented"
-        )
 
     @Composite(name=spec.name, spec=spec.to_function())
     def generated_impl(*impl_inputs: Node) -> Node:
