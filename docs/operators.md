@@ -1,5 +1,47 @@
 ### Type notation
 
+Specification rounding uses `ctx.rne(value, frac_bits=F)`,
+`ctx.rtz(value, frac_bits=F)`, or `ctx.raz(value, frac_bits=F)` and returns a
+`RealExpr` on the `2**-F` grid. At the result root, omitting `frac_bits` infers it
+from a concrete `Q(I, F)` or `UQ(I, F)` return annotation; otherwise precision is required.
+Inference fills in the AST's precision after the specification function returns.
+Explicit root precision overrides inference, but cannot exceed the output's
+fractional width. Intermediate rounding may use finer precision. The modes mean nearest
+with ties to even, toward zero, and away from zero respectively. These are spec
+nodes, not hardware components; explicit rounding nodes enable LUT synthesis.
+Z3 supports all three modes exactly, including nested rounding and negative
+ties. Autogeneration allows nested and non-root rounding with explicit
+`frac_bits`, including independent rounding in assumptions, checks, and requirements.
+References to an inferred root rounding in conditions receive its inferred precision.
+Rival has a known interval-bound limitation for large intermediate rounded integers;
+see the rounding notes in the README. Translation to egglog and dReal remains unsupported.
+
+`ctx.fr(value, frac_bits=F)` builds a `Round` node with mode `RoundingMode.FR` for faithful rounding:
+either neighboring grid value is permitted, with exact grid values unchanged.
+It uses the same root precision inference and precision validation as other modes.
+After precision validation, autogen expands each FR subtree into
+`If(rnd, RAZ(value, F), RTZ(value, F))`. Artificial Boolean choices are stored in
+`Spec.rounding_choices` so they remain identifiable as artificial inputs.
+The expanded `Spec` includes these variables in its inputs, signature, and annotations
+with dtype `Bool()`. The original Python function is unchanged and is not stored in `Spec`.
+`Spec.to_function()` derives a callable from the current AST and conditions when needed,
+rebinding inputs simultaneously rather than rerunning the original function.
+Repeated FR subtrees share a choice across the result and all conditions.
+Simplification, strict-condition rewriting, and validation process the expanded spec.
+Lowering treats these as explicit Boolean arguments, always appended after ordinary
+inputs. Autogen sets the generated Composite's `rounding_choice_count`; the last
+that many inputs are artificial choices. Ordinary Composites default to zero.
+C++ emits two `zolotone` overloads: one accepts all arguments, and the other derives
+the artificial choices using `simulation_parameter(input_key, 0, 1)`. Ordinary input
+raw bits are packed in argument order, first input most significant; tuple fields
+are packed in field order. Keys wider than 64 bits are rejected. With no ordinary
+inputs the key is zero. Choice `i` uses `input_key + i` with unsigned 64-bit wraparound.
+The hash helper is emitted only when rounding choices are present.
+Only the `zolotone` entry point overloads are public. Implementation functions and
+the hash helper are emitted below them as private static methods.
+Unexpanded FR nodes still reject solver/Rival translation, and constant folding
+preserves them instead of selecting a result.
+
 - `Q<I,F>`: signed fixed-point with `I` integer and `F` fractional bits; `UQ<I,F>` unsigned.
 - `Float16`, `BFloat16`, `Float32`: IEEE754 formats; `E4M3FN` is the
   finite-only 8-bit `S.EEEE.MMM` format (bias 7, signed zeros, subnormals,

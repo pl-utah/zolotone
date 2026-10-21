@@ -1,8 +1,12 @@
-"""Public exception types raised by Zolotone."""
+"""Exception types raised by Zolotone."""
 
 
 class ZolotoneError(Exception):
     """Base class for Zolotone-specific failures."""
+
+
+class _SpecProbeLimitExceeded(ZolotoneError):
+    """Component matching exhausted its specification-probe budget."""
 
 
 class InfeasibleError(ZolotoneError, TypeError):

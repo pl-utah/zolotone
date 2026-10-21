@@ -38,6 +38,60 @@ impl Discretization for RangeDiscretization {
     }
 }
 
+#[derive(Clone, Copy)]
+enum OutputRounding {
+    Exact,
+    Rne,
+    Rtz,
+    Raz,
+}
+
+impl OutputRounding {
+    fn convert(self, value: &Float) -> Float {
+        match self {
+            Self::Exact => value.clone(),
+            Self::Rne => value.clone().round_even(),
+            Self::Rtz => value.clone().trunc(),
+            Self::Raz if value.is_sign_negative() => value.clone().floor(),
+            Self::Raz => value.clone().ceil(),
+        }
+    }
+}
+
+/// Discretize an expression already expressed in integer output-code units.
+#[derive(Clone)]
+struct IntegerDiscretization {
+    target_bits: u32,
+    rounding: OutputRounding,
+}
+
+impl Discretization for IntegerDiscretization {
+    fn target(&self) -> u32 {
+        self.target_bits
+    }
+
+    fn convert(&self, _: usize, value: &Float) -> Float {
+        // Preserve the endpoint's precision and non-finite values.  Narrowing
+        // to target_bits here could merge distinct integer output codes.
+        self.rounding.convert(value)
+    }
+
+    fn distance(&self, _: usize, lo: &Float, hi: &Float) -> usize {
+        if !lo.is_finite() || !hi.is_finite() {
+            return 2;
+        }
+        if lo == hi {
+            return 0;
+        }
+        let difference = Float::with_val(lo.prec().max(hi.prec()), hi - lo);
+        if difference == 1 || difference == -1 {
+            1
+        } else {
+            2
+        }
+    }
+}
+
 fn ordinal_distance_f64(x: f64, y: f64) -> usize {
     if x == y {
         return 0;
@@ -72,6 +126,12 @@ impl RivalHints {
 struct RawRivalMachine {
     machine: Machine<F64Discretization>,
     range_machine: Machine<RangeDiscretization>,
+}
+
+#[pyclass(module = "zolotone._rival3")]
+struct RawIntegerMachine {
+    machine: Machine<IntegerDiscretization>,
+    rounding: OutputRounding,
 }
 
 #[pymethods]
@@ -149,6 +209,40 @@ impl RawRivalMachine {
     }
 }
 
+#[pymethods]
+impl RawIntegerMachine {
+    /// Evaluate an integer input and extract a code using the same rounding
+    /// as output discretization. Strings avoid host integer-width limits.
+    fn apply(&mut self, raw_input: &str) -> PyResult<String> {
+        let integer = Integer::from_str_radix(raw_input, 10)
+            .map_err(|_| PyValueError::new_err("invalid integer input code"))?;
+        let precision = self
+            .machine
+            .argument_precision()
+            .max(integer.significant_bits());
+        let value = Float::with_val(precision, integer);
+        let args = [Ival::from_lo_hi(value.clone(), value)];
+        let outputs = self
+            .machine
+            .apply(&args, None, 10_000)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let output = outputs
+            .first()
+            .ok_or_else(|| PyValueError::new_err("integer machine returned no outputs"))?;
+        // Successful apply already guarantees agreement after discretization.
+        let rounded = self.rounding.convert(output.lo());
+        if !rounded.is_integer() {
+            return Err(PyValueError::new_err(
+                "expression did not produce an integer output code",
+            ));
+        }
+        let integer = rounded
+            .to_integer()
+            .ok_or_else(|| PyValueError::new_err("could not determine integer output code"))?;
+        Ok(integer.to_string())
+    }
+}
+
 #[pyfunction]
 fn build_machine(exprs: &PyList, free_vars: Vec<String>) -> PyResult<RawRivalMachine> {
     if exprs.is_empty() {
@@ -167,6 +261,41 @@ fn build_machine(exprs: &PyList, free_vars: Vec<String>) -> PyResult<RawRivalMac
     Ok(RawRivalMachine {
         machine,
         range_machine,
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (expr, input_total_bits, output_total_bits, rounding_mode=None))]
+fn build_integer_machine(
+    expr: &PyAny,
+    input_total_bits: u32,
+    output_total_bits: u32,
+    rounding_mode: Option<&str>,
+) -> PyResult<RawIntegerMachine> {
+    let rounding = match rounding_mode {
+        None => OutputRounding::Exact,
+        Some("RNE") => OutputRounding::Rne,
+        Some("RTZ") => OutputRounding::Rtz,
+        Some("RAZ") => OutputRounding::Raz,
+        Some(mode) => {
+            return Err(PyValueError::new_err(format!(
+                "unsupported output rounding mode {mode:?}"
+            )))
+        }
+    };
+    let rival_expr = parse_expr(expr)?;
+    let disc = IntegerDiscretization {
+        rounding,
+        // Seed interval evaluation from the requested code widths with two
+        // guard bits. The discretization itself preserves endpoint precision.
+        target_bits: input_total_bits
+            .max(output_total_bits)
+            .saturating_add(2)
+            .max(20),
+    };
+    Ok(RawIntegerMachine {
+        rounding,
+        machine: MachineBuilder::new(disc).build(vec![rival_expr], vec!["x".to_string()]),
     })
 }
 
@@ -193,6 +322,10 @@ fn parse_expr(obj: &PyAny) -> PyResult<Expr> {
         "mul" => parse_binary(dict, Expr::Mul),
         "neg" => parse_unary(dict, Expr::Neg),
         "abs" => parse_unary(dict, Expr::Fabs),
+        "round_even" => parse_unary(dict, Expr::Round),
+        "floor" => parse_unary(dict, Expr::Floor),
+        "ceil" => parse_unary(dict, Expr::Ceil),
+        "trunc" => parse_unary(dict, Expr::Trunc),
         "pow" => parse_binary(dict, Expr::Pow),
         "min" => parse_binary(dict, Expr::Fmin),
         "max" => parse_binary(dict, Expr::Fmax),
@@ -261,8 +394,10 @@ fn parse_ternary(
 #[pymodule]
 fn _rival3(_py: Python<'_>, module: &PyModule) -> PyResult<()> {
     module.add_class::<RawRivalMachine>()?;
+    module.add_class::<RawIntegerMachine>()?;
     module.add_class::<RivalHints>()?;
     module.add_function(wrap_pyfunction!(build_machine, module)?)?;
+    module.add_function(wrap_pyfunction!(build_integer_machine, module)?)?;
     module.add("__doc__", "Native Rival3 bridge for zolotone")?;
     Ok(())
 }

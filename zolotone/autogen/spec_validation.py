@@ -16,15 +16,16 @@ from ..spec.spec_ast import (
     Eq,
     Not,
     RealExpr,
+    Round,
     SpecNode,
     children,
     identical_nodes,
     substitute_spec_node,
     variables,
 )
-from ..spec.spec_context import SpecContext, normalize_nnf, simplify_ctx
+from ..spec.spec_context import SpecContext, normalize_ctx, simplify_ctx
 from ..types import Bool, DataType, Q, UQ
-from .nodes import _SpecContract
+from ..ast.nodes import _SpecContract
 
 if tp.TYPE_CHECKING:
     from .autogen import Spec
@@ -145,7 +146,7 @@ def _simplify_spec_ast(
     # Normalize assumptions before simplification so complementary comparison
     # forms can expose redundant constraints. User checks remain outside the
     # probe so they are preserved rather than discharged.
-    probe_ctx = normalize_nnf(spec.spec_ctx.copy(checks=[]))
+    probe_ctx = normalize_ctx(spec.spec_ctx.copy(checks=[]))
     if isinstance(spec.spec_ast, RealExpr):
         marker = probe_ctx.fresh_real("simplified_spec_result")
     elif isinstance(spec.spec_ast, BoolExpr):
@@ -186,7 +187,7 @@ def _simplify_spec_ast(
             "Specification simplification produced an invalid result carrier"
         )
 
-    simplified_spec_ast = simplified.constant_fold()
+    simplified_spec_ast = simplified._constant_fold()
     # Keep assumptions that justified the simplified result. Rewrite checks to
     # refer to that result without folding them away; they will be lowered as
     # runtime implementation checks later.
@@ -200,7 +201,7 @@ def _simplify_spec_ast(
             for check in spec.spec_ctx.checks
         ]
     )
-    result_ctx = normalize_nnf(result_ctx)
+    result_ctx = normalize_ctx(result_ctx)
     size_after = _spec_simplification_size(simplified_spec_ast, result_ctx)
     reduction = size_before - size_after
     if reduction > 0:
@@ -599,6 +600,36 @@ def _validate_spec_shape(
         f"Output format {spec.return_annotation!r} is not supported by "
         "autogeneration"
     )
+
+
+def _validate_rounding_precision(spec: Spec) -> None:
+    """Require resolved precision everywhere and reject narrowing root rounding."""
+    pending = [
+        spec.spec_ast,
+        *spec.spec_ctx.assumes,
+        *spec.spec_ctx.checks,
+        *spec.spec_ctx.requirements,
+    ]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Round) and node.frac_bits is None:
+            raise MissingError(
+                "Cannot infer rounding precision for non-root rounding; "
+                "provide frac_bits explicitly"
+            )
+        pending.extend(children(node))
+
+    if (
+        isinstance(spec.spec_ast, Round)
+        and isinstance(spec.return_annotation, (Q, UQ))
+        and spec.spec_ast.frac_bits > spec.return_annotation.frac_bits
+    ):
+        raise InfeasibleError(
+            f"Root rounding uses frac_bits={spec.spec_ast.frac_bits}, but output "
+            f"{spec.return_annotation!r} has frac_bits={spec.return_annotation.frac_bits}; "
+            "the output cannot discard fractional precision. "
+            "Round explicitly to the requested output precision instead"
+        )
 
 
 def _validate_spec_requirements(spec: Spec) -> None:

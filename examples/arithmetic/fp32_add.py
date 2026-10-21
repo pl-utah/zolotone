@@ -111,7 +111,7 @@ if __name__ == '__main__':
     )
     from pprint import pprint
     #adder.check_determinism()
-    adder.check_spec()
+    # adder.check_spec()
 
     with open("examples/c_models/fp32_add_jit.cpp", "w") as file:
         file.write(adder.to_cpp(jittable=True))

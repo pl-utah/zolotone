@@ -126,6 +126,13 @@ def spec13(x: UQ(2, 0), ctx) -> Float32():
     return x + ctx.one()
 
 
+# Missing-component synthesis currently handles one nonliteral input only.
+@Test(ZolotoneError)
+def missing_component_with_two_inputs(x: UQ(2, 0), y: UQ(2, 0), ctx) -> UQ(5, 0):
+    ctx.assume(x >= ctx.one())
+    return x ** y
+
+
 # conversion can be composed with numeric components
 @Test()
 def spec_bool_to_uq_then_add(x: Bool(), y: UQ(2, 1), ctx) -> UQ(5, 1):
@@ -257,16 +264,54 @@ def bit_precise_infeasible(x: UQ(4, 0), ctx) -> UQ(4, 0):
 def tightened_bound_avoids_domain_error(x: UQ(1, 0), ctx) -> UQ(3, 0):
     ctx.assume(x >= ctx.real_val(0.5))
     denominator = x - ctx.real_val(0.75)
-    return denominator ** ctx.real_val(-1)
+    return ctx.rne(denominator ** ctx.real_val(-1), frac_bits=0)
 
 
 # Domain error
-@Test()
+@Test(NotImplementedError)
 def domain_error(x: Q(4, 0), y: UQ(4, 0), ctx) -> Q:
-    return x ** (ctx.real_val(-1)) + ctx.one()
+    return ctx.rne(x ** ctx.real_val(-1), frac_bits=2) + ctx.one()
 
 
 # # Domain error
 # @Test()
 # def domain_error2(x: Q(4, 0), ctx) -> Q:
 #     return (x + ctx.one()) ** (ctx.real_val(-1)) + ctx.one()
+
+
+@Test(InfeasibleError)
+def infeasible_truncation(x: UQ(3, 0), y: UQ(2, 0), ctx) -> UQ(2, 3):
+    ctx.assume(x >= ctx.real_val(0.5))
+    denominator = x + y
+    return ctx.rne((denominator ** ctx.real_val(-1)) * ctx.real_val(2), frac_bits=4)
+
+
+@Test(MissingError)
+def missing_output_precision(x: UQ(3, 0), ctx) -> UQ:
+    ctx.assume(x > ctx.zero())
+    return ctx.rne((x ** ctx.real_val(-1)))
+
+@Test()
+def spec_frac_bits(x: UQ(3, 0), ctx) -> UQ:
+    ctx.assume(x > ctx.zero())
+    return ctx.rne((x ** ctx.real_val(-1)), frac_bits=5)
+
+
+@Test()
+def spec_frac_bits(x: UQ(3, 0), ctx) -> UQ:
+    ctx.assume(x > ctx.zero())
+    return ctx.rne((x ** ctx.real_val(-1)), frac_bits=5)
+
+
+@Test(MissingError)
+def missing_frac_bits(x: UQ(2, 2), ctx) -> UQ(2, 3):
+    result = ctx.fr(x, frac_bits=1)
+    ctx.check(ctx.fr(x).eq(result))
+    return result
+
+
+@Test()
+def should_pass_fr(x: UQ(2, 2), ctx) -> UQ(2, 3):
+    result = ctx.fr(x)
+    ctx.check(result >= ctx.real_val(0))
+    return result

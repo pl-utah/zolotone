@@ -373,12 +373,15 @@ def _lower_expr(node: SpecNode) -> Expr:
         Pow,
         RealLit,
         RealVar,
+        Round,
         Sub,
     )
     
     if isinstance(node, RealVar):
         return var(node.name, Math)
     if isinstance(node, RealLit):
+        return node.to_egglog()
+    if isinstance(node, Round):
         return node.to_egglog()
     if isinstance(node, Add):
         return Math.Add(_lower_expr(node.lhs), _lower_expr(node.rhs))

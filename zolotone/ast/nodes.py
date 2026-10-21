@@ -10,9 +10,9 @@ from ..solver.report import (
     StdoutVerificationObserver,
     VerificationObserver,
 )
-from .case_split import run_equivalence_cases
+from ..solver.case_split import run_equivalence_cases
 from .node import Node
-from .parallel_verification import resolve_max_workers
+from ..solver.parallel_verification import resolve_max_workers
 from .proofs import SpecRecorder, record_specs
 from ..spec import SpecContext, SpecNode, special_encoding
 
@@ -361,6 +361,7 @@ def Composite(
                 c_lowering=c_lowering,
             )
         setattr(wrapper2, "_spec_contract", contract)
+        setattr(wrapper2, "_spec_fn", spec)
         return wrapper2
     return wrapper1
 
@@ -378,6 +379,8 @@ class composite(Node):
     ):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
+        # Artificial rounding-choice inputs are always a trailing suffix.
+        self.rounding_choice_count = 0
         self.ctx = SpecContext(name)
         self.spec_assumes: tuple[SpecNode, ...] = ()
         self.spec_checks: tuple[SpecNode, ...] = ()
@@ -547,6 +550,7 @@ class composite(Node):
                 self.name,
                 self._type_and_constant_fingerprint(),
                 tuple(arg._type_and_constant_fingerprint() for arg in self.inner_args),
+                self.rounding_choice_count,
                 direct_cpp_lowering,
                 self.inner_tree._fingerprint(jittable) if direct_cpp_lowering is None else None,
                 tuple(
@@ -590,6 +594,7 @@ def Primitive(
                 c_lowering=c_lowering,
             )
         setattr(wrapper2, "_spec_contract", contract)
+        setattr(wrapper2, "_spec_fn", spec)
         return wrapper2
     return wrapper1
 

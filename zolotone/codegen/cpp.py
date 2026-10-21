@@ -37,21 +37,34 @@ class _CppEmitter:
     def emit_cpp(self, root: Node, function_name: str) -> str:
         # public_name = self._make_name(function_name)
         public_name = self._make_name("zolotone")
+        rounding_choice_count = root.rounding_choice_count if isinstance(root, composite) else 0
+        if rounding_choice_count:
+            self._make_name("simulation_parameter")
+            self._uses_assertions = True
+            self._functions.append(self._render_simulation_parameter())
         internal_name = self._make_name(function_name)
         self.emit_function(root=root, function_name=internal_name)
-        self._functions.append(
+        public_functions = [
             self._render_public_wrapper(
                 public_name=public_name,
                 internal_name=internal_name,
                 args=root.inner_args,
                 return_type=root.dtype,
             )
-        )
+        ]
+        if rounding_choice_count:
+            public_functions.insert(
+                0,
+                self._render_implicit_rounding_wrapper(
+                    public_name, root.inner_args, root.dtype, rounding_choice_count,
+                )
+            )
         includes = ["#include <cstdint>"]
         if self.jittable:
             includes.extend(["#include <array>", "#include <cassert>"])
         else:
             includes.extend([
+                "#include <array>",
                 "#include <tuple>",
                 "#include <ac_int.h>",
             ])
@@ -71,6 +84,13 @@ class _CppEmitter:
             "class Zolotone",
             "{",
             "public:",
+            *(
+                f"    {line}" if line else ""
+                for function in public_functions
+                for line in function.splitlines()
+            ),
+            "",
+            "private:",
             *(
                 f"    {line}" if line else ""
                 for function in self._functions
@@ -154,7 +174,9 @@ class _CppEmitter:
         signature = f"static inline {self._signature(name, root.inner_args, root.dtype)}"
 
         body = [*ctx.statements, f"return {result.expr};"]
-        indented_body = "\n".join(f"    {line}" for line in body)
+        indented_body = "\n".join(
+            f"    {line}" for statement in body for line in statement.splitlines()
+        )
         rendered = "\n".join(
             [signature + f" {{  // {root.name}", indented_body, "}"]
         )
@@ -168,6 +190,25 @@ class _CppEmitter:
     @staticmethod
     def _spec_comment(spec: object) -> str:
         return " ".join(str(spec).splitlines())
+
+    @staticmethod
+    def _render_simulation_parameter() -> str:
+        return """// Deterministically hash the input key into the inclusive range [lower, upper].
+static inline uint64_t simulation_parameter(
+    uint64_t input_key,
+    uint64_t lower,
+    uint64_t upper)
+{
+    assert(lower <= upper);
+
+    uint64_t value = input_key + 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    value ^= value >> 31;
+
+    const uint64_t range = upper - lower + 0x1;
+    return range == 0x0 ? value : lower + value % range;
+}"""
 
     def _should_inline(self, node: Node) -> bool:
         has_conditions = (
@@ -259,10 +300,22 @@ class _CppEmitter:
                 self._lower_const(Value(item_type, item_raw))
                 for item_raw, item_type in zip(value.raw, value.dtype.items)
             ]
-            if self.jittable:
+            if self.jittable or value.dtype.is_homogeneous:
+                elements = [
+                    f"static_cast<uint64_t>({arg.expr})" if self.jittable else arg.expr
+                    for arg in args
+                ]
+                if len(elements) > 4:
+                    rows = [
+                        "    " + ", ".join(elements[start:start + 4])
+                        for start in range(0, len(elements), 4)
+                    ]
+                    initializer = "\n" + ",\n".join(rows) + "\n"
+                else:
+                    initializer = ", ".join(elements)
                 return (
                     f"{self._render_type(value.dtype)}{{"
-                    + ", ".join(f"static_cast<uint64_t>({arg.expr})" for arg in args)
+                    + initializer
                     + "}"
                 )
             return f"std::make_tuple({', '.join(arg.expr for arg in args)})"
@@ -314,6 +367,61 @@ class _CppEmitter:
                 "}",
             ]
         )
+
+    def _render_implicit_rounding_wrapper(
+        self,
+        public_name: str,
+        args: list[Var],
+        return_type: DataType,
+        rounding_choice_count: int,
+    ) -> str:
+        split = len(args) - rounding_choice_count
+        ordinary_args, choices = args[:split], args[split:]
+        body = [
+            *self._public_width_assertions(ordinary_args),
+            f"const uint64_t input_key = {self._rounding_input_key(ordinary_args)};",
+        ]
+        for index, choice in enumerate(choices):
+            seed = "input_key" if index == 0 else f"input_key + {hex(index)}ULL"
+            cpp_type = self._render_type(choice.dtype)
+            body.append(
+                f"const {cpp_type} {choice.name} = "
+                f"{cpp_type}(simulation_parameter({seed}, 0x0, 0x1));"
+            )
+        body.append(f"return {public_name}({', '.join(arg.name for arg in args)});")
+        signature = self._signature(public_name, ordinary_args, return_type)
+        return "\n".join([
+            f"static inline {signature} {{",
+            *(f"    {line}" for line in body),
+            "}",
+        ])
+
+    def _rounding_input_key(self, args: list[Var]) -> str:
+        total_bits = sum(arg.dtype.total_bits() for arg in args)
+        if total_bits > 64:
+            raise CppLoweringError(
+                "Hash-derived rounding choices require at most 64 ordinary "
+                f"input bits, got {total_bits}"
+            )
+        fields = []
+        for arg in args:
+            if isinstance(arg.dtype, Tuple):
+                for index, dtype in enumerate(arg.dtype.items):
+                    expr = (
+                        f"{arg.name}.at({index})"
+                        if self.jittable or arg.dtype.is_homogeneous
+                        else f"std::get<{index}>({arg.name})"
+                    )
+                    fields.append((expr, dtype))
+            else:
+                fields.append((arg.name, arg.dtype))
+        key = "0x0"
+        for index, (expr, dtype) in enumerate(fields):
+            width = dtype.total_bits()
+            value = f"(static_cast<uint64_t>({expr}) & {self._mask_literal(width)})"
+            # The first field is assigned directly, avoiding a shift by 64.
+            key = value if index == 0 else f"(({key} << {width}) | {value})"
+        return key
     
     def _render_type(self, type_: DataType) -> str:
         if isinstance(type_, Tuple) and any(isinstance(item, Tuple) for item in type_.items):

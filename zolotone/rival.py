@@ -21,6 +21,7 @@ __all__ = [
     "rival_range_analysis",
     "rival_feasibility_check",
     "rival_trim_context",
+    "build_integer_machine",
 ]
 
 
@@ -139,6 +140,16 @@ class RivalMachine:
         ]
 
 
+class RivalIntegerMachine:
+    """Evaluate integer inputs to exact integer output codes."""
+
+    def __init__(self, raw_machine: Any):
+        self._raw_machine = raw_machine
+
+    def apply(self, raw_input: int) -> int:
+        return int(self._raw_machine.apply(str(raw_input)))
+
+
 def build_machine(
     exprs: Sequence[SpecNode],
     free_vars: Sequence[str],
@@ -163,6 +174,44 @@ def build_range_machine(
     native = _load_native_module()
     raw_machine = native.build_machine([to_rival_ir(expr)], var_list)
     return RivalMachine(raw_machine)
+
+
+def build_integer_machine(
+    expr: RealExpr,
+    input_total_bits: int,
+    output_total_bits: int,
+) -> RivalIntegerMachine:
+    """Compile an expression from integer input to integer output codes.
+
+    A final Round supplies the output discretization: evaluate its operand in
+    units of 2**-frac_bits and return the integer code in its specified mode.
+    Other expressions must already produce exact integers. Inner rounding
+    nodes remain part of the expression and retain their own semantics.
+    """
+    if not isinstance(expr, RealExpr):
+        raise TypeError("integer evaluation requires a real expression")
+    _validate_referenced_vars([expr], ["x"])
+    for label, total in (("input", input_total_bits), ("output", output_total_bits)):
+        if type(total) is not int:
+            raise TypeError(f"{label} bit width must be an integer")
+        if total < 1:
+            raise ValueError(f"invalid {label} integer bit width")
+
+    rounding_mode = None
+    if isinstance(expr, Round):
+        if expr.mode is RoundingMode.FR:
+            raise NotImplementedError("Rival lowering of faithful rounding is not implemented")
+        rounding_mode = expr.mode.value
+        expr = expr.value * (RealLit(2) ** RealLit(expr.frac_bits))
+
+    native = _load_native_module()
+    raw_machine = native.build_integer_machine(
+        to_rival_ir(expr),
+        input_total_bits,
+        output_total_bits,
+        rounding_mode,
+    )
+    return RivalIntegerMachine(raw_machine)
 
 
 def _build_domain_machine(
@@ -354,6 +403,13 @@ def _get_rival_rects_and_contributors(
     bool_var_names: set[str],
     max_rects: int,
 ) -> tuple[list[list[tuple[float, float]]], list[bool]]:
+    from .spec.spec_context import SpecContext, normalize_ctx
+
+    # Keep assumption positions intact so contributors still refer to the
+    # caller's source expressions, even when extraction uses normalized ones.
+    normalization_ctx = SpecContext("Rival rectangle assumptions")
+    normalization_ctx.assumes = list(assumes)
+    assumes = normalize_ctx(normalization_ctx).assumes
     domain = _RivalRectDomain.build(free_vars, bool_var_names)
     variable_kind_cache: dict[int, tuple[bool, bool]] = {}
     rects = [domain.new_rect()]
@@ -458,7 +514,7 @@ def _rewrite_proven_expressions(
         return None
 
     def prove(predicate: BoolExpr) -> bool | None:
-        predicate = predicate.constant_fold()
+        predicate = predicate._constant_fold()
         if isinstance(predicate, BoolLit):
             return predicate.value
         if not rects:
@@ -479,7 +535,7 @@ def _rewrite_proven_expressions(
             # An asserted predicate that always errors may be either false or
             # undefined. Prove falsity by successfully asserting its negation
             # instead of interpreting an error status as Boolean false.
-            negated = (~predicate).constant_fold()
+            negated = (~predicate)._constant_fold()
             if isinstance(negated, BoolLit):
                 result = not negated.value
             else:
@@ -497,8 +553,8 @@ def _rewrite_proven_expressions(
         rewritten = (
             node
             if all(old is new for old, new in zip(old_children, new_children))
-            else type(node)(*new_children)
-        ).constant_fold()
+            else rebuild_spec_node(node, new_children)
+        )._constant_fold()
 
         if isinstance(rewritten, BoolLit):
             return rewritten
@@ -527,11 +583,11 @@ def _rewrite_proven_expressions(
             if nonnegative is True:
                 return rewritten.value
             if nonnegative is False:
-                return (-rewritten.value).constant_fold()
+                return (-rewritten.value)._constant_fold()
 
             nonpositive = prove(rewritten.value <= zero)
             if nonpositive is True:
-                return (-rewritten.value).constant_fold()
+                return (-rewritten.value)._constant_fold()
             if nonpositive is False:
                 return rewritten.value
             return rewritten
@@ -918,7 +974,7 @@ def _rival_boolean_rect_alternatives(
             var: BoolLit(value)
             for var, value in zip(bool_vars, values)
         }
-        folded = substitute_literals(expr, replacements).constant_fold()
+        folded = substitute_literals(expr, replacements)._constant_fold()
         if not isinstance(folded, BoolLit):
             return None
         if not folded.value:
@@ -1036,6 +1092,26 @@ def _intersect_rival_rects(
 
 
 def to_rival_ir(node: SpecNode) -> RivalIR:
+    if isinstance(node, Round):
+        if node.mode is RoundingMode.FR:
+            raise NotImplementedError("Rival lowering of faithful rounding is not implemented")
+        scale = RealLit(2) ** RealLit(node.frac_bits)
+        scaled = to_rival_ir(node.value * scale)
+        if node.mode is RoundingMode.RNE:
+            rounded = {"op": "round_even", "arg": scaled}
+        elif node.mode is RoundingMode.RTZ:
+            rounded = {"op": "trunc", "arg": scaled}
+        else:
+            rounded = {
+                "op": "if",
+                "cond": to_rival_ir(node.value >= RealLit(0)),
+                "on_true": {"op": "ceil", "arg": scaled},
+                "on_false": {"op": "neg", "arg": {
+                    "op": "ceil", "arg": {"op": "neg", "arg": scaled},
+                }},
+            }
+        return {"op": "mul", "lhs": rounded,
+                "rhs": to_rival_ir(RealLit(2) ** RealLit(-node.frac_bits))}
     if isinstance(node, (RealVar, BoolVar)):
         return {"op": "var", "name": node.name}
     if isinstance(node, RealLit):

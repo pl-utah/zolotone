@@ -14,7 +14,7 @@ from concurrent.futures import (
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Callable, Iterable
 
-from ..solver.report import CaseVerificationResult, VerificationObserver
+from .report import CaseVerificationResult, VerificationObserver
 from ..spec import SpecContext
 
 

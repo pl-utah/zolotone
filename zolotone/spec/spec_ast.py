@@ -3,11 +3,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields, is_dataclass, replace
 from fractions import Fraction
+from enum import Enum
 import math
 import sys
 from typing import Any
 
 from ..egglog import *
+from ..errors import MissingError
 
 import z3
 import dreal
@@ -29,16 +31,16 @@ class SpecNode:
     def identical(self, other: object) -> bool:
         return identical_nodes(self, other)
     
-    def constant_fold(self) -> "SpecNode":
+    def _constant_fold(self) -> "SpecNode":
         args = children(self)
         if args == ():
             return self
         
-        folded_args = tuple(arg.constant_fold() for arg in args)
+        folded_args = tuple(arg._constant_fold() for arg in args)
         rebuilt = (
             self
             if all(old is new for old, new in zip(args, folded_args))
-            else type(self)(*folded_args)
+            else rebuild_spec_node(self, folded_args)
         )
         return _fold_node_with_folded_args(rebuilt, folded_args)
     
@@ -157,11 +159,11 @@ class FPExpr(SpecNode, ABC):
     def decode(self) -> tuple[SpecNode, ...]:
         """Return this FP value's mathematical value and format fields."""
 
-    def constant_fold(self) -> "FPExpr":
+    def _constant_fold(self) -> "FPExpr":
         """Fold each scalar field of this structured expression."""
 
         old_fields = self.decode()
-        folded_fields = tuple(field.constant_fold() for field in old_fields)
+        folded_fields = tuple(field._constant_fold() for field in old_fields)
         if all(old is new for old, new in zip(old_fields, folded_fields)):
             return self
         return type(self)(*folded_fields)
@@ -438,6 +440,82 @@ class BoolLit(BoolExpr):
     
     def __str__(self):
         return "true" if self.value else "false"
+
+
+class RoundingMode(Enum):
+    RNE = "RNE"
+    RTZ = "RTZ"
+    RAZ = "RAZ"
+    FR = "FR"
+
+
+@dataclass(frozen=True)
+class Round(RealExpr):
+    value: RealExpr
+    mode: RoundingMode
+    frac_bits: int | None = None
+
+    def __post_init__(self):
+        RealExpr._coerce_real_expr(self.value)
+        if not isinstance(self.mode, RoundingMode):
+            raise TypeError("Round mode must be a RoundingMode")
+        if self.frac_bits is None:
+            return
+        if type(self.frac_bits) is not int:
+            raise TypeError("frac_bits must be an integer")
+        if self.frac_bits < 0:
+            raise ValueError("frac_bits must be non-negative")
+
+    def to_egglog(self):
+        raise NotImplementedError("egglog does not support explicit fixed-point rounding")
+
+    def to_z3(self, env):
+        if self.frac_bits is None:
+            raise MissingError("Rounding precision is unresolved; provide frac_bits explicitly")
+        if self.mode is RoundingMode.FR:
+            raise NotImplementedError("Z3 lowering of faithful rounding is not implemented")
+        scale = 1 << self.frac_bits
+        scaled = self.value.to_z3(env) * scale
+        # Z3's ToInt is floor, including for negative reals.
+        lower = z3.ToInt(scaled)
+        if self.mode is RoundingMode.RNE:
+            remainder = scaled - z3.ToReal(lower)
+            half = z3.RealVal("1/2")
+            code = z3.If(
+                remainder < half,
+                lower,
+                z3.If(
+                    remainder > half,
+                    lower + 1,
+                    z3.If(lower % 2 == 0, lower, lower + 1),
+                ),
+            )
+        elif self.mode is RoundingMode.RTZ:
+            code = z3.If(scaled >= 0, lower, -z3.ToInt(-scaled))
+        else:
+            code = z3.If(scaled >= 0, -z3.ToInt(-scaled), lower)
+        return z3.ToReal(code) / scale
+
+    def to_dreal(self, env):
+        raise NotImplementedError("dReal does not support exact fixed-point rounding")
+
+    def fold(self):
+        if self.frac_bits is None or self.mode is RoundingMode.FR:
+            # Faithful rounding does not specify one result to fold to.
+            return lambda value: None
+        def quantize(value):
+            scaled = value * (1 << self.frac_bits)
+            if self.mode is RoundingMode.RNE:
+                code = round(scaled)
+            elif self.mode is RoundingMode.RTZ:
+                code = int(scaled)
+            else:
+                code = math.ceil(scaled) if scaled >= 0 else math.floor(scaled)
+            return code if self.frac_bits == 0 else code / (1 << self.frac_bits)
+        return quantize
+
+    def __str__(self):
+        return f"{self.mode.value}({self.value}, frac_bits={self.frac_bits})"
 
 
 @dataclass(frozen=True)
@@ -1152,7 +1230,7 @@ def substitute_spec_node(
     return (
         node
         if all(old is new for old, new in zip(args, substituted_args))
-        else type(node)(*substituted_args)
+        else rebuild_spec_node(node, substituted_args)
     )
 
 
@@ -1181,13 +1259,13 @@ def substitute_literals(
     rebuilt = (
         node
         if all(old is new for old, new in zip(args, substituted_args))
-        else type(node)(*substituted_args)
+        else rebuild_spec_node(node, substituted_args)
     )
     # The recursive calls already folded every child. Folding only this node
     # avoids revisiting the full subtree at each parent of a deep expression.
     if isinstance(rebuilt, (RealExpr, BoolExpr)):
         return _fold_node_with_folded_args(rebuilt, substituted_args)
-    return rebuilt.constant_fold()
+    return rebuilt._constant_fold()
 
 
 def _fold_node_with_folded_args(
@@ -1197,7 +1275,7 @@ def _fold_node_with_folded_args(
     """Apply one node's fold rules when its children are already folded."""
     shortcut = _shortcut_fold(node, folded_args)
     if shortcut is not None:
-        return shortcut.constant_fold()
+        return shortcut._constant_fold()
 
     output_type = _literal_type(node)
     fold = node.fold()
@@ -1319,7 +1397,7 @@ def _shortcut_fold(
             return lhs
         # 0 - x -> -x
         if isinstance(lhs, RealLit) and lhs.value == 0:
-            return Neg(rhs).constant_fold()
+            return Neg(rhs)._constant_fold()
         return None
 
     if isinstance(node, And):
@@ -1413,6 +1491,13 @@ def children(node: SpecNode) -> tuple[SpecNode, ...]:
         for field in fields(node)
         if isinstance(value := getattr(node, field.name), SpecNode)
     )
+
+
+def rebuild_spec_node(node: SpecNode, new_children: tuple[SpecNode, ...]) -> SpecNode:
+    """Replace expression children while preserving non-expression metadata."""
+    child_fields = [field.name for field in fields(node)
+                    if isinstance(getattr(node, field.name), SpecNode)]
+    return replace(node, **dict(zip(child_fields, new_children, strict=True)))
 
 
 def variables(node: SpecNode) -> set[RealVar | BoolVar]:

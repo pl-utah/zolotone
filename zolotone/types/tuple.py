@@ -31,6 +31,10 @@ class Tuple(DataType[tuple]):
     def total_bits(self) -> int:
         return sum(item.total_bits() for item in self.items)
 
+    @property
+    def is_homogeneous(self) -> bool:
+        return all(item == self.items[0] for item in self.items)
+
     def validate_raw(self, raw: tuple) -> None:
         if not isinstance(raw, tuple):
             raise TypeError(
@@ -86,6 +90,8 @@ class Tuple(DataType[tuple]):
     def to_cpp_type(self, jittable: bool = True) -> str:
         if jittable:
             return f"std::array<uint64_t, {len(self.items)}>"
+        if self.is_homogeneous:
+            return f"std::array<{self.items[0].to_cpp_type(False)}, {len(self.items)}>"
         return f"std::tuple<{', '.join(item.to_cpp_type(False) for item in self.items)}>"
 
     def format_value(self, value: object) -> str:
