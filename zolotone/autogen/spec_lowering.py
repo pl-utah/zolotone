@@ -8,7 +8,7 @@ import itertools
 import math
 import typing as tp
 
-from ..errors import MissingError, ZolotoneError
+from ..errors import MissingError, ZolotoneError, _SpecProbeLimitExceeded
 from ..rival import rival_range_analysis
 from ..spec.spec_ast import (
     BoolExpr,
@@ -292,7 +292,12 @@ class _LoweringSearch:
     def run(self) -> Node:
         # Run up until a fixed point
         while True:
-            changed = self.add_component_candidates()
+            try:
+                changed = self.add_component_candidates()
+            except _SpecProbeLimitExceeded:
+                if self.result is None:
+                    raise
+                break
             changed |= self.add_lut_candidates()
             if not changed:
                 break
@@ -360,7 +365,7 @@ class _LoweringSearch:
         key = (index, argument_specs)
         if key not in self.component_matches:
             if len(self.component_matches) >= MAX_SPEC_PROBES:
-                raise ZolotoneError(
+                raise _SpecProbeLimitExceeded(
                     f"Cannot lower {self.root!r}: component spec probe "
                     f"limit of {MAX_SPEC_PROBES} was reached"
                 )
