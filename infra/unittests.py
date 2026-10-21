@@ -1309,7 +1309,58 @@ class TestEgglogRewriteRules(unittest.TestCase):
         self.assertEqual(report["status"], "unsat")
 
 
+class TestCompositeRoundingChoices(unittest.TestCase):
+    @staticmethod
+    def make_component():
+        def spec(first: Bool(), x: UQ(2, 0), second: Bool(), ctx) -> UQ(2, 0):
+            return x
+
+        @Composite(name="choice_metadata", spec=spec)
+        def implementation(first, x, second):
+            return x
+
+        return implementation(
+            Var("first", Bool()), Var("x", UQ(2, 0)), Var("second", Bool()),
+        )
+
+    def test_ordinary_components_have_no_rounding_choices(self):
+        node = self.make_component()
+        self.assertEqual(node.rounding_choice_count, 0)
+        split = len(node.inner_args) - node.rounding_choice_count
+        self.assertEqual(node.inner_args[:split], node.inner_args)
+        self.assertEqual(node.inner_args[split:], [])
+
+    def test_count_marks_only_trailing_inputs(self):
+        node = self.make_component()
+        node.rounding_choice_count = 1
+        split = len(node.inner_args) - node.rounding_choice_count
+        self.assertEqual(
+            [arg.name for arg in node.inner_args[:split]], ["arg_0", "arg_1"],
+        )
+        self.assertEqual([arg.name for arg in node.inner_args[split:]], ["arg_2"])
+
+    def test_metadata_is_part_of_component_fingerprint(self):
+        node = self.make_component()
+        ordinary_fingerprint = node._fingerprint()
+        node.rounding_choice_count = 1
+        node._fingerprint_cache.clear()
+        self.assertNotEqual(ordinary_fingerprint, node._fingerprint())
+
+
 class TestCppLowering(unittest.TestCase):
+    def test_only_zolotone_entry_is_public_without_rounding_choices(self):
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                source = negate(Var("x", Bool())).to_cpp(jittable=jittable)
+                public, private = source.split("public:\n", 1)[1].split("private:\n", 1)
+                declarations = [
+                    line for line in public.splitlines()
+                    if line.strip().startswith("static inline ")
+                ]
+                self.assertEqual(len(declarations), 1)
+                self.assertIn(" zolotone(", declarations[0])
+                self.assertIn(" negate(", private)
+
     def test_identical_cpp_helpers_are_emitted_once(self):
         def spec(a: UQ, b: UQ, c: UQ, d: UQ, ctx) -> Bool:
             del ctx
@@ -1433,6 +1484,220 @@ class TestCppLowering(unittest.TestCase):
                             self.assertEqual(evaluate_cpp(value), value)
                     finally:
                         tempdir.cleanup()
+
+
+class TestRoundingChoiceCpp(unittest.TestCase):
+    @staticmethod
+    def simulation_parameter(key, lower=0, upper=1):
+        mask = (1 << 64) - 1
+        value = (key + 0x9e3779b97f4a7c15) & mask
+        value = ((value ^ (value >> 30)) * 0xbf58476d1ce4e5b9) & mask
+        value = ((value ^ (value >> 27)) * 0x94d049bb133111eb) & mask
+        value ^= value >> 31
+        return lower + value % (upper - lower + 1)
+
+    @staticmethod
+    def make_choice_component(dtype=UQ(5, 0), name="choice_output"):
+        def spec(x: dtype, rnd: Bool(), ctx) -> Bool():
+            return rnd
+
+        @Composite(name=name, spec=spec)
+        def implementation(x, rnd):
+            return rnd
+
+        node = implementation(Var("x", dtype), Var("rnd", Bool()))
+        node.rounding_choice_count = 1
+        return node
+
+    def assert_cpp_runs(self, node, statements, jittable, *, preamble=""):
+        from infra.compile_cpp import _AC_TYPES_INCLUDE_DIR, _find_cpp_compiler
+
+        source = node.to_cpp(jittable=jittable)
+        source += "\n" + preamble + "\nint main() {\n" + "\n".join(statements) + "\n}\n"
+        with tempfile.TemporaryDirectory() as directory:
+            executable = str(Path(directory) / "rounding_choices")
+            compiled = subprocess.run(
+                [_find_cpp_compiler(), "-std=c++17", "-x", "c++", "-",
+                 f"-I{_AC_TYPES_INCLUDE_DIR}", "-o", executable],
+                input=source, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            executed = subprocess.run(
+                [executable], capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+
+    def test_ordinary_components_do_not_emit_hash_or_extra_overload(self):
+        for jittable in (True, False):
+            source = negate(Var("x", Bool())).to_cpp(jittable=jittable)
+            self.assertNotIn("simulation_parameter", source)
+            self.assertEqual(source.count(" zolotone("), 1)
+
+    def test_single_input_overload_matches_explicit_choices(self):
+        node = self.make_choice_component()
+        statements = []
+        for raw in range(32):
+            expected = self.simulation_parameter(raw)
+            statements.extend([
+                f"assert(Zolotone::zolotone({raw}) == {expected});",
+                f"assert(Zolotone::zolotone({raw}, {expected}) == {expected});",
+            ])
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                source = node.to_cpp(jittable=jittable)
+                self.assertEqual(source.count("static inline uint64_t simulation_parameter("), 1)
+                self.assertIn("#include <cassert>", source)
+                self.assertEqual(source.count(" zolotone("), 3)  # Two declarations and delegation.
+                self.assert_cpp_runs(node, statements, jittable)
+
+    def test_only_zolotone_overloads_are_public_with_rounding_choices(self):
+        node = self.make_choice_component()
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                source = node.to_cpp(jittable=jittable)
+                public, private = source.split("public:\n", 1)[1].split("private:\n", 1)
+                declarations = [
+                    line for line in public.splitlines()
+                    if line.strip().startswith("static inline ")
+                ]
+                self.assertEqual(len(declarations), 2)
+                self.assertTrue(all(" zolotone(" in line for line in declarations))
+                self.assertNotIn("arg_1", declarations[0])
+                self.assertIn("arg_1", declarations[1])
+                self.assertIn(" simulation_parameter(", private)
+                self.assertIn(" choice_output(", private)
+
+    def test_generated_helpers_cannot_be_called_externally(self):
+        from infra.compile_cpp import _AC_TYPES_INCLUDE_DIR, _find_cpp_compiler
+
+        node = self.make_choice_component()
+        for jittable in (True, False):
+            source = node.to_cpp(jittable=jittable)
+            for call in (
+                "Zolotone::choice_output(0, 0)",
+                "Zolotone::simulation_parameter(0, 0, 1)",
+            ):
+                with self.subTest(jittable=jittable, call=call):
+                    compiled = subprocess.run(
+                        [_find_cpp_compiler(), "-std=c++17", "-x", "c++",
+                         f"-I{_AC_TYPES_INCLUDE_DIR}", "-fsyntax-only", "-"],
+                        input=source + f"\nint main() {{ {call}; }}\n",
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertNotEqual(compiled.returncode, 0)
+                    self.assertIn("private", compiled.stderr)
+
+    def test_hash_matches_reference_including_full_uint64_range(self):
+        from zolotone.codegen.cpp import _CppEmitter
+
+        node = self.make_choice_component(name="simulation_parameter")
+        mask = (1 << 64) - 1
+        statements = []
+        for key in (0, 1, 2, 1 << 63, mask - 1, mask):
+            for lower, upper in ((0, 1), (7, 7), (5, 17), (0, mask), (mask - 7, mask)):
+                expected = self.simulation_parameter(key, lower, upper)
+                statements.append(
+                    f"assert(hash_test::simulation_parameter({key}ULL, {lower}ULL, "
+                    f"{upper}ULL) == {expected}ULL);"
+                )
+        statements.append(f"assert(Zolotone::zolotone(0) == {self.simulation_parameter(0)});")
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                # Test the helper in isolation without exposing the generated private API.
+                preamble = "namespace hash_test {\n" + _CppEmitter._render_simulation_parameter() + "\n}"
+                self.assert_cpp_runs(node, statements, jittable, preamble=preamble)
+
+    def test_autogenerated_fr_overload_uses_the_hashed_direction(self):
+        def spec(x: UQ(2, 2), ctx) -> UQ(2, 2):
+            return ctx.fr(x * ctx.real_val(0.5), 2)
+
+        with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            node = Autogenerate("hashed_faithful_rounding", spec)
+        statements = []
+        for raw in range(16):
+            direction = self.simulation_parameter(raw)
+            expected = (raw + direction) // 2
+            statements.extend([
+                f"assert(Zolotone::zolotone({raw}) == {expected});",
+                f"assert(Zolotone::zolotone({raw}, {direction}) == {expected});",
+            ])
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                self.assert_cpp_runs(node, statements, jittable)
+
+    def test_multiple_inputs_and_choices_pack_bits_and_salt_each_choice(self):
+        def spec(x: UQ(32, 0), y: UQ(32, 0), first: Bool(), second: Bool(), ctx) -> Tuple(Bool(), Bool()):
+            return first, second
+
+        @Composite(name="two_choices", spec=spec)
+        def implementation(x, y, first, second):
+            return make_Tuple(first, second)
+
+        node = implementation(
+            Var("x", UQ(32, 0)), Var("y", UQ(32, 0)),
+            Var("first", Bool()), Var("second", Bool()),
+        )
+        node.rounding_choice_count = 2
+        statements = []
+        mask = (1 << 64) - 1
+        for index, (x, y) in enumerate(((0, 0), (1, 2), (2, 1), (0xffffffff, 0xffffffff))):
+            key = (x << 32) | y
+            statements.append(f"const auto result_{index} = Zolotone::zolotone({x}ULL, {y}ULL);")
+            for choice in (0, 1):
+                expected = self.simulation_parameter((key + choice) & mask)
+                statements.append(f"assert(result_{index}.at({choice}) == {expected});")
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                self.assert_cpp_runs(node, statements, jittable)
+
+    def test_64_bit_single_input_does_not_shift_by_64(self):
+        node = self.make_choice_component(UQ(64, 0))
+        mask = (1 << 64) - 1
+        statements = [
+            f"assert(Zolotone::zolotone({key}ULL) == {self.simulation_parameter(key)});"
+            for key in (0, 1 << 63, mask)
+        ]
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                self.assertNotIn("<< 64", node.to_cpp(jittable=jittable))
+                self.assert_cpp_runs(node, statements, jittable)
+
+    def test_tuple_inputs_pack_fields_in_order(self):
+        node = self.make_choice_component(Tuple(UQ(2, 0), Bool()))
+        expected = self.simulation_parameter(0b111)
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                value = (
+                    "std::array<uint64_t, 2>{3, 1}" if jittable
+                    else "std::make_tuple(ac_uint<2>(3), ac_uint<1>(1))"
+                )
+                self.assert_cpp_runs(node, [f"assert(Zolotone::zolotone({value}) == {expected});"], jittable)
+
+    def test_no_ordinary_inputs_use_zero_key(self):
+        def spec(rnd: Bool(), ctx) -> Bool():
+            return rnd
+
+        @Composite(name="constant_choice", spec=spec)
+        def implementation(rnd):
+            return rnd
+
+        node = implementation(Var("rnd", Bool()))
+        node.rounding_choice_count = 1
+        statements = [f"assert(Zolotone::zolotone() == {self.simulation_parameter(0)});"]
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable):
+                self.assert_cpp_runs(node, statements, jittable)
+
+    def test_keys_wider_than_64_bits_are_rejected(self):
+        from zolotone.codegen.cpp import CppLoweringError
+
+        node = self.make_choice_component(Tuple(UQ(64, 0), Bool()))
+        for jittable in (True, False):
+            with self.subTest(jittable=jittable), self.assertRaisesRegex(
+                CppLoweringError, "at most 64 ordinary input bits, got 65",
+            ):
+                node.to_cpp(jittable=jittable)
 
 
 class TestConstantFolding(unittest.TestCase):
@@ -3160,8 +3425,8 @@ class TestFaithfulRoundingExpansion(unittest.TestCase):
         self.assertIs(target.case_partitions[0].entries[0].value, result)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with self.assertRaisesRegex(NotImplementedError, "Implementation lowering"):
-                Autogenerate("inferred-faithful-cases", spec)
+            generated = Autogenerate("inferred-faithful-cases", spec)
+        self.assertEqual(generated.rounding_choice_count, 1)
 
     def test_artificial_choices_cannot_alias_regular_variables(self):
         from zolotone.autogen.autogen import _expand_faithful_roundings
@@ -3304,7 +3569,7 @@ class TestFaithfulRoundingExpansion(unittest.TestCase):
                 with self.assertRaises(expected):
                     _expand_faithful_roundings(get_spec("invalid-faithful-precision", spec))
 
-    def test_autogenerate_validates_then_rejects_unresolved_artificial_choices(self):
+    def test_autogenerate_preserves_artificial_choices_on_composite(self):
         from zolotone.autogen import autogen
 
         def spec(x: UQ(3, 0), ctx) -> UQ:
@@ -3319,12 +3584,13 @@ class TestFaithfulRoundingExpansion(unittest.TestCase):
             patch.object(autogen, "_check_output_format", wraps=autogen._check_output_format) as output,
             patch.object(autogen, "lower_spec_result", wraps=autogen.lower_spec_result) as lower,
         ):
-            with self.assertRaisesRegex(NotImplementedError, "artificial rounding choices"):
-                Autogenerate("unresolved-faithful-choices", spec)
+            generated = Autogenerate("explicit-faithful-choices", spec)
         expand.assert_called_once()
         simplify.assert_called_once()
         output.assert_called_once()
         lower.assert_called_once()
+        self.assertEqual(generated.rounding_choice_count, 1)
+        self.assertIsInstance(generated.inner_args[1].dtype, Bool)
 
     def test_autogenerate_handles_a_choice_without_original_inputs(self):
         from zolotone.autogen import autogen
@@ -3335,11 +3601,47 @@ class TestFaithfulRoundingExpansion(unittest.TestCase):
             return result
 
         with patch.object(autogen, "lower_spec_result", wraps=autogen.lower_spec_result) as lower:
-            with self.assertRaisesRegex(NotImplementedError, "Implementation lowering"):
-                Autogenerate("faithful-without-user-inputs", spec)
+            generated = Autogenerate("faithful-without-user-inputs", spec)
         lower.assert_called_once()
         current = lower.call_args.args[0]
         self.assertEqual(current.spec_inputs, tuple(current.rounding_choices.values()))
+        self.assertEqual(generated.rounding_choice_count, 1)
+
+    def test_multiple_choices_compile_and_remain_distinct_from_user_booleans(self):
+        def spec(x: UQ(2, 2), select: Bool(), ctx) -> UQ(2, 2):
+            return If(
+                select,
+                ctx.fr(x * ctx.real_val(0.5), 2),
+                ctx.fr(x * ctx.real_val(0.25), 2),
+            )
+
+        generated = Autogenerate("multiple-faithful-choices", spec)
+        self.assertEqual(generated.rounding_choice_count, 2)
+        split = len(generated.inner_args) - generated.rounding_choice_count
+        self.assertEqual(
+            [arg.name for arg in generated.inner_args[split:]], ["arg_2", "arg_3"],
+        )
+        for compile_fn in (jit_compile, nonjit_compile):
+            with self.subTest(backend=compile_fn.__name__):
+                tempdir, evaluate_cpp = compile_fn(generated)
+                try:
+                    for raw in range(16):
+                        for select in (0, 1):
+                            for first in (0, 1):
+                                for second in (0, 1):
+                                    denominator = 2 if select else 4
+                                    direction = first if select else second
+                                    expected = (
+                                        -(-raw // denominator) if direction
+                                        else raw // denominator
+                                    )
+                                    inputs = (raw, select, first, second)
+                                    for arg, value in zip(generated.args, inputs):
+                                        arg.load_value(arg.dtype.from_bits(value))
+                                    self.assertEqual(generated.evaluate().raw, expected)
+                                    self.assertEqual(evaluate_cpp(*inputs), expected)
+                finally:
+                    tempdir.cleanup()
 
 
 class TestDerivedSpecFunctions(unittest.TestCase):
@@ -10781,6 +11083,45 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             set(context_names),
             {f"autogen candidate {uq_add._spec_contract.display_name}"},
         )
+
+    def test_lowering_preserves_initial_result_when_spec_probe_limit_is_exhausted(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("initial-result-at-probe-limit")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        with patch.object(spec_lowering, "MAX_SPEC_PROBES", 0):
+            result = spec_lowering.search_lower_spec_to_impl(x, {x: source}, UQ, ctx)
+        self.assertIs(result, source)
+
+    def test_lowering_preserves_result_found_before_spec_probe_limit(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("result-found-before-probe-limit")
+        x = ctx.real("x")
+        source = Var("x", UQ(2, 0))
+        with (
+            patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_add,)),
+            patch.object(spec_lowering, "MAX_SPEC_PROBES", 1),
+        ):
+            search = spec_lowering._LoweringSearch(x + x, {x: source}, UQ, ctx)
+            result = search.run()
+        self.assertEqual(len(search.component_matches), 1)
+        self.assertEqual(search.result.cost, 1)
+        self.assertIs(result, search.result.node)
+        source.load_value(source.dtype.from_bits(2))
+        self.assertEqual(result.evaluate().raw, 4)
+
+    def test_lowering_does_not_hide_unrelated_errors_when_a_result_exists(self):
+        from zolotone.autogen import spec_lowering
+
+        ctx = SpecContext("unrelated-search-error")
+        x = ctx.real("x")
+        search = spec_lowering._LoweringSearch(x, {x: Var("x", UQ(2, 0))}, UQ, ctx)
+        with patch.object(search, "add_component_candidates", side_effect=ZolotoneError("unrelated error")):
+            with self.assertRaisesRegex(ZolotoneError, "unrelated error"):
+                search.run()
 
     def test_lowering_reports_exhausted_spec_probe_limit(self):
         from zolotone.autogen import spec_lowering

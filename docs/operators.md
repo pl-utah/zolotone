@@ -28,8 +28,17 @@ with dtype `Bool()`. The original Python function is unchanged and is not stored
 rebinding inputs simultaneously rather than rerunning the original function.
 Repeated FR subtrees share a choice across the result and all conditions.
 Simplification, strict-condition rewriting, and validation process the expanded spec.
-Choice resolution and code generation are not implemented yet; implementation lowering
-reports `NotImplementedError` instead of exposing these as regular runtime inputs.
+Lowering treats these as explicit Boolean arguments, always appended after ordinary
+inputs. Autogen sets the generated Composite's `rounding_choice_count`; the last
+that many inputs are artificial choices. Ordinary Composites default to zero.
+C++ emits two `zolotone` overloads: one accepts all arguments, and the other derives
+the artificial choices using `simulation_parameter(input_key, 0, 1)`. Ordinary input
+raw bits are packed in argument order, first input most significant; tuple fields
+are packed in field order. Keys wider than 64 bits are rejected. With no ordinary
+inputs the key is zero. Choice `i` uses `input_key + i` with unsigned 64-bit wraparound.
+The hash helper is emitted only when rounding choices are present.
+Only the `zolotone` entry point overloads are public. Implementation functions and
+the hash helper are emitted below them as private static methods.
 Unexpanded FR nodes still reject solver/Rival translation, and constant folding
 preserves them instead of selecting a result.
 
