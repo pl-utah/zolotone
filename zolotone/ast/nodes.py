@@ -379,6 +379,8 @@ class composite(Node):
     ):
         self.c_inline = c_inline
         self.c_lowering = c_lowering
+        # Artificial rounding-choice inputs are always a trailing suffix.
+        self.rounding_choice_count = 0
         self.ctx = SpecContext(name)
         self.spec_assumes: tuple[SpecNode, ...] = ()
         self.spec_checks: tuple[SpecNode, ...] = ()
@@ -548,6 +550,7 @@ class composite(Node):
                 self.name,
                 self._type_and_constant_fingerprint(),
                 tuple(arg._type_and_constant_fingerprint() for arg in self.inner_args),
+                self.rounding_choice_count,
                 direct_cpp_lowering,
                 self.inner_tree._fingerprint(jittable) if direct_cpp_lowering is None else None,
                 tuple(

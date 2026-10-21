@@ -751,7 +751,10 @@ def lower_spec_result(
         )
         for parameter in input_parameters
     ]
-    return generated_impl(*impl_inputs)
+    result = generated_impl(*impl_inputs)
+    result.rounding_choice_count = len(spec.rounding_choices)
+    result._fingerprint_cache.clear()
+    return result
 
 
 def attach_lowered_conditions(
