@@ -406,7 +406,6 @@ static inline uint64_t simulation_parameter(
         fields = []
         for arg in args:
             if isinstance(arg.dtype, Tuple):
-                raise NotImplementedError("this has not been tested/used before")
                 for index, dtype in enumerate(arg.dtype.items):
                     expr = (
                         f"{arg.name}.at({index})"
