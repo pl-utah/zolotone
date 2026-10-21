@@ -44,16 +44,17 @@ class _CppEmitter:
             self._functions.append(self._render_simulation_parameter())
         internal_name = self._make_name(function_name)
         self.emit_function(root=root, function_name=internal_name)
-        self._functions.append(
+        public_functions = [
             self._render_public_wrapper(
                 public_name=public_name,
                 internal_name=internal_name,
                 args=root.inner_args,
                 return_type=root.dtype,
             )
-        )
+        ]
         if rounding_choice_count:
-            self._functions.append(
+            public_functions.insert(
+                0,
                 self._render_implicit_rounding_wrapper(
                     public_name, root.inner_args, root.dtype, rounding_choice_count,
                 )
@@ -83,6 +84,13 @@ class _CppEmitter:
             "class Zolotone",
             "{",
             "public:",
+            *(
+                f"    {line}" if line else ""
+                for function in public_functions
+                for line in function.splitlines()
+            ),
+            "",
+            "private:",
             *(
                 f"    {line}" if line else ""
                 for function in self._functions
