@@ -1091,7 +1091,39 @@ def _intersect_rival_rects(
     return rect
 
 
+_RIVAL_UNARY_OPS = {
+    Pow2: "pow2",
+    Sqrt: "sqrt",
+    Cbrt: "cbrt",
+    Exp: "exp",
+    Exp2: "exp2",
+    Expm1: "expm1",
+    Log: "log",
+    Log2: "log2",
+    Log10: "log10",
+    Log1p: "log1p",
+    Logb: "logb",
+    Sin: "sin",
+    Cos: "cos",
+    Tan: "tan",
+    Asin: "asin",
+    Acos: "acos",
+    Atan: "atan",
+    Sinh: "sinh",
+    Cosh: "cosh",
+    Tanh: "tanh",
+    Asinh: "asinh",
+    Acosh: "acosh",
+    Atanh: "atanh",
+    Erf: "erf",
+    Erfc: "erfc",
+}
+
+
 def to_rival_ir(node: SpecNode) -> RivalIR:
+    unary_op = _RIVAL_UNARY_OPS.get(type(node))
+    if unary_op is not None:
+        return _unary(unary_op, node.value)
     if isinstance(node, Round):
         if node.mode is RoundingMode.FR:
             raise NotImplementedError("Rival lowering of faithful rounding is not implemented")

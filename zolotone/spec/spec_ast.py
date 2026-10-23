@@ -640,6 +640,233 @@ class Abs(RealExpr):
 
 
 @dataclass(frozen=True)
+class _UnaryRealFunction(RealExpr):
+    """A mathematical unary function, preserved exactly as a symbolic node."""
+
+    value: RealExpr
+
+    def __post_init__(self):
+        RealExpr._coerce_real_expr(self.value)
+
+    def to_egglog(self):
+        raise NotImplementedError(f"egglog lowering of {type(self).__name__} is not implemented")
+
+    def to_z3(self, env):
+        raise NotImplementedError(f"Z3 lowering of {type(self).__name__} is not implemented")
+
+    def to_dreal(self, env):
+        raise NotImplementedError(f"dReal lowering of {type(self).__name__} is not implemented")
+
+    def fold(self):
+        # Python math functions would replace exact real values with float
+        # approximations. Keep even literal applications symbolic for now.
+        return lambda value: None
+
+    def __str__(self):
+        return f"{type(self).__name__.lower()}({self.value})"
+
+
+@dataclass(frozen=True)
+class Sin(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Cos(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Exp(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Exp2(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Log(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Log2(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Sqrt(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Tanh(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Pow2(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Cbrt(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Expm1(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Log10(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Log1p(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Logb(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Tan(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Asin(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Acos(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Atan(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Sinh(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Cosh(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Asinh(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Acosh(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Atanh(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Erf(_UnaryRealFunction):
+    pass
+
+
+@dataclass(frozen=True)
+class Erfc(_UnaryRealFunction):
+    pass
+
+def pow2(value: RealExpr) -> Pow2:
+    return Pow2(value)
+
+def cbrt(value: RealExpr) -> Cbrt:
+    return Cbrt(value)
+
+def expm1(value: RealExpr) -> Expm1:
+    return Expm1(value)
+
+def log10(value: RealExpr) -> Log10:
+    return Log10(value)
+
+def log1p(value: RealExpr) -> Log1p:
+    return Log1p(value)
+
+def logb(value: RealExpr) -> Logb:
+    return Logb(value)
+
+def tan(value: RealExpr) -> Tan:
+    return Tan(value)
+
+def asin(value: RealExpr) -> Asin:
+    return Asin(value)
+
+def acos(value: RealExpr) -> Acos:
+    return Acos(value)
+
+def atan(value: RealExpr) -> Atan:
+    return Atan(value)
+
+def sinh(value: RealExpr) -> Sinh:
+    return Sinh(value)
+
+def cosh(value: RealExpr) -> Cosh:
+    return Cosh(value)
+
+def asinh(value: RealExpr) -> Asinh:
+    return Asinh(value)
+
+def acosh(value: RealExpr) -> Acosh:
+    return Acosh(value)
+
+def atanh(value: RealExpr) -> Atanh:
+    return Atanh(value)
+
+def erf(value: RealExpr) -> Erf:
+    return Erf(value)
+
+def erfc(value: RealExpr) -> Erfc:
+    return Erfc(value)
+
+def sin(value: RealExpr) -> Sin:
+    return Sin(value)
+
+def cos(value: RealExpr) -> Cos:
+    return Cos(value)
+
+def exp(value: RealExpr) -> Exp:
+    return Exp(value)
+
+def exp2(value: RealExpr) -> Exp2:
+    return Exp2(value)
+
+def log(value: RealExpr) -> Log:
+    return Log(value)
+
+def log2(value: RealExpr) -> Log2:
+    return Log2(value)
+
+def sqrt(value: RealExpr) -> Sqrt:
+    return Sqrt(value)
+
+def tanh(value: RealExpr) -> Tanh:
+    return Tanh(value)
+
+
+@dataclass(frozen=True)
 class Pow(RealExpr):
     base: RealExpr
     exponent: RealExpr
