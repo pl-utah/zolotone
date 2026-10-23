@@ -260,6 +260,10 @@ def _prove_result_fits(spec_ast, output_type, ctx):
 
 
 def _check_spec_reachability(spec: Spec) -> None:
+    """Prove user assumptions admit an input within the typed input domain."""
+    if not spec.has_user_assumptions:
+        # The input domain is feasible by construction without user constraints.
+        return
     report = simplify_ctx(spec.spec_ctx.copy(checks=[]))
     feasibility_status = report.get("feasibility_status", "unknown")
 

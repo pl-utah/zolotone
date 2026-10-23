@@ -55,6 +55,7 @@ class Spec:
     spec_inputs: tuple[tp.Any, ...]
     spec_ctx: SpecContext
     rounding_choices: dict[Round, BoolVar] = field(default_factory=dict)
+    has_user_assumptions: bool = False
 
     def to_function(self) -> tp.Callable[..., tp.Any]:
         """Derive a callable from this AST and contract, without replaying source."""
@@ -194,7 +195,11 @@ def get_spec(
         )
         for parameter in input_parameters
     )
+    # Input descriptors can introduce their own well-formedness assumptions.
+    # Only assumptions added by the specification need a reachability proof.
+    input_assumption_count = len(spec_ctx.assumes)
     spec_ast = function(*spec_inputs, spec_ctx)
+    has_user_assumptions = len(spec_ctx.assumes) > input_assumption_count
     if isinstance(spec_ast, Round) and spec_ast.frac_bits is None:
         if isinstance(output_dtype, (Q, UQ)):
             unresolved = spec_ast
@@ -234,6 +239,7 @@ def get_spec(
         spec_ast=spec_ast,
         spec_inputs=spec_inputs,
         spec_ctx=spec_ctx,
+        has_user_assumptions=has_user_assumptions,
     )
 
 
