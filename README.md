@@ -353,18 +353,40 @@ Assumptions that retain other variables leave points conservatively reachable;
 LUT generation performs no Z3 reachability pass.
 
 The `build_integer_evaluator(expr, precondition=None, *, input_total_bits,
-output_total_bits)` API accepts a Boolean precondition, defaulting to `True`,
+output_total_bits, free_vars=("x",))` API accepts a Boolean precondition, defaulting to `True`,
 and returns `RivalEvaluation(feasible, code, precondition_error, output_error)`
-for each input. The flags indicate possible domain errors; flagged values must
+from `apply_point([code])`. Its `apply_range([(lower_code, upper_code)])` method
+returns the same result type with Boolean precondition bounds and exact rational
+output-code bounds. Unresolved range bounds are `None`. Both operations reuse
+the compiled evaluator. The flags indicate possible domain errors; flagged values must
 not be used as valid results. A non-finite output code is `None`. Both expressions are
 evaluated independently: a false precondition does not replace or suppress
 the expression output. Unresolved native evaluations propagate as `ValueError`;
 error-flag interpretation and reachability decisions belong to the LUT builder
 in `missing.py`.
 A final rounding node selects its mode and output-code scale. Without one, the
-expression must already produce a unique exact integer. There is no implicit
-rounding default or exactness flag. LUT generation excludes only inputs with a
-proven false assumption; output overflow remains an error.
+expression must already produce a unique exact integer. An error-free, finite
+point result that is fractional raises `ValueError`; fractional range bounds are
+allowed. There is no implicit rounding default or exactness flag. LUT generation
+excludes only inputs with a proven false assumption; output overflow remains an error.
+
+Supply ordered names in `free_vars`, a sequence of integer
+codes to `apply_point`, and one `(lower, upper)` code interval per input to
+`apply_range`. The input-width precision hint should cover the widest input;
+normalization from codes to typed values stays in the caller's expressions.
+Both methods always take sequences, including for the default single input `x`.
+
+```python
+machine = build_integer_evaluator(
+    x + y, free_vars=["x", "y"], input_total_bits=16, output_total_bits=17,
+)
+point_result = machine.apply_point([3, 4])
+range_result = machine.apply_range([(1, 3), (2, 4)])
+```
+
+The general `RivalMachine` exposes `apply_range(rect)` for an outward enclosure
+of the first output, plus hint-based box analysis for feasibility searches.
+Point evaluation uses `RivalIntegerMachine.apply_point`.
 
 `zolotone.rival` translates specification expressions into Rival3 for
 interval-based feasibility checks. `make install` builds the PyO3 extension;

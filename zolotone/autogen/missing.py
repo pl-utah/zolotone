@@ -161,7 +161,7 @@ def _build_missing_primitive(
     unreachable_points: list[int] = []
     try:
         for point in range(lower, upper + 1):
-            result = evaluator.apply(point)
+            result = evaluator.apply_point([point])
             if result.precondition_error:
                 raise ValueError("domain error in assumptions")
             if not result.precondition:

@@ -68,10 +68,23 @@ class RivalIntegerMachine:
     def __init__(self, raw_machine: Any):
         self._raw_machine = raw_machine
 
-    def apply(self, raw_input: int) -> RivalEvaluation:
-        precondition, output, precondition_error, output_error = self._raw_machine.apply(str(raw_input))
+    def apply_point(self, point: Sequence[int]) -> RivalEvaluation:
+        """Evaluate integer input codes in compilation's free_vars order."""
+        precondition, output, precondition_error, output_error = self._raw_machine.apply_point([str(code) for code in point])
         return RivalEvaluation(
             bool(precondition), None if output is None else int(output),
+            bool(precondition_error), bool(output_error),
+        )
+
+    def apply_range(self, rect: Sequence[tuple[int, int]]) -> RivalEvaluation:
+        """Enclose one integer-code interval per input in free_vars order."""
+        result = self._raw_machine.apply_range([(str(lo), str(hi)) for lo, hi in rect])
+        if result is None:
+            return RivalEvaluation()
+        precondition, output, precondition_error, output_error = result
+        return RivalEvaluation(
+            tuple(precondition),
+            None if output is None else tuple(Fraction(bound) for bound in output),
             bool(precondition_error), bool(output_error),
         )
 
@@ -124,15 +137,22 @@ def build_integer_evaluator(
     *,
     input_total_bits: int,
     output_total_bits: int,
+    free_vars: Sequence[str] = ("x",),
 ) -> RivalIntegerMachine:
+    """Compile one precondition/output pair for ordered integer-code inputs.
+
+    input_total_bits is the maximum input-width precision hint. Callers encode
+    any input scales in their expressions. The default declares one input, x.
+    """
     if precondition is None:
         precondition = BoolLit(True)
     if not isinstance(precondition, BoolExpr):
         raise TypeError("evaluation precondition must be a Boolean expression")
-    _validate_referenced_vars([precondition], ["x"])
+    var_list = _validate_free_vars(free_vars)
+    _validate_referenced_vars([precondition], var_list)
     if not isinstance(expr, RealExpr):
         raise TypeError("integer evaluation requires a real expression")
-    _validate_referenced_vars([expr], ["x"])
+    _validate_referenced_vars([expr], var_list)
     for label, total in (("input", input_total_bits), ("output", output_total_bits)):
         if type(total) is not int:
             raise TypeError(f"{label} bit width must be an integer")
@@ -154,6 +174,7 @@ def build_integer_evaluator(
             output_total_bits,
             rounding_mode,
             _evaluator_precondition(precondition),
+            var_list,
         )
     )
 
