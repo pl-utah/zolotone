@@ -142,19 +142,21 @@ struct RawEvaluator {
     rounding: OutputRounding,
 }
 
+fn rect_args(rect: Vec<(f64, f64)>, precision: u32) -> Vec<Ival> {
+    rect.into_iter()
+        .map(|(lo, hi)| {
+            Ival::from_lo_hi(
+                Float::with_val(precision, lo),
+                Float::with_val(precision, hi),
+            )
+        })
+        .collect()
+}
+
 #[pymethods]
 impl RawRivalMachine {
     fn domain_errors(&mut self, rect: Vec<(f64, f64)>) -> PyResult<Vec<(bool, bool)>> {
-        let precision = self.range_machine.argument_precision();
-        let rival_rect = rect
-            .into_iter()
-            .map(|(lo, hi)| {
-                Ival::from_lo_hi(
-                    Float::with_val(precision, lo),
-                    Float::with_val(precision, hi),
-                )
-            })
-            .collect::<Vec<_>>();
+        let rival_rect = rect_args(rect, self.range_machine.argument_precision());
 
         let outputs = self
             .range_machine
@@ -171,16 +173,7 @@ impl RawRivalMachine {
         rect: Vec<(f64, f64)>,
         hints: Option<PyRef<'_, RivalHints>>,
     ) -> PyResult<((bool, bool), RivalHints)> {
-        let precision = self.machine.argument_precision();
-        let rival_rect = rect
-            .into_iter()
-            .map(|(lo, hi)| {
-                Ival::from_lo_hi(
-                    Float::with_val(precision, lo),
-                    Float::with_val(precision, hi),
-                )
-            })
-            .collect::<Vec<_>>();
+        let rival_rect = rect_args(rect, self.machine.argument_precision());
 
         let hint_slice = hints.as_ref().map(|h| h.hints.as_slice());
         let (status, next_hints, _) = self.machine.analyze_with_hints(&rival_rect, hint_slice);
@@ -189,16 +182,7 @@ impl RawRivalMachine {
     }
 
     fn apply_range(&mut self, rect: Vec<(f64, f64)>) -> PyResult<(f64, f64)> {
-        let precision = self.machine.argument_precision();
-        let rival_rect = rect
-            .into_iter()
-            .map(|(lo, hi)| {
-                Ival::from_lo_hi(
-                    Float::with_val(precision, lo),
-                    Float::with_val(precision, hi),
-                )
-            })
-            .collect::<Vec<_>>();
+        let rival_rect = rect_args(rect, self.machine.argument_precision());
 
         let outputs = match self.range_machine.apply(&rival_rect, None, 1) {
             Ok(outputs) => outputs,
@@ -307,7 +291,11 @@ fn build_integer_evaluator(
     };
     // Rival otherwise rejects the entire call when every output has a total
     // domain error. A valid sentinel lets us return both outputs' error flags.
-    let expressions = vec![precondition, rival_expr, Expr::Literal(Float::with_val(2, 0))];
+    let expressions = vec![
+        precondition,
+        rival_expr,
+        Expr::Literal(Float::with_val(2, 0)),
+    ];
     Ok(RawEvaluator {
         rounding,
         machine: MachineBuilder::new(disc).build(expressions, vec!["x".to_string()]),

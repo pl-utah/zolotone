@@ -6,7 +6,7 @@ import typing as tp
 import warnings
 
 from ..errors import InfeasibleError, MissingError, ZolotoneError
-from ..rival import rival_domain_errors, rival_range_analysis
+from ..rival_analysis import rival_domain_errors, rival_range_analysis
 from ..solver import check_equivalence
 from ..spec.spec_ast import (
     And,

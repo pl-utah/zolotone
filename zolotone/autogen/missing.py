@@ -10,8 +10,8 @@ from ..errors import InfeasibleError, MissingError, ZolotoneError
 from ..rival import (
     build_integer_evaluator,
     collect_free_vars,
-    rival_range_analysis,
 )
+from ..rival_analysis import rival_range_analysis
 from ..spec.spec_ast import RealExpr, RealLit, RealVar, Round, substitute_spec_node
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
