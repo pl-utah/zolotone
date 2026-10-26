@@ -9,7 +9,7 @@ import math
 import typing as tp
 
 from ..errors import MissingError, ZolotoneError, _SpecProbeLimitExceeded
-from ..rival_analysis import rival_range_analysis
+from ..rival.analysis import rival_range_analysis
 from ..spec.spec_ast import (
     BoolExpr,
     BoolLit,

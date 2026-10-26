@@ -10,8 +10,8 @@ import os
 import sys
 from typing import Any, Iterable, Sequence
 
-from .spec.spec_ast import *
-from .rival import (
+from ..spec.spec_ast import *
+from .machine import (
     RivalMachine, build_machine, collect_free_vars, to_rival_ir,
     _and_exprs, _real_literal_ratio,
 )
@@ -263,7 +263,7 @@ def _get_rival_rects_and_contributors(
     bool_var_names: set[str],
     max_rects: int,
 ) -> tuple[list[list[tuple[float, float]]], list[bool]]:
-    from .spec.spec_context import SpecContext, normalize_ctx
+    from ..spec.spec_context import SpecContext, normalize_ctx
 
     # Keep assumption positions intact so contributors still refer to the
     # caller's source expressions, even when extraction uses normalized ones.

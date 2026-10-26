@@ -3,7 +3,7 @@ from zolotone import *
 
 def spec(x: UQ(2, 3), ctx) -> UQ(4, 6):
     ctx.assume(x > ctx.real_val(0))
-    return ctx.fr(x ** ctx.real_val(-1))
+    return ctx.fr(sin(x))
 
 generated = Autogenerate(name=spec.__name__, spec=spec)
 print(generated.print_tree(depth=1))

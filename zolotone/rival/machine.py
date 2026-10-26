@@ -5,7 +5,7 @@ from fractions import Fraction
 import math
 from typing import Any, Iterable, NamedTuple, Sequence
 
-from .spec.spec_ast import *
+from ..spec.spec_ast import *
 
 RivalIR = dict[str, Any]
 
@@ -339,7 +339,7 @@ def _validate_referenced_vars(exprs: Sequence[SpecNode | RivalIR], free_vars: Se
 
 def _load_native_module():
     try:
-        from . import _rival3
+        from .. import _rival3
     except ImportError:
         try:
             import _rival3  # type: ignore[no-redef]

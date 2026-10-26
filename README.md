@@ -328,6 +328,12 @@ ignored by Git.
 
 ## Rival3 bridge
 
+`zolotone.rival` contains machine compilation, evaluation, and expression
+lowering. `zolotone.rival.analysis` contains the algorithms built on that API:
+rectangle extraction, range/domain analysis, feasibility search, and context
+trimming. Query construction, including asserted conjunctions, stays with those
+analysis callers.
+
 Generated lookup tables normalize integer input codes as `n * 2**(-F_input)`
 (signed for `Q`). For a final `Round(e, mode, F)`, Rival evaluates `e * 2**F`
 and applies the specified mode in output discretization and integer extraction.

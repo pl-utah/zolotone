@@ -40,19 +40,15 @@ from zolotone.solver.report import (
     build_proof_report,
 )
 from zolotone.rival import (
-    MAX_RECTS_ENV,
     RivalAnalysis,
     RivalEvaluation,
-    RivalRectLimitExceeded,
     build_machine,
-    build_range_machine,
     collect_free_vars,
-    get_rival_rects,
-    rival_feasibility_check,
-    rival_domain_errors,
-    rival_range_analysis,
-    rival_trim_context,
     to_rival_ir,
+)
+from zolotone.rival.analysis import (
+    MAX_RECTS_ENV, RivalRectLimitExceeded, get_rival_rects,
+    rival_feasibility_check, rival_domain_errors, rival_range_analysis, rival_trim_context,
 )
 from zolotone.spec.spec_context import normalize_ctx, simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
@@ -3234,7 +3230,7 @@ class TestFaithfulRoundingSpecNode(unittest.TestCase):
                     translate()
 
     def test_integer_machine_rejects_faithful_before_native_compilation(self):
-        from zolotone import rival
+        from zolotone.rival import machine as rival
 
         ctx = SpecContext("unsupported-faithful-output")
         node = ctx.fr(ctx.real("x"), 6)
@@ -8581,7 +8577,7 @@ class TestRivalEvaluator(unittest.TestCase):
         self.assertEqual(machine.apply(-2), RivalEvaluation(False, -6))
 
     def test_precondition_requires_boolean_expression_and_known_variables(self):
-        from zolotone import rival
+        from zolotone.rival import machine as rival
 
         ctx = SpecContext("invalid-precondition")
         x, y = ctx.real("x"), ctx.real("y")
@@ -8666,7 +8662,7 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         for frac_bits in (0, 2, 60):
             scale = 1 << frac_bits
-            machine = build_range_machine(ctx.rne(x, frac_bits), ["x"])
+            machine = build_machine([ctx.rne(x, frac_bits)], ["x"])
             values = [numerator / 8 for numerator in range(-25, 26)]
             for lower in range(-3, 3):
                 tie = lower + 0.5
@@ -8686,7 +8682,7 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         for frac_bits in (0, 2):
             scale = 1 << frac_bits
-            machine = build_range_machine(ctx.rne(x, frac_bits), ["x"])
+            machine = build_machine([ctx.rne(x, frac_bits)], ["x"])
             for lower, upper in (
                 (1.125, 1.375), (1.25, 1.75), (1.5, 2.5),
                 (-1.375, -1.125), (-1.75, -1.25), (-2.5, -1.5),
@@ -8756,15 +8752,16 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(collect_free_vars(exprs), ["a", "flag", "z"])
 
-    def test_build_machine_combines_exprs_into_single_asserted_and(self):
+    def test_analysis_compiles_one_asserted_conjunction(self):
+        from zolotone.rival.analysis import _build_predicate_machine
         x = RealVar("x")
         y = RealVar("y")
         raw_machine = object()
         native = Mock()
         native.build_machine.return_value = raw_machine
 
-        with patch("zolotone.rival._load_native_module", return_value=native):
-            machine = build_machine(
+        with patch("zolotone.rival.machine._load_native_module", return_value=native):
+            machine = _build_predicate_machine(
                 [
                     x >= RealLit(0),
                     y <= RealLit(1),
@@ -8804,14 +8801,29 @@ class TestRivalTranslation(unittest.TestCase):
             ["x", "y"],
         )
 
-    def test_build_range_machine_keeps_numeric_expression(self):
+
+    def test_build_machine_preserves_expression_outputs(self):
+        x = RealVar("x")
+        y = RealVar("y")
+        expressions = [x >= RealLit(0), y <= RealLit(1), x + y]
+        raw_machine = object()
+        native = Mock()
+        native.build_machine.return_value = raw_machine
+        with patch("zolotone.rival.machine._load_native_module", return_value=native):
+            machine = build_machine(expressions, ["x", "y"])
+        self.assertIs(machine._raw_machine, raw_machine)
+        native.build_machine.assert_called_once_with(
+            [to_rival_ir(expr) for expr in expressions], ["x", "y"]
+        )
+
+    def test_build_machine_keeps_numeric_expression(self):
         x = RealVar("x")
         raw_machine = object()
         native = Mock()
         native.build_machine.return_value = raw_machine
 
-        with patch("zolotone.rival._load_native_module", return_value=native):
-            machine = build_range_machine(x + RealLit(1), ["x"])
+        with patch("zolotone.rival.machine._load_native_module", return_value=native):
+            machine = build_machine([x + RealLit(1)], ["x"])
 
         self.assertIs(machine._raw_machine, raw_machine)
         native.build_machine.assert_called_once_with(
@@ -8869,13 +8881,13 @@ class TestRivalTranslation(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.rival.get_rival_rects",
+                "zolotone.rival.analysis.get_rival_rects",
                 return_value=[
                     [(0.0, 0.0), (0.0, 0.0)],
                     [(1.0, 1.0), (1.0, 1.0)],
                 ],
             ),
-            patch("zolotone.rival._build_domain_machine", side_effect=build),
+            patch("zolotone.rival.analysis._build_domain_machine", side_effect=build),
         ):
             findings = rival_domain_errors(
                 [x_reciprocal, y_reciprocal, x_reciprocal + y_reciprocal],
@@ -8910,10 +8922,10 @@ class TestRivalTranslation(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.rival.get_rival_rects",
+                "zolotone.rival.analysis.get_rival_rects",
                 return_value=[[(0.0, 1.0)], [(2.0, 3.0)]],
             ),
-            patch("zolotone.rival.build_range_machine", return_value=machine),
+            patch("zolotone.rival.analysis.build_machine", return_value=machine),
         ):
             bounds = rival_range_analysis(x + ctx.one(), ctx)
 
@@ -8927,10 +8939,10 @@ class TestRivalTranslation(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.rival.get_rival_rects",
+                "zolotone.rival.analysis.get_rival_rects",
                 return_value=[[(0.0, 0.0)]],
             ),
-            patch("zolotone.rival.build_range_machine", return_value=machine),
+            patch("zolotone.rival.analysis.build_machine", return_value=machine),
         ):
             bounds = rival_range_analysis(x ** ctx.real_val(-1), ctx)
 
@@ -9011,7 +9023,7 @@ class TestRivalTranslation(unittest.TestCase):
             conjunction = conjunction & bound
         ctx.assume(conjunction)
 
-        with patch("zolotone.rival.variables", wraps=variables) as collect:
+        with patch("zolotone.rival.analysis.variables", wraps=variables) as collect:
             rects = get_rival_rects(
                 ctx.assumes,
                 [variable.name for variable in variables_],
@@ -9299,7 +9311,7 @@ class TestRivalTranslation(unittest.TestCase):
                 )
             return machine
 
-        with patch("zolotone.rival.build_machine", side_effect=build):
+        with patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build):
             status = rival_feasibility_check(ctx, max_depth=1, checks=True)
 
         self.assertEqual(status, "not feasible")
@@ -9351,8 +9363,8 @@ class TestRivalTranslation(unittest.TestCase):
             return machine
 
         with (
-            patch("zolotone.rival.get_rival_rects", return_value=[clean_rect, bad_rect]),
-            patch("zolotone.rival.build_machine", side_effect=build),
+            patch("zolotone.rival.analysis.get_rival_rects", return_value=[clean_rect, bad_rect]),
+            patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build),
         ):
             status = rival_feasibility_check(ctx, max_depth=1, checks=True)
 
@@ -9387,7 +9399,7 @@ class TestRivalTranslation(unittest.TestCase):
             machine.apply_with_hints.side_effect = apply
             return machine
 
-        with patch("zolotone.rival.build_machine", side_effect=build):
+        with patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build):
             trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.assumes, [bounded])
@@ -9450,7 +9462,7 @@ class TestRivalTranslation(unittest.TestCase):
             )
             return machine
 
-        with patch("zolotone.rival.build_machine", side_effect=build):
+        with patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build):
             trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.assumes, [assume])
@@ -9554,7 +9566,7 @@ class TestRivalTranslation(unittest.TestCase):
                 machine.apply_with_hints.side_effect = apply
             return machine
 
-        with patch("zolotone.rival.build_machine", side_effect=build):
+        with patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build):
             trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.assumes, [bit_domain])

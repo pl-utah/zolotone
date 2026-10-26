@@ -11,7 +11,7 @@ from ..rival import (
     build_integer_evaluator,
     collect_free_vars,
 )
-from ..rival_analysis import rival_range_analysis
+from ..rival.analysis import rival_range_analysis
 from ..spec.spec_ast import RealExpr, RealLit, RealVar, Round, substitute_spec_node
 from ..spec.spec_context import SpecContext
 from ..types import Q, UQ
