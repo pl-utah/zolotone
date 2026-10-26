@@ -6,7 +6,7 @@ from itertools import product
 import math
 import os
 import sys
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, NamedTuple, Sequence
 
 from .spec.spec_ast import *
 
@@ -21,7 +21,8 @@ __all__ = [
     "rival_range_analysis",
     "rival_feasibility_check",
     "rival_trim_context",
-    "build_integer_machine",
+    "build_integer_evaluator",
+    "RivalEvaluation",
 ]
 
 
@@ -140,14 +141,27 @@ class RivalMachine:
         ]
 
 
+class RivalEvaluation(NamedTuple):
+    """Values plus possible-domain-error flags; flagged values are not valid."""
+
+    precondition: bool
+    output: int | None
+    precondition_error: bool = False
+    output_error: bool = False
+
+
 class RivalIntegerMachine:
-    """Evaluate integer inputs to exact integer output codes."""
+    """Evaluate a Boolean precondition and an integer output code."""
 
     def __init__(self, raw_machine: Any):
         self._raw_machine = raw_machine
 
-    def apply(self, raw_input: int) -> int:
-        return int(self._raw_machine.apply(str(raw_input)))
+    def apply(self, raw_input: int) -> RivalEvaluation:
+        precondition, output, precondition_error, output_error = self._raw_machine.apply(str(raw_input))
+        return RivalEvaluation(
+            bool(precondition), None if output is None else int(output),
+            bool(precondition_error), bool(output_error),
+        )
 
 
 def build_machine(
@@ -176,18 +190,46 @@ def build_range_machine(
     return RivalMachine(raw_machine)
 
 
-def build_integer_machine(
+def _evaluator_precondition(precondition: BoolExpr) -> RivalIR:
+    """Let an error-free false conjunct reject an input despite other errors."""
+    pending = [precondition]
+    predicates = []
+    while pending:
+        predicate = pending.pop()
+        if isinstance(predicate, And):
+            pending.extend((predicate.rhs, predicate.lhs))
+        else:
+            predicates.append(to_rival_ir(predicate))
+
+    rejected = to_rival_ir(BoolLit(False))
+    for predicate in predicates:
+        rejected = {
+            "op": "or", "lhs": rejected,
+            "rhs": {
+                "op": "if", "cond": {"op": "error", "arg": predicate},
+                "on_true": to_rival_ir(BoolLit(False)),
+                "on_false": {"op": "not", "arg": predicate},
+            },
+        }
+    return {
+        "op": "if", "cond": rejected,
+        "on_true": to_rival_ir(BoolLit(False)),
+        "on_false": _and_exprs(predicates),
+    }
+
+
+def build_integer_evaluator(
     expr: RealExpr,
+    precondition: BoolExpr | None = None,
+    *,
     input_total_bits: int,
     output_total_bits: int,
 ) -> RivalIntegerMachine:
-    """Compile an expression from integer input to integer output codes.
-
-    A final Round supplies the output discretization: evaluate its operand in
-    units of 2**-frac_bits and return the integer code in its specified mode.
-    Other expressions must already produce exact integers. Inner rounding
-    nodes remain part of the expression and retain their own semantics.
-    """
+    if precondition is None:
+        precondition = BoolLit(True)
+    if not isinstance(precondition, BoolExpr):
+        raise TypeError("evaluation precondition must be a Boolean expression")
+    _validate_referenced_vars([precondition], ["x"])
     if not isinstance(expr, RealExpr):
         raise TypeError("integer evaluation requires a real expression")
     _validate_referenced_vars([expr], ["x"])
@@ -205,13 +247,15 @@ def build_integer_machine(
         expr = expr.value * (RealLit(2) ** RealLit(expr.frac_bits))
 
     native = _load_native_module()
-    raw_machine = native.build_integer_machine(
-        to_rival_ir(expr),
-        input_total_bits,
-        output_total_bits,
-        rounding_mode,
+    return RivalIntegerMachine(
+        native.build_integer_evaluator(
+            to_rival_ir(expr),
+            input_total_bits,
+            output_total_bits,
+            rounding_mode,
+            _evaluator_precondition(precondition),
+        )
     )
-    return RivalIntegerMachine(raw_machine)
 
 
 def _build_domain_machine(

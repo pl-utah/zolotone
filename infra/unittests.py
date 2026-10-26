@@ -42,6 +42,7 @@ from zolotone.solver.report import (
 from zolotone.rival import (
     MAX_RECTS_ENV,
     RivalAnalysis,
+    RivalEvaluation,
     RivalRectLimitExceeded,
     build_machine,
     build_range_machine,
@@ -3239,7 +3240,7 @@ class TestFaithfulRoundingSpecNode(unittest.TestCase):
         node = ctx.fr(ctx.real("x"), 6)
         with patch.object(rival, "_load_native_module") as native:
             with self.assertRaisesRegex(NotImplementedError, "faithful rounding"):
-                rival.build_integer_machine(node, 3, 8)
+                rival.build_integer_evaluator(node, input_total_bits=3, output_total_bits=8)
         native.assert_not_called()
 
     def test_faithful_precision_uses_shared_inference_and_validation(self):
@@ -8466,13 +8467,13 @@ class TestBFloat16ReLU(unittest.TestCase):
 
 class TestRivalIntegerCodes(unittest.TestCase):
     def machine(self, expr, input_frac=0, output_frac=0, input_bits=64, output_bits=64):
-        from zolotone.rival import build_integer_machine
+        from zolotone.rival import build_integer_evaluator
 
         x = RealVar("x")
         integer_expr = substitute_spec_node(
             expr, x, x * (RealLit(2) ** RealLit(-input_frac))
         )
-        return build_integer_machine(
+        return build_integer_evaluator(
             Round(integer_expr, RoundingMode.RNE, output_frac),
             input_total_bits=input_bits,
             output_total_bits=output_bits,
@@ -8483,7 +8484,7 @@ class TestRivalIntegerCodes(unittest.TestCase):
         for code, expected in ((1, 0), (3, 2), (5, 2), (7, 4),
                                (-1, 0), (-3, -2), (-5, -2), (-7, -4)):
             with self.subTest(code=code):
-                self.assertEqual(machine.apply(code), expected)
+                self.assertEqual(machine.apply(code), RivalEvaluation(True, expected))
 
     def test_precision_increases_near_rounding_boundaries(self):
         for exponent in (30, 100, 1000):
@@ -8491,36 +8492,40 @@ class TestRivalIntegerCodes(unittest.TestCase):
                 expr = RealVar("x") * RealLit(0.5) + RealLit(sign * 2.0**-exponent)
                 machine = self.machine(expr, input_bits=2, output_bits=4)
                 with self.subTest(exponent=exponent, sign=sign):
-                    self.assertEqual(machine.apply(1), int(sign > 0))
-                    self.assertEqual(machine.apply(-1), -int(sign < 0))
+                    self.assertEqual(machine.apply(1), RivalEvaluation(True, int(sign > 0)))
+                    self.assertEqual(machine.apply(-1), RivalEvaluation(True, -int(sign < 0)))
 
     def test_reciprocal_uses_input_and_output_scales(self):
         machine = self.machine(RealVar("x") ** RealLit(-1), input_frac=2, output_frac=3)
         for code in (-31, -7, -3, 1, 3, 7, 31):
             with self.subTest(code=code):
-                self.assertEqual(machine.apply(code), round(Fraction(32, code)))
+                self.assertEqual(machine.apply(code), RivalEvaluation(True, round(Fraction(32, code))))
 
     def test_rounds_directly_to_actual_output_precision(self):
         expr = RealVar("x") * RealLit(3) * (RealLit(5) ** RealLit(-1))
         machine = self.machine(expr)
         # 0.6 rounds to 1; rounding first to a half-integer would give 0.
-        self.assertEqual(machine.apply(1), 1)
+        self.assertEqual(machine.apply(1), RivalEvaluation(True, 1))
 
     def test_integer_input_preserves_bits_beyond_binary64(self):
         machine = self.machine(RealVar("x"), input_frac=60)
-        self.assertEqual(machine.apply((3 << 59) - 1), 1)
-        self.assertEqual(machine.apply((3 << 59) + 1), 2)
+        self.assertEqual(machine.apply((3 << 59) - 1), RivalEvaluation(True, 1))
+        self.assertEqual(machine.apply((3 << 59) + 1), RivalEvaluation(True, 2))
 
     def test_scaling_beyond_binary64_exponent_range(self):
         expr = RealVar("x") * (RealLit(2) ** RealLit(1200))
         machine = self.machine(expr, input_frac=1200, input_bits=1201)
-        self.assertEqual(machine.apply(3), 3)
-        self.assertEqual(machine.apply(-3), -3)
+        self.assertEqual(machine.apply(3), RivalEvaluation(True, 3))
+        self.assertEqual(machine.apply(-3), RivalEvaluation(True, -3))
 
-    def test_undefined_and_nonfinite_results_raise_normal_errors(self):
+    def test_undefined_result_preserves_error_flag(self):
         reciprocal = self.machine(RealVar("x") ** RealLit(-1))
-        with self.assertRaises(ValueError):
-            reciprocal.apply(0)
+        result = reciprocal.apply(0)
+        self.assertTrue(result.precondition)
+        self.assertFalse(result.precondition_error)
+        self.assertTrue(result.output_error)
+
+    def test_unresolved_nonfinite_result_raises(self):
         overflowing = self.machine(RealLit(2) ** RealVar("x"))
         with self.assertRaises(ValueError):
             overflowing.apply(1 << 31)
@@ -8546,6 +8551,113 @@ class TestRivalIntegerCodes(unittest.TestCase):
                         self.assertEqual(fn(code), expected)
             finally:
                 tempdir.cleanup()
+
+
+class TestRivalEvaluator(unittest.TestCase):
+    def test_false_precondition_does_not_hide_output_domain_error(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("false-precondition")
+        machine = build_integer_evaluator(
+            ctx.rne(ctx.zero() ** ctx.real_val(-1), frac_bits=0),
+            ctx.false(), input_total_bits=4, output_total_bits=8,
+        )
+        result = machine.apply(0)
+        self.assertFalse(result.precondition)
+        self.assertFalse(result.precondition_error)
+        self.assertTrue(result.output_error)
+        self.assertEqual(machine._raw_machine.apply("0")[2:], (False, True))
+
+    def test_false_precondition_returns_actual_expression_output(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("independent-outputs")
+        x = ctx.real("x")
+        machine = build_integer_evaluator(
+            x * ctx.real_val(3), ctx.false(),
+            input_total_bits=4, output_total_bits=8,
+        )
+        self.assertEqual(machine.apply(2), RivalEvaluation(False, 6))
+        self.assertEqual(machine.apply(-2), RivalEvaluation(False, -6))
+
+    def test_precondition_requires_boolean_expression_and_known_variables(self):
+        from zolotone import rival
+
+        ctx = SpecContext("invalid-precondition")
+        x, y = ctx.real("x"), ctx.real("y")
+        with patch.object(rival, "_load_native_module") as native:
+            for precondition in (True, x):
+                with self.subTest(precondition=precondition), self.assertRaises(TypeError):
+                    rival.build_integer_evaluator(
+                        x, precondition, input_total_bits=4, output_total_bits=8,
+                    )
+            with self.assertRaisesRegex(ValueError, "missing referenced variables"):
+                rival.build_integer_evaluator(
+                    x, y > ctx.zero(), input_total_bits=4, output_total_bits=8,
+                )
+        native.assert_not_called()
+
+    def test_precondition_and_expression_are_evaluated_independently(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("checked-reciprocal")
+        x = ctx.real("x")
+        machine = build_integer_evaluator(
+            ctx.rne(x ** ctx.real_val(-1), frac_bits=2),
+            x.ne(ctx.zero()), input_total_bits=4, output_total_bits=8,
+        )
+        for code, expected in ((1, (True, 4)), (2, (True, 2)), (-2, (True, -2))):
+            with self.subTest(code=code):
+                self.assertEqual(machine.apply(code), RivalEvaluation(*expected))
+        result = machine.apply(0)
+        self.assertFalse(result.precondition)
+        self.assertFalse(result.precondition_error)
+        self.assertTrue(result.output_error)
+
+    def test_boolean_output_resolves_without_integer_rounding(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("checked-transcendental")
+        x = ctx.real("x")
+        # Resolving this predicate needs more precision than the initial seed.
+        tiny = ctx.real_val(Fraction(1, 2**200))
+        for mode in (ctx.rne, ctx.rtz, ctx.raz):
+            machine = build_integer_evaluator(
+                mode(x * ctx.real_val(Fraction(1, 2)), frac_bits=0),
+                Sin(x + tiny) > ctx.zero(), input_total_bits=4, output_total_bits=8,
+            )
+            with self.subTest(mode=mode):
+                self.assertEqual(machine.apply(0), RivalEvaluation(True, 0))
+                self.assertEqual(machine.apply(-1), RivalEvaluation(False, -1 if mode == ctx.raz else 0))
+                self.assertEqual(machine.apply(3), RivalEvaluation(True, 2 if mode != ctx.rtz else 1))
+
+    def test_default_precondition_and_exact_large_input(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("checked-large-input")
+        x = ctx.real("x")
+        point = (1 << 60) + 1
+        machine = build_integer_evaluator(x, input_total_bits=64, output_total_bits=64)
+        self.assertEqual(machine.apply(point), RivalEvaluation(True, point))
+        machine = build_integer_evaluator(x, x.eq(ctx.real_val(point)), input_total_bits=64, output_total_bits=64)
+        self.assertEqual(machine.apply(point), RivalEvaluation(True, point))
+        self.assertEqual(machine.apply(point - 1), RivalEvaluation(False, point - 1))
+
+    def test_undefined_outputs_have_independent_error_flags(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("checked-undefined")
+        x = ctx.real("x")
+        reciprocal = x ** ctx.real_val(-1)
+        for expr, precondition, expected in (
+            (reciprocal, None, (False, True)),
+            (x, reciprocal > ctx.zero(), (True, False)),
+            (reciprocal, reciprocal < ctx.zero(), (True, True)),
+        ):
+            machine = build_integer_evaluator(ctx.rne(expr, frac_bits=0), precondition, input_total_bits=4, output_total_bits=8)
+            with self.subTest(expr=expr, precondition=precondition):
+                result = machine.apply(0)
+                self.assertEqual((result.precondition_error, result.output_error), expected)
 
 
 class TestRivalTranslation(unittest.TestCase):
@@ -13905,7 +14017,181 @@ class TestSignSpecs(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
 
+class TestReciprocalDomainScenarios(unittest.TestCase):
+    def setUp(self):
+        self.ctx = SpecContext("reciprocal-domain-scenarios")
+        self.x = self.ctx.real("x")
+        self.reciprocal = self.x ** self.ctx.real_val(-1)
+        self.input_dtype = Q(3, 0)
+        self.output_dtype = Q(3, 2)
+
+    def evaluator(self, expression, assumptions):
+        from zolotone.rival import build_integer_evaluator
+
+        precondition = self.ctx.true()
+        for assumption in assumptions:
+            precondition = precondition & assumption
+        return build_integer_evaluator(
+            self.ctx.rne(expression, frac_bits=2), precondition,
+            input_total_bits=self.input_dtype.total_bits(),
+            output_total_bits=self.output_dtype.total_bits(),
+        )
+
+    def primitive(self, expression, assumptions):
+        from zolotone.autogen.missing import _build_missing_primitive
+
+        source = Var("x", self.input_dtype)
+        node = _build_missing_primitive(
+            self.ctx.rne(expression, frac_bits=2), self.x, source,
+            self.ctx.copy(assumes=list(assumptions)), output_dtype=self.output_dtype,
+        )
+        return source, node
+
+    def test_scenario_1_guard_avoids_domain_error(self):
+        """assume x > 0; assume 1/x > 0; return 1/x."""
+        from zolotone.autogen.autogen import get_spec
+
+        guard = self.x > self.ctx.zero()
+        positive_reciprocal = self.reciprocal > self.ctx.zero()
+        for reverse in (False, True):
+            for combined in (False, True):
+                with self.subTest(reverse=reverse, combined=combined):
+                    assumptions = [guard, positive_reciprocal]
+                    if reverse:
+                        assumptions.reverse()
+                    if combined:
+                        assumptions = [assumptions[0] & assumptions[1]]
+                    machine = self.evaluator(self.reciprocal, assumptions)
+                    for point in range(-4, 4):
+                        with self.subTest(point=point):
+                            result = machine.apply(point)
+                            self.assertEqual(result.precondition, point > 0)
+                            self.assertFalse(result.precondition_error)
+                            # The independent output can error at a rejected point.
+                            self.assertEqual(result.output_error, point == 0)
+                            if point > 0:
+                                self.assertEqual(result.output, round(Fraction(4, point)))
+
+                    source, node = self.primitive(self.reciprocal, assumptions)
+                    for point in (1, 2, 3):
+                        source.load_value(self.input_dtype.from_bits(point))
+                        self.assertEqual(node.evaluate().raw, round(Fraction(4, point)))
+                    generated = get_spec(node.name, node.spec)
+                    excluded_zero = generated.spec_inputs[0].ne(self.ctx.zero())
+                    self.assertTrue(any(
+                        assumption.identical(excluded_zero)
+                        for assumption in generated.spec_ctx.assumes
+                    ))
+
+    def test_scenario_2_unguarded_output_has_domain_error(self):
+        """return 1/x: zero is reachable, but its output is undefined."""
+        machine = self.evaluator(self.reciprocal, [])
+        for point in range(-4, 4):
+            with self.subTest(point=point):
+                result = machine.apply(point)
+                self.assertTrue(result.precondition)
+                self.assertFalse(result.precondition_error)
+                self.assertEqual(result.output_error, point == 0)
+                if point != 0:
+                    self.assertEqual(result.output, round(Fraction(4, point)))
+        with self.assertRaisesRegex(
+            ZolotoneError, "input code 0: domain error in output at reachable input"
+        ):
+            self.primitive(self.reciprocal, [])
+
+    def test_scenario_3_contradictory_assumptions_are_infeasible(self):
+        """assume x > 0; assume 1/x < 0; return 1/x."""
+        guard = self.x > self.ctx.zero()
+        negative_reciprocal = self.reciprocal < self.ctx.zero()
+        for assumptions in ([guard, negative_reciprocal], [negative_reciprocal, guard]):
+            with self.subTest(assumptions=assumptions):
+                machine = self.evaluator(self.reciprocal, assumptions)
+                for point in range(-4, 4):
+                    with self.subTest(point=point):
+                        result = machine.apply(point)
+                        self.assertFalse(result.precondition)
+                        self.assertFalse(result.precondition_error)
+                        self.assertEqual(result.output_error, point == 0)
+                with self.assertRaisesRegex(InfeasibleError, "no reachable input codes"):
+                    self.primitive(self.reciprocal, assumptions)
+
+    def test_scenario_4_assumption_has_domain_error(self):
+        """assume 1/x > 0; return x: an assumption is undefined at zero."""
+        assumptions = [self.reciprocal > self.ctx.zero()]
+        machine = self.evaluator(self.x, assumptions)
+        for point in range(-4, 4):
+            with self.subTest(point=point):
+                result = machine.apply(point)
+                self.assertEqual(result.precondition_error, point == 0)
+                self.assertFalse(result.output_error)
+                self.assertEqual(result.output, 4 * point)
+                # The Boolean value is meaningful only without its error flag.
+                if point != 0:
+                    self.assertEqual(result.precondition, point > 0)
+        with self.assertRaisesRegex(
+            ZolotoneError, "input code 0: domain error in assumptions"
+        ):
+            self.primitive(self.x, assumptions)
+
+
+class TestRivalEvaluatorPreconditions(unittest.TestCase):
+    def test_undefined_false_value_is_not_a_rejection(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("undefined-evaluator")
+        x = ctx.real("x")
+        condition = (x ** ctx.real_val(-1)) < ctx.zero()
+        for precondition in (condition, ctx.true() & condition, ctx.false() | condition):
+            machine = build_integer_evaluator(
+                x, precondition, input_total_bits=4, output_total_bits=8,
+            )
+            with self.subTest(precondition=precondition):
+                result = machine.apply(0)
+                self.assertTrue(result.precondition_error)
+                self.assertFalse(result.output_error)
+                self.assertEqual(result.output, 0)
+
+
 class TestMissingPrimitiveRuntime(unittest.TestCase):
+    def test_univariate_lookup_checks_transcendental_assumptions_without_z3(self):
+        from zolotone.autogen import missing
+        from zolotone.autogen.autogen import get_spec
+
+        ctx = SpecContext("checked-transcendental-lut")
+        x = ctx.real("x")
+        ctx.assume(Sin(x) > ctx.zero())
+        source = Var("x", UQ(2, 0))
+        with patch.object(z3, "Solver", side_effect=AssertionError("unexpected Z3")):
+            primitive = missing._build_missing_primitive(
+                ctx.rne(x ** ctx.two(), frac_bits=2),
+                x, source, ctx, output_dtype=UQ(4, 2),
+            )
+        for point, expected in ((1, 1), (2, 4), (3, 9)):
+            source.load_value(UQ(2, 0).from_bits(point))
+            self.assertEqual(primitive.evaluate().to_python(), expected)
+        spec = get_spec(primitive.name, primitive.spec)
+        excluded_zero = spec.spec_inputs[0].ne(ctx.zero())
+        self.assertTrue(any(assume.identical(excluded_zero) for assume in spec.spec_ctx.assumes))
+
+    def test_compound_input_conservatively_evaluates_without_z3(self):
+        from zolotone.autogen import missing
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("checked-compound-lut")
+        x, y = ctx.real("x"), ctx.real("y")
+        ctx.assume((x >= ctx.zero()) & (x <= ctx.one()))
+        ctx.assume((y >= ctx.zero()) & (y <= ctx.one()))
+        ctx.assume(x.ne(y))
+        lhs, rhs = Var("x", UQ(1, 0)), Var("y", UQ(1, 0))
+        with patch.object(z3, "Solver", side_effect=AssertionError("unexpected Z3")):
+            primitive = missing._build_missing_primitive(
+                ctx.rne((x + y) ** ctx.two(), frac_bits=0),
+                x + y, uq_add(lhs, rhs), ctx, output_dtype=UQ(3, 0),
+            )
+        lhs.load_value(UQ(1, 0).from_bits(0))
+        rhs.load_value(UQ(1, 0).from_bits(1))
+        self.assertEqual(primitive.evaluate().to_python(), 1)
+
     def test_lut_boundaries_cover_every_nonliteral_dependency(self):
         from zolotone.autogen.spec_lowering import lut_inputs
 
@@ -14050,16 +14336,17 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x >= ctx.one())
         source = Var("x", UQ(2, 0))
         evaluator = Mock()
-        build = missing.build_integer_machine
+        build = missing.build_integer_evaluator
 
         def track_machine(*args, **kwargs):
             evaluator.apply.side_effect = build(*args, **kwargs).apply
             return evaluator
 
-        with patch.object(missing, "build_integer_machine", side_effect=track_machine):
+        with patch.object(missing, "build_integer_evaluator", side_effect=track_machine) as compile_machine:
             primitive = missing._build_missing_primitive(
                 ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=UQ(4, 0)
             )
+        compile_machine.assert_called_once()
         self.assertEqual(evaluator.apply.call_args_list, [call(1), call(2), call(3)])
         for value in (1, 2, 3):
             source.load_value(UQ(2, 0).from_bits(value))
@@ -14072,7 +14359,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
         evaluator = Mock()
         evaluator.apply.side_effect = ValueError("Cannot evaluate")
-        with patch.object(missing, "build_integer_machine", return_value=evaluator):
+        with patch.object(missing, "build_integer_evaluator", return_value=evaluator):
             with self.assertRaisesRegex(ZolotoneError, "Could not evaluate generated component"):
                 missing._build_missing_primitive(
                     ctx.rne(x ** ctx.two(), frac_bits=0), x, Var("x", UQ(2, 0)), ctx,
@@ -14165,12 +14452,12 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
         source = Var("x", Q(2, 1))
         primitive = _build_missing_primitive(
-            ctx.rne(x ** ctx.real_val(-1), frac_bits=0), x, source, ctx, output_dtype=Q(3, 0)
+            ctx.rne(x * ctx.two(), frac_bits=0), x, source, ctx, output_dtype=Q(3, 0)
         )
         for value in (-0.5, 0.5):
             with self.subTest(value=value):
                 source.load_value(Q(2, 1).from_float(value))
-                self.assertEqual(primitive.evaluate().to_python(), 1 / value)
+                self.assertEqual(primitive.evaluate().to_python(), 2 * value)
 
     def test_missing_lookup_spec_excludes_unreachable_fractional_points(self):
         from zolotone.autogen.missing import _build_missing_primitive
@@ -14197,17 +14484,24 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
                 self.assertEqual(solver.check(), expected)
                 solver.pop()
 
-    def test_disjoint_input_skips_undefined_lookup_codes(self):
-        def reciprocal(x: Q(2, 1), ctx) -> Q:
-            ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
-            return ctx.rne(x ** ctx.real_val(-1), frac_bits=1)
+    def test_disjoint_input_excludes_undefined_lookup_codes(self):
+        from zolotone.autogen.missing import _build_missing_primitive
+        from zolotone.autogen.autogen import get_spec
 
-        result = Autogenerate("disjoint_reciprocal", reciprocal)
-        self.assertTrue(result.inner_tree.name.startswith("LUT_rne_"))
+        ctx = SpecContext("disjoint-reciprocal")
+        x = ctx.real("x")
+        ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
+        source = Var("x", Q(2, 1))
+        primitive = _build_missing_primitive(
+            ctx.rne(x ** ctx.real_val(-1), frac_bits=1),
+            x, source, ctx, output_dtype=Q(3, 1),
+        )
         for value in (-0.5, 0.5):
-            with self.subTest(value=value):
-                result.args[0].load_value(Q(2, 1).from_float(value))
-                self.assertEqual(result.evaluate().to_python(), 1 / value)
+            source.load_value(Q(2, 1).from_float(value))
+            self.assertEqual(primitive.evaluate().to_python(), 1 / value)
+        spec = get_spec(primitive.name, primitive.spec)
+        excluded_zero = spec.spec_inputs[0].ne(ctx.zero())
+        self.assertTrue(any(assume.identical(excluded_zero) for assume in spec.spec_ctx.assumes))
 
     def test_missing_reciprocal_creates_typed_runtime_primitive(self):
         from zolotone.autogen.autogen import get_spec

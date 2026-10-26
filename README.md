@@ -336,11 +336,29 @@ Any inner rounding nodes remain part of `e`, preserving intermediate rounding.
 LUTs keep the rounding node's fractional width. Widening to a larger requested
 output format happens afterward through lossless result adaptation.
 
-The `build_integer_machine` API follows the same rule: a final rounding node
-selects its mode and output-code scale. Without a final rounding node, the
+LUT generation compiles assumptions expressible in the materialized input and
+the rounded output into one Rival machine. The evaluator's default precondition
+handling lets any error-free false conjunct reject the input, even when another
+conjunct has a domain error. This is independent of assumption order. Assumption
+errors without a rejecting assumption, output errors at reachable inputs, and
+unresolved evaluations stop generation. A table with no reachable inputs is
+rejected as infeasible.
+Assumptions that retain other variables leave points conservatively reachable;
+LUT generation performs no Z3 reachability pass.
+
+The `build_integer_evaluator(expr, precondition=None, *, input_total_bits,
+output_total_bits)` API accepts a Boolean precondition, defaulting to `True`,
+and returns `RivalEvaluation(feasible, code, precondition_error, output_error)`
+for each input. The flags indicate possible domain errors; flagged values must
+not be used as valid results. A non-finite output code is `None`. Both expressions are
+evaluated independently: a false precondition does not replace or suppress
+the expression output. Unresolved native evaluations propagate as `ValueError`;
+error-flag interpretation and reachability decisions belong to the LUT builder
+in `missing.py`.
+A final rounding node selects its mode and output-code scale. Without one, the
 expression must already produce a unique exact integer. There is no implicit
-rounding default or exactness flag. Undefined reachable results and output
-overflow are errors.
+rounding default or exactness flag. LUT generation excludes only inputs with a
+proven false assumption; output overflow remains an error.
 
 `zolotone.rival` translates specification expressions into Rival3 for
 interval-based feasibility checks. `make install` builds the PyO3 extension;
