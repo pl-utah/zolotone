@@ -346,8 +346,14 @@ class _LoweringSearch:
             resize = q_resize if isinstance(source, Q) else uq_resize
             node = resize(candidate.node, target.int_bits, target.frac_bits)
             candidate = _Candidate.from_operation(node, self.root, (candidate,), 1)
-        if self.result is None or candidate.cost < self.result.cost:
+        if self.result is None or self.result_rank(candidate) < self.result_rank(self.result):
             self.result = candidate
+
+    def result_rank(self, candidate):
+        """Generic fixed-point outputs minimize width, then computation cost."""
+        if self.return_annotation in (Q, UQ):
+            return candidate.node.dtype.total_bits(), candidate.cost
+        return (candidate.cost,)
 
     # Add candidate if it is cheaper than previous one
     def add(self, candidate):
@@ -359,7 +365,10 @@ class _LoweringSearch:
         self.consider_result(candidate)
         return True
 
-    def worth_trying(self, cost):
+    def worth_trying(self, cost, *, operation_cost=1):
+        # Free shrinking is always eligible; cost cannot bound width-first results.
+        if operation_cost == 0 or self.return_annotation in (Q, UQ):
+            return True
         result = self.result
         return result is None or cost < result.cost
 
@@ -409,9 +418,14 @@ class _LoweringSearch:
         return self.range_checks[key]
 
     def add_component_candidates(self):
+        from ..components import q_truncate_msb, uq_truncate_msb
+
         changed = False
         expressions = tuple(self.candidates.keys())  # Resolved expressions
         for index, component in enumerate(self.components):
+            operation_cost = (
+                0 if component.node is q_truncate_msb or component.node is uq_truncate_msb else 1
+            )
             # Select expressions that can be inputs to new component
             expression_pools = [
                 tuple(
@@ -437,8 +451,8 @@ class _LoweringSearch:
                     )
                 ]
                 for arguments in itertools.product(*pools):
-                    cost = _operation_cost(arguments, 1)
-                    if not self.worth_trying(cost):
+                    cost = _operation_cost(arguments, operation_cost)
+                    if not self.worth_trying(cost, operation_cost=operation_cost):
                         continue
                     key = (index, tuple((arg.spec, arg.node.dtype) for arg in arguments))
                     if self.component_attempts.get(key, math.inf) <= cost:
@@ -450,7 +464,9 @@ class _LoweringSearch:
                         continue
                     if not self.allows_format(node, matched, arguments):
                         continue
-                    candidate = _Candidate.from_operation(node, matched, arguments, operation_cost=1)
+                    candidate = _Candidate.from_operation(
+                        node, matched, arguments, operation_cost=operation_cost
+                    )
                     if self.fits(candidate):
                         changed |= self.add(candidate)
         return changed
