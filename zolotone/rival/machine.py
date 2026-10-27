@@ -61,6 +61,8 @@ class RivalEvaluation(NamedTuple):
     output: int | tuple[Fraction, Fraction] | None = None
     precondition_error: bool = False
     output_error: bool = False
+    precondition_total_error: bool = False
+    output_total_error: bool = False
 
 
 class RivalIntegerMachine:
@@ -71,10 +73,12 @@ class RivalIntegerMachine:
 
     def apply_point(self, point: Sequence[int]) -> RivalEvaluation:
         """Evaluate integer input codes in compilation's free_vars order."""
-        precondition, output, precondition_error, output_error = self._raw_machine.apply_point([str(code) for code in point])
+        (precondition, output, precondition_error, output_error,
+         precondition_total_error, output_total_error) = self._raw_machine.apply_point([str(code) for code in point])
         return RivalEvaluation(
             bool(precondition), None if output is None else int(output),
             bool(precondition_error), bool(output_error),
+            bool(precondition_total_error), bool(output_total_error),
         )
 
     def apply_range(self, rect: Sequence[tuple[int, int]]) -> RivalEvaluation:
@@ -82,11 +86,13 @@ class RivalIntegerMachine:
         result = self._raw_machine.apply_range([(str(lo), str(hi)) for lo, hi in rect])
         if result is None:
             return RivalEvaluation()
-        precondition, output, precondition_error, output_error = result
+        (precondition, output, precondition_error, output_error,
+         precondition_total_error, output_total_error) = result
         return RivalEvaluation(
             tuple(precondition),
             None if output is None else tuple(Fraction(bound) for bound in output),
             bool(precondition_error), bool(output_error),
+            bool(precondition_total_error), bool(output_total_error),
         )
 
 

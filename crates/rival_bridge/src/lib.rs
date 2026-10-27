@@ -151,7 +151,7 @@ struct RawEvaluator {
     range_mode: Arc<AtomicBool>,
 }
 
-type EvaluationRange = ((bool, bool), Option<(String, String)>, bool, bool);
+type EvaluationRange = ((bool, bool), Option<(String, String)>, bool, bool, bool, bool);
 
 impl RawEvaluator {
     fn code_args(&self, intervals: Vec<(String, String)>) -> PyResult<Vec<Ival>> {
@@ -270,12 +270,14 @@ impl RawEvaluator {
                 .map(|(lo, hi)| (lo.to_string(), hi.to_string())),
             precondition.error_flags().partial(),
             output.error_flags().partial(),
+            precondition.error_flags().total(),
+            output.error_flags().total(),
         )))
     }
 
     /// Evaluate both outputs using exact integer input codes.
     /// Strings avoid host integer-width limits.
-    fn apply_point(&mut self, point: Vec<String>) -> PyResult<(bool, Option<String>, bool, bool)> {
+    fn apply_point(&mut self, point: Vec<String>) -> PyResult<(bool, Option<String>, bool, bool, bool, bool)> {
         let args = self.code_args(point.into_iter().map(|code| (code.clone(), code)).collect())?;
         let outputs = self
             .machine
@@ -302,6 +304,8 @@ impl RawEvaluator {
             integer,
             feasible.error_flags().partial(),
             output.error_flags().partial(),
+            feasible.error_flags().total(),
+            output.error_flags().total(),
         ))
     }
 }
