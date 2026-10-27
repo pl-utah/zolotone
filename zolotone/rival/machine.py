@@ -10,6 +10,7 @@ from ..spec.spec_ast import *
 RivalIR = dict[str, Any]
 
 __all__ = [
+    "build_boolean_evaluator",
     "RivalMachine", "RivalIntegerMachine", "RivalAnalysis", "RivalEvaluation",
     "build_machine", "build_integer_evaluator", "collect_free_vars", "to_rival_ir",
 ]
@@ -87,6 +88,23 @@ class RivalIntegerMachine:
             None if output is None else tuple(Fraction(bound) for bound in output),
             bool(precondition_error), bool(output_error),
         )
+
+
+def build_boolean_evaluator(
+    expr: BoolExpr,
+    *,
+    input_total_bits: int,
+    free_vars: Sequence[str],
+) -> RivalIntegerMachine:
+    """Compile a Boolean expression as an integer output code, 0 or 1."""
+    if not isinstance(expr, BoolExpr):
+        raise TypeError("Boolean evaluation requires a Boolean expression")
+    return build_integer_evaluator(
+        If(expr, RealLit(1), RealLit(0)),
+        input_total_bits=input_total_bits, 
+        output_total_bits=1,
+        free_vars=free_vars,
+    )
 
 
 def build_machine(
