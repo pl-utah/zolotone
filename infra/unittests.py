@@ -8840,6 +8840,187 @@ class TestRivalEvaluator(unittest.TestCase):
                 self.assertEqual((result.precondition_error, result.output_error), expected)
 
 
+class TestRivalResultFits(unittest.TestCase):
+    def setUp(self):
+        self.ctx = SpecContext("rival-result-fit")
+        self.x, self.y = self.ctx.real("x"), self.ctx.real("y")
+
+    def prove(self, expression, dtype, inputs):
+        from zolotone.rival.analysis import rival_prove_result_fits
+        return rival_prove_result_fits(expression, dtype, self.ctx, inputs)
+
+    def test_compiles_once_and_checks_every_point_in_dependent_multivariate_box(self):
+        from zolotone.rival import analysis
+
+        machines = []
+        compile_machine = analysis.build_integer_evaluator
+
+        def track(*args, **kwargs):
+            machine = Mock(wraps=compile_machine(*args, **kwargs))
+            machines.append(machine)
+            return machine
+
+        with patch.object(analysis, "build_integer_evaluator", side_effect=track) as compile_mock:
+            expression = (self.x - self.x) + (self.y - self.y)
+            self.assertTrue(self.prove(expression, UQ(1, 0), {self.x: Q(1, 1), self.y: UQ(1, 0)}))
+        compile_mock.assert_called_once()
+        machine, = machines
+        self.assertEqual(machine.apply_range.call_count, 7)
+        points = [tuple(call_.args[0]) for call_ in machine.apply_point.call_args_list]
+        self.assertCountEqual(points, [(x, y) for x in range(-2, 2) for y in range(2)])
+        for call_ in machine.apply_range.call_args_list:
+            self.assertTrue(any(lower < upper for lower, upper in call_.args[0]))
+
+    def test_wide_identity_is_proved_by_one_enclosure(self):
+        from zolotone.rival import analysis
+
+        machine = Mock(wraps=analysis.build_integer_evaluator(
+            self.x, free_vars=["x"], input_total_bits=128, output_total_bits=128,
+        ))
+        with patch.object(analysis, "build_integer_evaluator", return_value=machine):
+            self.assertTrue(self.prove(self.x, UQ(128, 0), {self.x: UQ(128, 0)}))
+        machine.apply_range.assert_called_once_with(((0, (1 << 128) - 1),))
+        machine.apply_point.assert_not_called()
+
+    def test_exact_signed_and_unsigned_output_limits(self):
+        for dtype, lower, upper in ((UQ(54, 0), 0, (1 << 54) - 1),
+                                    (Q(55, 0), -(1 << 54), (1 << 54) - 1),
+                                    (Q(0, 60), Fraction(-1, 2), Fraction(1, 2) - Fraction(1, 1 << 60))):
+            quantum = Fraction(1, 1 << dtype.frac_bits)
+            for value, fits in ((lower - quantum, False), (lower, True), (upper, True), (upper + quantum, False)):
+                with self.subTest(dtype=dtype, value=value):
+                    self.assertEqual(self.prove(self.ctx.real_val(value), dtype, {}), fits)
+
+    def test_discrete_assumptions_do_not_include_between_code_values(self):
+        self.ctx.assume(self.x.eq(self.ctx.real_val(Fraction(1, 4))))
+        self.assertTrue(self.prove(self.ctx.real_val(100), UQ(1, 0), {self.x: UQ(1, 1)}))
+
+    def test_split_preserves_values_between_adjacent_binary64_numbers(self):
+        target = Fraction(1) + Fraction(1, 1 << 53)
+        self.ctx.assume(self.x.eq(self.ctx.real_val(target)))
+        self.assertFalse(self.prove(self.ctx.two(), UQ(1, 0), {self.x: UQ(2, 54)}))
+
+    def test_relational_assumptions_prove_unsigned_subtraction(self):
+        inputs = {self.x: UQ(3, 1), self.y: UQ(1, 2)}
+        self.assertFalse(self.prove(self.x - self.y, UQ, inputs))
+        self.ctx.assume(self.x >= self.y)
+        self.assertTrue(self.prove(self.x - self.y, UQ, inputs))
+        self.assertTrue(self.prove(self.x - self.y, UQ(3, 2), inputs))
+
+    def test_boolean_input_and_unreachable_undefined_output(self):
+        selected = self.ctx.bool("selected")
+        self.ctx.assume(selected)
+        expression = If(selected, self.x, self.ctx.zero() ** -self.ctx.one())
+        self.assertTrue(self.prove(expression, UQ(2, 1), {selected: Bool(), self.x: UQ(2, 1)}))
+
+    def test_guard_excludes_undefined_point(self):
+        self.ctx.assume(self.x > self.ctx.zero())
+        expression = self.ctx.rne(self.x ** -self.ctx.one(), frac_bits=2)
+        self.assertTrue(self.prove(expression, UQ(1, 2), {self.x: UQ(2, 0)}))
+
+    def test_reachable_domain_errors_cannot_be_proved(self):
+        expression = self.ctx.rne(self.x ** -self.ctx.one(), frac_bits=0)
+        with self.assertRaisesRegex(ZolotoneError, "domain error in result"):
+            self.prove(expression, UQ(1, 0), {self.x: UQ(1, 0)})
+        self.ctx.assume((self.x ** -self.ctx.one()) > self.ctx.zero())
+        with self.assertRaisesRegex(ZolotoneError, "assumptions"):
+            self.prove(self.x, UQ(1, 0), {self.x: UQ(1, 0)})
+
+    def test_rounding_and_output_scale_match_exhaustive_fraction_oracle(self):
+        inputs = {self.x: Q(2, 1), self.y: UQ(1, 1)}
+        for mode in ("rne", "rtz", "raz"):
+            expression = getattr(self.ctx, mode)((self.x - self.y) * self.ctx.real_val(Fraction(3, 4)), frac_bits=1)
+            codes = []
+            for x in range(-4, 4):
+                for y in range(4):
+                    scaled = Fraction(3 * (x - y), 4)
+                    code = (round(scaled) if mode == "rne" else math.trunc(scaled) if mode == "rtz"
+                            else math.ceil(scaled) if scaled >= 0 else math.floor(scaled))
+                    codes.append(code)
+            for dtype in (Q(2, 1), Q(3, 1), Q(3, 2), UQ(3, 1)):
+                lower = -(1 << (dtype.total_bits() - 1)) if isinstance(dtype, Q) else 0
+                upper = (1 << (dtype.total_bits() - isinstance(dtype, Q))) - 1
+                fits = all(lower <= Fraction(code, 2) * (1 << dtype.frac_bits) <= upper for code in codes)
+                with self.subTest(mode=mode, dtype=dtype):
+                    self.assertEqual(self.prove(expression, dtype, inputs), fits)
+
+    def test_unresolved_ranges_fall_back_to_point_evaluation(self):
+        from zolotone.rival import analysis
+
+        real_compile = analysis.build_integer_evaluator
+        machines = []
+
+        def track(*args, **kwargs):
+            machine = Mock(wraps=real_compile(*args, **kwargs))
+            machine.apply_range.return_value = RivalEvaluation()
+            machines.append(machine)
+            return machine
+
+        with patch.object(analysis, "build_integer_evaluator", side_effect=track):
+            self.assertTrue(self.prove(self.x, UQ(2, 0), {self.x: UQ(2, 0)}))
+        self.assertEqual(machines[0].apply_point.call_count, 4)
+
+    def test_point_failure_is_not_success_or_overflow(self):
+        from zolotone.rival import analysis
+
+        for result in (RivalEvaluation(True, None), RivalEvaluation(None, 0)):
+            machine = Mock()
+            machine.apply_point.return_value = result
+            with self.subTest(result=result), patch.object(analysis, "build_integer_evaluator", return_value=machine):
+                with self.assertRaises(ZolotoneError):
+                    self.prove(self.ctx.one(), UQ(1, 0), {})
+        machine.apply_point.side_effect = ValueError("unresolved point")
+        with patch.object(analysis, "build_integer_evaluator", return_value=machine):
+            with self.assertRaisesRegex(ZolotoneError, "unresolved point"):
+                self.prove(self.ctx.one(), UQ(1, 0), {})
+
+    def test_point_errors_show_named_decoded_input_values(self):
+        from zolotone.rival import analysis
+
+        selected = self.ctx.bool("selected")
+        expression = If(selected, self.x, self.ctx.zero())
+        inputs = {self.y: UQ(1, 0), self.x: Q(2, 1), selected: Bool()}
+        failures = (
+            RivalEvaluation(True, None, output_error=True),
+            RivalEvaluation(None, None, precondition_error=True),
+            ValueError("unresolved point"),
+        )
+        for failure in failures:
+            machine = Mock()
+            machine.apply_range.return_value = RivalEvaluation()
+            if isinstance(failure, Exception):
+                machine.apply_point.side_effect = failure
+            else:
+                machine.apply_point.return_value = failure
+            with self.subTest(failure=failure), patch.object(analysis, "build_integer_evaluator", return_value=machine):
+                with self.assertRaisesRegex(ZolotoneError, r"input point \[x=3/2, selected=True\]"):
+                    self.prove(expression, Q(2, 1), inputs)
+
+    def test_unknown_real_input_dtype_is_reported(self):
+        for dtype in (UQ(2, 0), Q, Bool()):
+            with self.subTest(dtype=dtype), self.assertRaisesRegex(ZolotoneError, "needs input dtypes"):
+                self.prove(self.x, dtype, {})
+
+    def test_unknown_assumption_input_dtype_is_reported_before_early_return(self):
+        self.ctx.assume(self.y >= self.ctx.zero())
+        with self.assertRaisesRegex(ZolotoneError, "needs input dtypes for: y"):
+            self.prove(self.x, Q, {self.x: UQ(2, 0)})
+
+    def test_materialized_input_does_not_cover_separate_variable_occurrences(self):
+        source = self.x + self.y
+        with self.assertRaisesRegex(ZolotoneError, "needs input dtypes for: x"):
+            self.prove(source + self.x, UQ(3, 0), {source: UQ(2, 0)})
+
+    def test_fit_proof_uses_no_solver(self):
+        from zolotone.autogen import spec_validation
+
+        self.ctx.assume(self.x >= self.y)
+        with patch.object(spec_validation, "check_equivalence", side_effect=AssertionError("solver called")):
+            self.assertTrue(spec_validation._prove_result_fits(
+                self.x - self.y, UQ(2, 0), self.ctx, {self.x: UQ(2, 0), self.y: UQ(2, 0)},
+            ))
+
+
 class TestRivalTranslation(unittest.TestCase):
     def test_nearest_even_expression_rounds_points_and_ties(self):
         ctx = SpecContext("rival-nearest-even")
@@ -12835,6 +13016,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             spec_ast,
             range_suggestion,
             ctx,
+            {x: UQ(2, 0)},
         )
 
         self.assertEqual(range_suggestion, search_suggestion)
@@ -12911,6 +13093,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 x,
                 UQ(4, 0),
                 ctx,
+                {x: UQ(4, 0)},
             )
 
         self.assertEqual(suggestion, UQ(1, 0))

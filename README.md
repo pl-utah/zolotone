@@ -331,8 +331,15 @@ ignored by Git.
 `zolotone.rival` contains machine compilation, evaluation, and expression
 lowering. `zolotone.rival.analysis` contains the algorithms built on that API:
 rectangle extraction, range/domain analysis, feasibility search, and context
-trimming. Query construction, including asserted conjunctions, stays with those
-analysis callers.
+trimming, plus fixed-point result-fit proofs. Query construction, including
+asserted conjunctions, stays with those analysis callers.
+
+Result-fit proofs compile one integer machine with the assumptions and result.
+They start from the exact input dtype code bounds and use `apply_range` to
+discharge boxes. Unresolved boxes split at an integer midpoint without gaps;
+singleton boxes use `apply_point`. A reachable out-of-bounds point rejects the
+format, while evaluation failures raise an error. This search is finite and can
+require enumerating every input combination; it has no SMT fallback.
 
 Generated lookup tables normalize integer input codes as `n * 2**(-F_input)`
 (signed for `Q`). For a final `Round(e, mode, F)`, Rival evaluates `e * 2**F`

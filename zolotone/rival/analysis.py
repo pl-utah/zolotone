@@ -8,11 +8,13 @@ from itertools import product
 import math
 import os
 import sys
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
+from ..errors import ZolotoneError
 from ..spec.spec_ast import *
+from ..types import Bool, DataType, Q, UQ
 from .machine import (
-    RivalMachine, build_machine, collect_free_vars, to_rival_ir,
+    RivalMachine, build_integer_evaluator, build_machine, collect_free_vars, to_rival_ir,
     _and_exprs, _real_literal_ratio,
 )
 
@@ -20,6 +22,7 @@ __all__ = [
     "DEFAULT_MAX_RECTS", "MAX_RECTS_ENV", "RivalDomainError",
     "RivalRectLimitExceeded", "get_rival_rects", "rival_domain_errors",
     "rival_range_analysis", "rival_feasibility_check", "rival_trim_context",
+    "rival_prove_result_fits",
 ]
 
 MAX_RECTS_ENV = "ZOLOTONE_RIVAL_MAX_RECTS"
@@ -185,6 +188,138 @@ def rival_range_analysis(
     if lower > upper:
         return None
     return lower, upper
+
+
+def rival_prove_result_fits(
+    expr: SpecNode,
+    output_type: object,
+    ctx: "SpecContext",
+    input_dtypes: Mapping[SpecNode, DataType],
+) -> bool:
+    """Prove a result range over finite input codes using one Rival machine.
+
+    Range enclosures discharge boxes; unresolved boxes are partitioned without
+    gaps until point evaluation decides them. Evaluation failures raise rather
+    than being mistaken for either a proof or an overflow counterexample.
+    """
+    input_names = set(collect_free_vars(input_dtypes))
+    missing = set(collect_free_vars([expr, *ctx.assumes])) - input_names
+    if missing:
+        raise ZolotoneError(f"Result-fit proof needs input dtypes for: {', '.join(sorted(missing))}")
+
+    if output_type is Bool or isinstance(output_type, Bool) or output_type is Q:
+        return True
+    if not isinstance(expr, RealExpr):
+        raise TypeError("Result-fit proof expects a real expression")
+    if output_type is not UQ and not isinstance(output_type, (Q, UQ)):
+        raise TypeError(f"Result-fit proof expects a Q or UQ output type, got {output_type!r}")
+
+    # Precondition
+    precondition = BoolLit(True)
+    for assume in ctx.assumes:
+        precondition = precondition & assume
+
+    # Reserve variable names from the input expressions.
+    occupied = set(input_names)
+    free_vars = []
+    input_domains = []
+    initial_box = []
+    input_bits = 1
+    for source, dtype in input_dtypes.items():
+        if not (variables(expr) | variables(precondition)) & variables(source):
+            continue
+        name = f"__rival_input_{len(free_vars)}"
+        while name in occupied:
+            name += "_"
+        occupied.add(name)
+        raw = RealVar(name)
+        if isinstance(dtype, (Q, UQ)):
+            width = dtype.total_bits()
+            lower = -(1 << (width - 1)) if isinstance(dtype, Q) else 0
+            upper = (1 << (width - isinstance(dtype, Q))) - 1
+            replacement = raw * (RealLit(2) ** RealLit(-dtype.frac_bits))
+        elif isinstance(dtype, Bool):
+            width, lower, upper = 1, 0, 1
+            replacement = raw.ne(RealLit(0))
+        else:
+            raise NotImplementedError(f"Rival result-fit inputs require Q, UQ or Bool, got {dtype!r}")
+        expr = substitute_spec_node(expr, source, replacement)
+        precondition = substitute_spec_node(precondition, source, replacement)
+        free_vars.append(name)
+        input_domains.append((source, dtype))
+        initial_box.append((lower, upper))
+        input_bits = max(input_bits, width)
+    # Expression keys may cover only some occurrences of their variables.
+    missing = set(collect_free_vars([expr, precondition])) - set(free_vars)
+    if missing:
+        raise ZolotoneError(f"Result-fit proof needs input dtypes for: {', '.join(sorted(missing))}")
+
+    def format_input_point(point):
+        assignments = []
+        for (source, dtype), code in zip(input_domains, point, strict=True):
+            label = source.name if isinstance(source, (RealVar, BoolVar)) else f"({source})"
+            value = bool(code) if isinstance(dtype, Bool) else Fraction(code) * Fraction(2) ** -dtype.frac_bits
+            assignments.append(f"{label}={value}")
+        return "[" + ", ".join(assignments) + "]"
+
+    if output_type is UQ:
+        # A generic unsigned annotation asks only about sign, with no output
+        # scale. Encode that predicate as an exact integer Boolean indicator.
+        integer_expr = If(precondition, If(expr >= RealLit(0), RealLit(1), RealLit(0)), RealLit(1))
+        minimum = maximum = 1
+        output_bits = 1
+    else:
+        output_bits = output_type.total_bits()
+        minimum = -(1 << (output_bits - 1)) if isinstance(output_type, Q) else 0
+        maximum = (1 << (output_bits - isinstance(output_type, Q))) - 1
+        if isinstance(expr, Round):
+            # Preserve the final rounding node so the integer machine can
+            # refine using its rounding mode. Bounds use that node's scale.
+            integer_expr = Round(If(precondition, expr.value, RealLit(0)), expr.mode, expr.frac_bits)
+            scale = Fraction(2) ** (expr.frac_bits - output_type.frac_bits)
+            minimum *= scale
+            maximum *= scale
+        else:
+            integer_expr = If(precondition, expr * RealLit(1 << output_type.frac_bits), RealLit(0))
+
+    machine = build_integer_evaluator(
+        integer_expr, precondition, free_vars=free_vars,
+        input_total_bits=input_bits, output_total_bits=output_bits,
+    )
+    pending = [tuple(initial_box)]
+    while pending:
+        box = pending.pop()
+        split_index = max(range(len(box)), key=lambda index: box[index][1] - box[index][0], default=None)
+        if split_index is None or box[split_index][0] == box[split_index][1]:
+            point = [lower for lower, _ in box]
+            try:
+                result = machine.apply_point(point)
+            except ValueError as exc:
+                raise ZolotoneError(f"Could not prove result fit at input point {format_input_point(point)}: {exc}") from exc
+            if result.precondition_error:
+                raise ZolotoneError(f"Domain error in assumptions at input point {format_input_point(point)}")
+            if result.precondition is False:
+                continue
+            if result.precondition is not True or result.output_error or result.output is None:
+                detail = "domain error in result" if result.output_error else "unresolved or non-finite result"
+                raise ZolotoneError(f"Could not prove output range at input point {format_input_point(point)}: {detail}")
+            if not minimum <= result.output <= maximum:
+                return False
+            continue
+
+        result = machine.apply_range(box)
+        if not result.precondition_error:
+            if result.precondition == (False, False):
+                continue
+            if not result.output_error and result.output is not None:
+                lower, upper = result.output
+                if minimum <= lower <= upper <= maximum:
+                    continue
+        lower, upper = box[split_index]
+        midpoint = (lower + upper) // 2
+        pending.append(box[:split_index] + ((lower, midpoint),) + box[split_index + 1:])
+        pending.append(box[:split_index] + ((midpoint + 1, upper),) + box[split_index + 1:])
+    return True
 
 
 def rival_domain_errors(

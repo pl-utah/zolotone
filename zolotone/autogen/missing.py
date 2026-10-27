@@ -12,9 +12,9 @@ from ..rival import (
     collect_free_vars,
 )
 from ..rival.analysis import rival_range_analysis
-from ..spec.spec_ast import RealExpr, RealLit, RealVar, Round, substitute_spec_node
+from ..spec.spec_ast import RealExpr, RealLit, RealVar, Round, SpecNode, substitute_spec_node
 from ..spec.spec_context import SpecContext
-from ..types import Q, UQ
+from ..types import DataType, Q, UQ
 from ..ast.helpers import integer_lookup
 from ..ast.node import Node
 from ..ast.nodes import Primitive
@@ -30,14 +30,15 @@ MAX_GENERATED_TABLE_ENTRIES = 4_096
 
 
 def _suggest_missing_output_dtype(
-    expression: RealExpr, precision_dtype: Q | UQ, range_ctx: SpecContext
+    expression: RealExpr, precision_dtype: Q | UQ, range_ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> Q | UQ:
     """Keep the supplied fractional width and infer sign/integer bits from range."""
     conservative = _output_format_suggestion_with_range_analysis(
         expression, precision_dtype, range_ctx
     )
     output = _output_format_suggestion_with_search(
-        expression, conservative, range_ctx
+        expression, conservative, range_ctx, input_dtypes
     )
     if output is None:
         raise ZolotoneError(

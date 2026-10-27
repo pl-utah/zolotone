@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from fractions import Fraction
 import math
 import typing as tp
 import warnings
 
 from ..errors import InfeasibleError, MissingError, ZolotoneError
-from ..rival.analysis import rival_domain_errors, rival_range_analysis
+from ..rival.analysis import (
+    rival_domain_errors, rival_range_analysis,
+    rival_prove_result_fits as _prove_result_fits,
+)
 from ..solver import check_equivalence
 from ..spec.spec_ast import (
     And,
@@ -222,12 +226,11 @@ def _simplify_spec_ast(
     )
 
 
-def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[float, float]:
-    quantum = 2.0 ** -dtype.frac_bits
-    if isinstance(dtype, UQ):
-        return 0.0, (2.0 ** dtype.int_bits) - quantum
-    magnitude = 2.0 ** (dtype.int_bits - 1)
-    return -magnitude, magnitude - quantum
+def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[Fraction, Fraction]:
+    width = dtype.total_bits()
+    minimum = -(1 << (width - 1)) if isinstance(dtype, Q) else 0
+    maximum = (1 << (width - isinstance(dtype, Q))) - 1
+    return Fraction(minimum, 1 << dtype.frac_bits), Fraction(maximum, 1 << dtype.frac_bits)
 
 
 def _fixed_point_result_fits(
@@ -237,26 +240,6 @@ def _fixed_point_result_fits(
 ) -> BoolExpr:
     min_bound, max_bound = _fixed_point_real_bounds(dtype)
     return (spec_ast >= ctx.real_val(min_bound)) & (spec_ast <= ctx.real_val(max_bound))
-
-
-def _prove_result_fits(spec_ast, output_type, ctx):
-    if output_type is Bool or isinstance(output_type, Bool):
-        return True
-    if output_type is Q:
-        return True
-    if output_type is UQ:
-        result_fits = spec_ast >= ctx.zero()
-    elif isinstance(output_type, (Q, UQ)):
-        result_fits = _fixed_point_result_fits(spec_ast, output_type, ctx)
-    else:
-        raise TypeError(
-            "Result-fit proof expects a Q or UQ output type, got "
-            f"{output_type!r}"
-        )
-
-    range_ctx = ctx.copy(checks=[result_fits])
-    status, _proof_trace = check_equivalence(range_ctx, schedule=FEASIBILITY_SCHEDULE)
-    return status == "unsat"
 
 
 def _check_spec_reachability(spec: Spec) -> None:
@@ -411,8 +394,9 @@ def _output_format_suggestion_with_search(
     spec_ast: RealExpr,
     conservative_format: Q | UQ,
     ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> Q | UQ | None:
-    dtype_type = UQ if _prove_result_fits(spec_ast, UQ, ctx) else Q
+    dtype_type = UQ if _prove_result_fits(spec_ast, UQ, ctx, input_dtypes) else Q
 
     def candidate(int_bits: int) -> Q | UQ:
         return dtype_type(int_bits, conservative_format.frac_bits)
@@ -421,7 +405,7 @@ def _output_format_suggestion_with_search(
     max_int_bits = conservative_format.int_bits
     widest = candidate(max_int_bits)
 
-    if not _prove_result_fits(spec_ast, widest, ctx):
+    if not _prove_result_fits(spec_ast, widest, ctx, input_dtypes):
         return None
 
     low = min_int_bits
@@ -429,7 +413,7 @@ def _output_format_suggestion_with_search(
     while low < high:
         middle = (low + high) // 2
         middle_dtype = candidate(middle)
-        if _prove_result_fits(spec_ast, middle_dtype, ctx):
+        if _prove_result_fits(spec_ast, middle_dtype, ctx, input_dtypes):
             high = middle
         else:
             low = middle + 1
@@ -473,17 +457,18 @@ def _output_format_suggestion(
     spec_ast: RealExpr,
     return_annotation: object,
     ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> object | None:
     """Derive a conservative format with Rival, then shrink it by search."""
     # TODO: provide a counterexample
     if return_annotation is Bool or isinstance(return_annotation, Bool):
         return return_annotation
     if return_annotation is UQ:
-        if not _prove_result_fits(spec_ast, UQ, ctx):
+        if not _prove_result_fits(spec_ast, UQ, ctx, input_dtypes):
             return Q
         return UQ
     elif return_annotation is Q:
-        if _prove_result_fits(spec_ast, UQ, ctx):
+        if _prove_result_fits(spec_ast, UQ, ctx, input_dtypes):
             return UQ
         return Q
     elif isinstance(return_annotation, (Q, UQ)):
@@ -496,13 +481,14 @@ def _output_format_suggestion(
             spec_ast,
             conservative_format,
             ctx,
+            input_dtypes,
         )
         if suggestion is None:
             raise ValueError(
                 "Rival-derived format does not fit the result: "
                 f"{conservative_format}"
             )
-        if not _prove_result_fits(spec_ast, suggestion, ctx):
+        if not _prove_result_fits(spec_ast, suggestion, ctx, input_dtypes):
             raise ValueError("That's a bug, derived dtype does not fit the result")
         return suggestion
     else:
@@ -523,16 +509,24 @@ def _format_output_annotation(annotation: object) -> str:
 def _check_output_format(
     spec: Spec,
 ) -> None:
+    input_dtypes = {
+        spec_input: spec.annotations[parameter.name]
+        for spec_input, parameter in zip(
+            spec.spec_inputs, tuple(spec.signature.parameters.values())[:-1], strict=True,
+        )
+    }
     # TODO: counterexample
     if not _prove_result_fits(
         spec.spec_ast,
         spec.return_annotation,
         spec.spec_ctx,
+        input_dtypes,
     ):
         suggestion = _output_format_suggestion(
             spec.spec_ast,
             spec.return_annotation,
             spec.spec_ctx,
+            input_dtypes,
         )
         message = (
             "Specification result range does not fit "
@@ -548,6 +542,7 @@ def _check_output_format(
         spec.spec_ast,
         spec.return_annotation,
         spec.spec_ctx,
+        input_dtypes,
     )
     if suggestion != spec.return_annotation:
         warnings.warn(

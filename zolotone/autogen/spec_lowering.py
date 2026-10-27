@@ -195,6 +195,7 @@ def _probe_input_category(annotation: object) -> type[SpecNode] | None:
 def _candidate_output_range_fits(
     candidate: _Candidate,
     range_ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType] | None = None,
 ) -> bool:
     if not isinstance(candidate.spec, RealExpr):
         return True
@@ -217,7 +218,7 @@ def _candidate_output_range_fits(
         ):
             return True
 
-    return _prove_result_fits(candidate.spec, candidate.node.dtype, range_ctx)
+    return _prove_result_fits(candidate.spec, candidate.node.dtype, range_ctx, input_dtypes or {})
 
 
 def _initial_candidates(subexpressions, spec_input_nodes):
@@ -261,6 +262,7 @@ class _LoweringSearch:
         from ..components import LOSSLESS_COMPONENTS
 
         self.root = spec_ast
+        self.input_dtypes = {expr: node.dtype for expr, node in spec_input_nodes.items()}
         self.return_annotation = return_annotation
         self.expressions = _spec_subexpressions(spec_ast)
         self.components = tuple(
@@ -401,7 +403,7 @@ class _LoweringSearch:
         key = (candidate.spec, candidate.node.dtype)
         if key not in self.range_checks:
             try:
-                self.range_checks[key] = _candidate_output_range_fits(candidate, self.ctx)
+                self.range_checks[key] = _candidate_output_range_fits(candidate, self.ctx, self.input_dtypes)
             except (NotImplementedError, ZolotoneError):
                 self.range_checks[key] = False
         return self.range_checks[key]
@@ -462,7 +464,7 @@ class _LoweringSearch:
             try:
                 precision_dtype = UQ(1, expression.frac_bits)
                 self.suggested_lut_types[key] = _suggest_missing_output_dtype(
-                    expression, precision_dtype, self.ctx
+                    expression, precision_dtype, self.ctx, self.input_dtypes
                 )
             except (ZolotoneError, NotImplementedError) as exc:
                 self.errors.append(exc)
