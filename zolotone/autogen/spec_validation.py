@@ -67,14 +67,15 @@ def spec_domain_analysis(spec: "Spec"):
 
     Inputs follow sorted variable-name order. Q inputs use signed codes and
     Boolean inputs use 0/1; fixed-point codes represent code * 2**-frac_bits.
+    Generic Q/UQ outputs use 30 fractional bits without implicit rounding.
     """
     input_dtypes = _spec_input_dtypes(spec)
     output_dtype = spec.return_annotation
-    if not all(
-        isinstance(dtype, (Q, UQ, Bool))
-        for dtype in [*input_dtypes.values(), output_dtype]
-    ):
-        raise NotImplementedError("spec domain analysis requires exact Q, UQ, or Bool dtypes")
+    generic_output = output_dtype is Q or output_dtype is UQ
+    if not all(isinstance(dtype, (Q, UQ, Bool)) for dtype in input_dtypes.values()):
+        raise NotImplementedError("spec domain analysis requires exact Q, UQ, or Bool inputs")
+    if not generic_output and not isinstance(output_dtype, (Q, UQ, Bool)):
+        raise NotImplementedError("spec domain analysis requires Q, UQ, or exact Bool output")
 
     assumes = BoolLit(True)
     for assume in spec.spec_ctx.assumes:
@@ -105,13 +106,16 @@ def spec_domain_analysis(spec: "Spec"):
         RealLit(0), precondition=assumes, output_total_bits=1, **kwargs,
     )
     checks_machine = build_boolean_evaluator(checks, **kwargs)
-    output_scale = Fraction(1) if isinstance(output_dtype, Bool) else Fraction(2) ** output_dtype.frac_bits
+    output_frac_bits = 30 if generic_output else (
+        0 if isinstance(output_dtype, Bool) else output_dtype.frac_bits
+    )
+    output_scale = Fraction(2) ** output_frac_bits
     if isinstance(output_dtype, Bool):
         output_machine = build_boolean_evaluator(output, **kwargs)
     else:
         output_machine = build_integer_evaluator(
             output * RealLit(output_scale),
-            output_total_bits=output_dtype.total_bits(), **kwargs,
+            output_total_bits=30 if generic_output else output_dtype.total_bits(), **kwargs,
         )
 
     # Creating Initial Rectangulars
