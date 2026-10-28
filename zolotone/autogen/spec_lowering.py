@@ -110,7 +110,12 @@ def _operation_cost(arguments, operation_cost):
 
 
 MAX_SPEC_PROBES = 5_000
-LUT_COST = 100
+LUT_BASE_COST = 100
+
+
+def _lut_cost(input_dtype: Q | UQ) -> int:
+    """Charge the fixed lookup cost plus the number of allocated entries."""
+    return LUT_BASE_COST + (1 << input_dtype.total_bits())
 
 
 # TODO: this is not too good
@@ -257,7 +262,7 @@ class _LoweringSearch:
     """One candidate table, improved by known components and generated LUTs."""
 
     def __init__(self, spec_ast, spec_input_nodes, return_annotation, range_ctx, output_bounds=None):
-        from ..components import LOSSLESS_COMPONENTS
+        from ..components import LOSSLESS_COMPONENTS, q_sign_extend, uq_zero_extend
 
         self.root = spec_ast
         self.output_bounds = output_bounds
@@ -281,6 +286,12 @@ class _LoweringSearch:
         self.ctx = _typed_context(range_ctx, sources)
         for source in sources:
             self.add(source)
+            # Some components need a wider initial input format.
+            if isinstance(source.node.dtype, (UQ, Q)):
+                # Seed one wider format without recursively extending it.
+                extend = q_sign_extend if isinstance(source.node.dtype, Q) else uq_zero_extend
+                extended = extend(source.node, 1)
+                self.add(_Candidate.from_operation(extended, source.spec, (source,), 1))
 
         # Cache both matches and misses across all format variants.
         self.component_matches = {}
@@ -496,11 +507,6 @@ class _LoweringSearch:
         for expression in self.expressions:
             if not isinstance(expression, Round):
                 continue
-            # Does it worth trying a LUT
-            existing = self.candidates.get(expression, {})
-            if any(candidate.cost < LUT_COST for candidate in existing.values()):
-                continue
-            
             pool = sorted(
                 (
                     candidate
@@ -508,10 +514,11 @@ class _LoweringSearch:
                     for candidate in self.candidates.get(operand, {}).values()
                     if isinstance(candidate.node.dtype, (Q, UQ))
                 ),
-                key=lambda candidate: candidate.cost,
+                key=lambda candidate: candidate.cost + _lut_cost(candidate.node.dtype),
             )
             for argument in pool:
-                cost = argument.cost + LUT_COST
+                operation_cost = _lut_cost(argument.node.dtype)
+                cost = argument.cost + operation_cost
                 if not self.worth_trying(cost):
                     continue
                 dtype = self.lut_output_type(expression)
@@ -538,7 +545,7 @@ class _LoweringSearch:
                     self.errors.append(exc)
                     continue
                 changed |= self.add(
-                    _Candidate.from_operation(node, expression, (argument,), LUT_COST)
+                    _Candidate.from_operation(node, expression, (argument,), operation_cost)
                 )
         return changed
 
