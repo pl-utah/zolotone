@@ -10,18 +10,18 @@ import os
 import sys
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..errors import ZolotoneError
+from ..errors import InfeasibleError, ZolotoneError
 from ..spec.spec_ast import *
 from ..types import Bool, DataType, Q, UQ
 from .machine import (
-    RivalMachine, build_integer_evaluator, build_machine, collect_free_vars, to_rival_ir,
+    RivalMachine, build_boolean_evaluator, build_integer_evaluator, build_machine, collect_free_vars, to_rival_ir,
     _and_exprs, _real_literal_ratio,
 )
 
 __all__ = [
     "DEFAULT_MAX_RECTS", "MAX_RECTS_ENV", "RivalDomainError",
     "RivalRectLimitExceeded", "get_rival_rects", "rival_domain_errors",
-    "rival_range_analysis", "rival_feasibility_check", "rival_trim_context",
+    "analyze_typed_domain", "rival_feasibility_check", "rival_trim_context",
     "rival_prove_result_fits",
 ]
 
@@ -153,41 +153,171 @@ def get_rival_rects(
     return rects
 
 
-def rival_range_analysis(
-    expr: RealExpr,
+def analyze_typed_domain(
+    output: SpecNode,
     ctx: "SpecContext",
-    max_rects: int | None = None,
-) -> tuple[float, float] | None:
-    if not isinstance(expr, RealExpr):
-        raise TypeError(
-            f"rival_range_analysis expects RealExpr, got {type(expr).__name__}"
+    input_dtypes: Mapping[SpecNode, DataType],
+    output_dtype: object = Q,
+    *,
+    obligations: Sequence[BoolExpr] = (),
+) -> tuple[Fraction, Fraction]:
+    """Validate a finite typed domain and enclose its output.
+
+    Inputs are decoded from integer codes. Generic Q/UQ outputs use the
+    existing 30-fractional-bit grid, without implicit rounding. Unresolved
+    points and domain errors raise rather than supplying unproven bounds.
+    """
+    if output_dtype is Bool:
+        output_dtype = Bool()
+    generic_output = output_dtype is Q or output_dtype is UQ
+    if not all(isinstance(dtype, (Q, UQ, Bool)) for dtype in input_dtypes.values()):
+        raise NotImplementedError("spec domain analysis requires exact Q, UQ, or Bool inputs")
+    if not generic_output and not isinstance(output_dtype, (Q, UQ, Bool)):
+        raise NotImplementedError("spec domain analysis requires Q, UQ, or exact Bool output")
+
+    assumes = BoolLit(True)
+    for assume in ctx.assumes:
+        assumes = assumes & assume
+    checks = BoolLit(True)
+    for check in obligations:
+        checks = checks & check
+
+    missing = set(collect_free_vars([assumes, checks, output])) - set(collect_free_vars(input_dtypes))
+    if missing:
+        raise ZolotoneError(f"Typed domain analysis needs input dtypes for: {sorted(missing)}")
+
+    # Materialized subexpressions may also serve as typed inputs (e.g. LUTs).
+    occupied = set(collect_free_vars([assumes, checks, output]))
+    dtypes_by_name = {}
+    for source, dtype in input_dtypes.items():
+        if isinstance(source, (RealVar, BoolVar)):
+            name = source.name
+        else:
+            name = f"__rival_input_{len(dtypes_by_name)}"
+            while name in occupied:
+                name += "_"
+        occupied.add(name)
+        dtypes_by_name[name] = dtype
+        code = RealVar(name)
+        decoded = (
+            code.ne(RealLit(0)) if isinstance(dtype, Bool)
+            else code * (RealLit(2) ** RealLit(-dtype.frac_bits))
+        )
+        assumes = substitute_spec_node(assumes, source, decoded)
+        checks = substitute_spec_node(checks, source, decoded)
+        output = substitute_spec_node(output, source, decoded)
+
+    # Creating Rival Machines
+    free_vars = collect_free_vars([assumes, checks, output])
+    missing = set(free_vars) - dtypes_by_name.keys()
+    if missing:
+        raise ZolotoneError(f"Typed domain analysis needs input dtypes for: {sorted(missing)}")
+    kwargs = dict(
+        free_vars=free_vars,
+        input_total_bits=max((dtype.total_bits() for dtype in input_dtypes.values()), default=1),
+    )
+    # The precondition path lets an error-free false conjunct reject the box.
+    assumes_machine = build_integer_evaluator(
+        RealLit(0), precondition=assumes, output_total_bits=1, **kwargs,
+    )
+    checks_machine = build_boolean_evaluator(checks, **kwargs)
+    output_frac_bits = 30 if generic_output else (
+        0 if isinstance(output_dtype, Bool) else output_dtype.frac_bits
+    )
+    output_scale = Fraction(2) ** output_frac_bits
+    if isinstance(output_dtype, Bool):
+        output_machine = build_boolean_evaluator(output, **kwargs)
+    else:
+        output_machine = build_integer_evaluator(
+            output * RealLit(output_scale),
+            output_total_bits=30 if generic_output else output_dtype.total_bits(), **kwargs,
         )
 
-    all_exprs = ctx.assumes + [expr]
-    free_vars = collect_free_vars(all_exprs)
-    bool_var_names = _collect_bool_var_names(all_exprs)
-    rects = get_rival_rects(
-        ctx.assumes,
-        free_vars,
-        bool_var_names,
-        max_rects=max_rects,
-    )
-    if not rects:
-        return None
+    # Creating Initial Rectangulars
+    initial_box: list[tuple[int, int]] = []
+    for name in kwargs["free_vars"]:
+        dtype = dtypes_by_name[name]
+        width = dtype.total_bits()
+        if isinstance(dtype, Q):
+            lower, upper = -(1 << (width - 1)), (1 << (width - 1)) - 1
+        else:
+            lower, upper = 0, (1 << width) - 1
+        initial_box.append((lower, upper))
 
-    machine = build_machine([expr], free_vars)
-    lower = math.inf
-    upper = -math.inf
-    for rect in rects:
-        rect_lower, rect_upper = machine.apply_range(rect)
-        if math.isnan(rect_lower) or math.isnan(rect_upper):
-            return None
-        lower = min(lower, rect_lower)
-        upper = max(upper, rect_upper)
+    def split_box(box: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
+        """Bisect the widest integer-code interval; point boxes have no children."""
+        axis = max(range(len(box)), key=lambda i: box[i][1] - box[i][0], default=None)
+        if axis is None or box[axis][0] == box[axis][1]:
+            return []
+        lower, upper = box[axis]
+        middle = (lower + upper) // 2
+        left, right = list(box), list(box)
+        left[axis] = (lower, middle)
+        right[axis] = (middle + 1, upper)
+        return [left, right]
 
-    if lower > upper:
-        return None
-    return lower, upper
+    def evaluate_box(machine, box, is_point, location):
+        try:
+            if is_point:
+                return machine.apply_point([lower for lower, _ in box])
+            return machine.apply_range(box)
+        except ValueError as exc:
+            raise ZolotoneError(
+                f"Could not evaluate {location} at input point {box}: {exc}"
+            ) from exc
+
+    reachable = False
+    output_bounds = None
+    pending = [initial_box]
+    while pending:
+        box = pending.pop()
+        is_point = all(lower == upper for lower, upper in box)
+
+        assumes = evaluate_box(assumes_machine, box, is_point, "assumptions")
+        if not assumes.precondition_error and assumes.precondition in (False, (False, False)):
+            # An error-free rejection excludes this box.
+            continue
+        if assumes.precondition_total_error:
+            raise ZolotoneError(f"Domain error in assumptions at input point {box}")
+        if assumes.precondition_error or assumes.precondition not in (True, (True, True)):
+            if is_point:
+                raise ZolotoneError(f"Unresolved assumptions at input point {box}")
+            pending.extend(split_box(box))
+            continue
+
+        # Every point in this box satisfies all assumptions.
+        reachable = True
+
+        checks = evaluate_box(checks_machine, box, is_point, "checks")
+        if checks.output_total_error:
+            raise ZolotoneError(f"Domain error in checks at input point {box}")
+        if checks.output_error or checks.output not in (0, 1, (0, 0), (1, 1)):
+            if is_point:
+                raise ZolotoneError(f"Unresolved checks at input point {box}")
+            pending.extend(split_box(box))
+            continue
+        if checks.output in (0, (0, 0)):
+            raise InfeasibleError(f"Specification has a check that does not hold at input point {box}")
+
+        output = evaluate_box(output_machine, box, is_point, "output")
+        if output.output_total_error:
+            raise ZolotoneError(f"Domain error in output at input point {box}")
+        if output.output_error or output.output is None:
+            if is_point:
+                raise ZolotoneError(f"Unresolved output at input point {box}")
+            pending.extend(split_box(box))
+            continue
+
+        lower, upper = (output.output, output.output) if is_point else output.output
+        lower, upper = lower / output_scale, upper / output_scale
+        output_bounds = (
+            (lower, upper) if output_bounds is None else
+            (min(output_bounds[0], lower), max(output_bounds[1], upper))
+        )
+
+    if not reachable:
+        raise InfeasibleError(f"Specification {ctx.name!r} is unreachable: no input satisfies its assumptions")
+    return output_bounds
 
 
 def rival_prove_result_fits(

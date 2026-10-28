@@ -11,7 +11,7 @@ from ..rival import (
     build_integer_evaluator,
     collect_free_vars,
 )
-from ..rival.analysis import rival_range_analysis
+from ..rival.analysis import analyze_typed_domain
 from ..spec.spec_ast import RealExpr, RealLit, RealVar, Round, SpecNode, substitute_spec_node
 from ..spec.spec_context import SpecContext
 from ..types import DataType, Q, UQ
@@ -35,7 +35,7 @@ def _suggest_missing_output_dtype(
 ) -> Q | UQ:
     """Keep the supplied fractional width and infer sign/integer bits from range."""
     conservative = _output_format_suggestion_with_range_analysis(
-        expression, precision_dtype, range_ctx
+        expression, precision_dtype, range_ctx, input_dtypes=input_dtypes,
     )
     output = _output_format_suggestion_with_search(
         expression, conservative, range_ctx, input_dtypes
@@ -48,13 +48,10 @@ def _suggest_missing_output_dtype(
 
 
 def _expression_bounds(
-    expression: RealExpr, dtype: Q | UQ, ctx: SpecContext
+    expression: RealExpr, dtype: Q | UQ, ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> tuple[int, int]:
-    value_range = rival_range_analysis(expression, ctx)
-    if value_range is None or not all(math.isfinite(bound) for bound in value_range):
-        raise ZolotoneError(
-            f"Could not obtain a finite input range for component input {expression!r}"
-        )
+    value_range = analyze_typed_domain(expression, ctx, input_dtypes, dtype)
     scale = 1 << dtype.frac_bits
     lower = math.ceil(Fraction(value_range[0]) * scale)
     upper = math.floor(Fraction(value_range[1]) * scale)
@@ -80,6 +77,8 @@ def _build_missing_primitive(
     input_node: Node,
     range_ctx: SpecContext,
     output_dtype: Q | UQ,
+    *,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> Node:
     """Generate a univariate typed LUT from one materialized input."""
     if not isinstance(missing, Round):
@@ -101,7 +100,7 @@ def _build_missing_primitive(
     if output_dtype.total_bits() > 64:
         raise MissingError("Generated LUT outputs must have at most 64 bits")
 
-    lower, upper = _expression_bounds(input_expr, dtype, generation_ctx)
+    lower, upper = _expression_bounds(input_expr, dtype, generation_ctx, input_dtypes)
     table_size = 1 << dtype.total_bits()
     if table_size > MAX_GENERATED_TABLE_ENTRIES:
         raise ZolotoneError(

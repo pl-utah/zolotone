@@ -9,7 +9,7 @@ import math
 import typing as tp
 
 from ..errors import MissingError, ZolotoneError, _SpecProbeLimitExceeded
-from ..rival.analysis import rival_range_analysis
+from ..rival.analysis import analyze_typed_domain
 from ..spec.spec_ast import (
     BoolExpr,
     BoolLit,
@@ -196,6 +196,7 @@ def _candidate_output_range_fits(
     candidate: _Candidate,
     range_ctx: SpecContext,
     input_dtypes: dict[SpecNode, DataType] | None = None,
+    output_bounds: tuple[Fraction, Fraction] | None = None,
 ) -> bool:
     if not isinstance(candidate.spec, RealExpr):
         return True
@@ -206,17 +207,14 @@ def _candidate_output_range_fits(
             f"{candidate.node.name!r}"
         )
 
-    output_range = rival_range_analysis(candidate.spec, range_ctx)
-    if output_range is not None:
-        lower, upper = output_range
-        dtype_lower, dtype_upper = _fixed_point_real_bounds(candidate.node.dtype)
-        if (
-            math.isfinite(lower)
-            and math.isfinite(upper)
-            and lower >= dtype_lower
-            and upper <= dtype_upper
-        ):
-            return True
+    if output_bounds is None:
+        output_bounds = analyze_typed_domain(
+            candidate.spec, range_ctx, input_dtypes or {}, candidate.node.dtype,
+        )
+    lower, upper = output_bounds
+    dtype_lower, dtype_upper = _fixed_point_real_bounds(candidate.node.dtype)
+    if lower >= dtype_lower and upper <= dtype_upper:
+        return True
 
     return _prove_result_fits(candidate.spec, candidate.node.dtype, range_ctx, input_dtypes or {})
 
@@ -258,10 +256,11 @@ def _typed_context(range_ctx: SpecContext, sources: list[_Candidate]) -> SpecCon
 class _LoweringSearch:
     """One candidate table, improved by known components and generated LUTs."""
 
-    def __init__(self, spec_ast, spec_input_nodes, return_annotation, range_ctx):
+    def __init__(self, spec_ast, spec_input_nodes, return_annotation, range_ctx, output_bounds=None):
         from ..components import LOSSLESS_COMPONENTS
 
         self.root = spec_ast
+        self.output_bounds = output_bounds
         self.input_dtypes = {expr: node.dtype for expr, node in spec_input_nodes.items()}
         self.return_annotation = return_annotation
         self.expressions = _spec_subexpressions(spec_ast)
@@ -412,7 +411,10 @@ class _LoweringSearch:
         key = (candidate.spec, candidate.node.dtype)
         if key not in self.range_checks:
             try:
-                self.range_checks[key] = _candidate_output_range_fits(candidate, self.ctx, self.input_dtypes)
+                bounds = self.output_bounds if candidate.spec.identical(self.root) else None
+                self.range_checks[key] = _candidate_output_range_fits(
+                    candidate, self.ctx, self.input_dtypes, bounds,
+                )
             except (NotImplementedError, ZolotoneError):
                 self.range_checks[key] = False
         return self.range_checks[key]
@@ -530,7 +532,7 @@ class _LoweringSearch:
                 try:
                     node = _build_missing_primitive(
                         expression, argument.spec, argument.node,
-                        self.ctx, output_dtype=dtype,
+                        self.ctx, output_dtype=dtype, input_dtypes=self.input_dtypes,
                     )
                 except (MissingError, ZolotoneError, NotImplementedError) as exc:
                     self.errors.append(exc)
@@ -583,10 +585,11 @@ def search_lower_spec_to_impl(
     spec_input_nodes: dict[tp.Any, Node],
     return_annotation: object,
     range_ctx: SpecContext,
+    output_bounds: tuple[Fraction, Fraction] | None = None,
 ) -> Node:
     """Find the cheapest typed derivation of a specification expression."""
     return _LoweringSearch(
-        spec_ast, spec_input_nodes, return_annotation, range_ctx
+        spec_ast, spec_input_nodes, return_annotation, range_ctx, output_bounds
     ).run()
 
 
@@ -764,6 +767,7 @@ def lower_spec_result(
             spec_input_nodes,
             spec.return_annotation,
             spec.spec_ctx,
+            output_bounds=spec.output_bounds,
         )
 
     input_parameters = list(spec.contract.signature.parameters.values())[:-1]

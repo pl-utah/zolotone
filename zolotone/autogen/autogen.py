@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field, replace
+from fractions import Fraction
 import inspect
 import typing as tp
 
@@ -24,14 +25,12 @@ from .spec_lowering import (
 )
 from .spec_validation import (
     _check_output_format,
-    _check_spec_obligations,
-    _check_spec_reachability,
+    spec_domain_analysis,
     _simplify_spec_ast,
     _spec_value_variables,
     _validate_spec_requirements,
     _validate_rounding_precision,
     _validate_spec_shape,
-    _warn_about_domain_errors,
     add_input_ranges,
     add_output_guards,
     reject_untyped_inputs,
@@ -56,6 +55,7 @@ class Spec:
     spec_ctx: SpecContext
     rounding_choices: dict[Round, BoolVar] = field(default_factory=dict)
     has_user_assumptions: bool = False
+    output_bounds: tuple[Fraction, Fraction] | None = None
 
     def to_function(self) -> tp.Callable[..., tp.Any]:
         """Derive a callable from this AST and contract, without replaying source."""
@@ -355,10 +355,8 @@ def Autogenerate(
 
     # Step 5: validate the complete, eventually bit-precise specification.
     # Every check below requires bit-precise assumptions.
-    _check_spec_reachability(current_spec)
-    _warn_about_domain_errors(current_spec)
+    current_spec = spec_domain_analysis(current_spec)
     _validate_spec_requirements(current_spec)
-    _check_spec_obligations(current_spec)
     _check_output_format(current_spec)
 
     # Step 6: lower the result before deriving implementation guards.
