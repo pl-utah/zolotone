@@ -72,6 +72,11 @@ class RealExpr(SpecNode):
     
     def __imul__(self, other: "RealExpr") -> "RealExpr":
         return self * other
+
+    def __truediv__(self, other: "RealExpr") -> "RealExpr":
+        """Represent division using multiplication and reciprocal power."""
+        return Mul(self, Pow(other, RealLit(-1)))
+
     
     def __pow__(self, other: "RealExpr", modulo=None) -> "RealExpr":
         if modulo is not None:
