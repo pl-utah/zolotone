@@ -189,6 +189,7 @@ def analyze_typed_domain(
     # Materialized subexpressions may also serve as typed inputs (e.g. LUTs).
     occupied = set(collect_free_vars([assumes, checks, output]))
     dtypes_by_name = {}
+    labels_by_name = {}
     for source, dtype in input_dtypes.items():
         if isinstance(source, (RealVar, BoolVar)):
             name = source.name
@@ -198,6 +199,7 @@ def analyze_typed_domain(
                 name += "_"
         occupied.add(name)
         dtypes_by_name[name] = dtype
+        labels_by_name[name] = source.name if isinstance(source, (RealVar, BoolVar)) else str(source)
         code = RealVar(name)
         decoded = (
             code.ne(RealLit(0)) if isinstance(dtype, Bool)
@@ -256,6 +258,25 @@ def analyze_typed_domain(
         right[axis] = (middle + 1, upper)
         return [left, right]
 
+    def format_box(box):
+        assignments = []
+        intervals = dict(zip(free_vars, box, strict=True))
+        # Preserve the input mapping's order, independently of machine order.
+        for name in labels_by_name:
+            if name not in intervals:
+                continue
+            lower, upper = intervals[name]
+            dtype = dtypes_by_name[name]
+            if isinstance(dtype, Bool):
+                lower, upper = bool(lower), bool(upper)
+            else:
+                scale = Fraction(2) ** -dtype.frac_bits
+                lower, upper = lower * scale, upper * scale
+            value = str(lower) if lower == upper else f"[{lower}, {upper}]"
+            assignments.append(f"{labels_by_name[name]}={value}")
+        kind = "point" if all(lo == hi for lo, hi in box) else "range"
+        return f"input {kind} [{', '.join(assignments) or 'no inputs'}]"
+
     def evaluate_box(machine, box, is_point, location):
         try:
             if is_point:
@@ -263,7 +284,7 @@ def analyze_typed_domain(
             return machine.apply_range(box)
         except ValueError as exc:
             raise ZolotoneError(
-                f"Could not evaluate {location} at input point {box}: {exc}"
+                f"Could not evaluate {location} at {format_box(box)}: {exc}"
             ) from exc
 
     reachable = False
@@ -278,10 +299,10 @@ def analyze_typed_domain(
             # An error-free rejection excludes this box.
             continue
         if assumes.precondition_total_error:
-            raise ZolotoneError(f"Domain error in assumptions at input point {box}")
+            raise ZolotoneError(f"Domain error in assumptions at {format_box(box)}")
         if assumes.precondition_error or assumes.precondition not in (True, (True, True)):
             if is_point:
-                raise ZolotoneError(f"Unresolved assumptions at input point {box}")
+                raise ZolotoneError(f"Unresolved assumptions at {format_box(box)}")
             pending.extend(split_box(box))
             continue
 
@@ -290,21 +311,21 @@ def analyze_typed_domain(
 
         checks = evaluate_box(checks_machine, box, is_point, "checks")
         if checks.output_total_error:
-            raise ZolotoneError(f"Domain error in checks at input point {box}")
+            raise ZolotoneError(f"Domain error in checks at {format_box(box)}")
         if checks.output_error or checks.output not in (0, 1, (0, 0), (1, 1)):
             if is_point:
-                raise ZolotoneError(f"Unresolved checks at input point {box}")
+                raise ZolotoneError(f"Unresolved checks at {format_box(box)}")
             pending.extend(split_box(box))
             continue
         if checks.output in (0, (0, 0)):
-            raise InfeasibleError(f"Specification has a check that does not hold at input point {box}")
+            raise InfeasibleError(f"Specification has a check that does not hold at {format_box(box)}")
 
         output = evaluate_box(output_machine, box, is_point, "output")
         if output.output_total_error:
-            raise ZolotoneError(f"Domain error in output at input point {box}")
+            raise ZolotoneError(f"Domain error in output at {format_box(box)}")
         if output.output_error or output.output is None:
             if is_point:
-                raise ZolotoneError(f"Unresolved output at input point {box}")
+                raise ZolotoneError(f"Unresolved output at {format_box(box)}")
             pending.extend(split_box(box))
             continue
 
