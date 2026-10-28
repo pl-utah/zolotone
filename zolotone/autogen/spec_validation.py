@@ -11,6 +11,9 @@ from ..rival.analysis import (
     rival_domain_errors, rival_range_analysis,
     rival_prove_result_fits as _prove_result_fits,
 )
+from ..rival.machine import (
+    build_boolean_evaluator, build_integer_evaluator, collect_free_vars,
+)
 from ..solver import check_equivalence
 from ..spec.spec_ast import (
     And,
@@ -20,6 +23,8 @@ from ..spec.spec_ast import (
     Eq,
     Not,
     RealExpr,
+    RealLit,
+    RealVar,
     Round,
     SpecNode,
     children,
@@ -43,6 +48,158 @@ FEASIBILITY_SCHEDULE = [
 REACHABILITY_FALLBACK_SCHEDULE = [
     {"tool": "z3", "timeout_ms": 10_000},
 ]
+
+
+
+def _spec_input_dtypes(spec: "Spec") -> dict[SpecNode, DataType]:
+    return {
+        spec_input: spec.annotations[parameter.name]
+        for spec_input, parameter in zip(
+            spec.spec_inputs,
+            tuple(spec.signature.parameters.values())[:-1],
+            strict=True,
+        )
+    }
+
+
+def spec_domain_analysis(spec: "Spec"):
+    """Return reachability and output bounds, raising on failed or unresolved analysis.
+
+    Inputs follow sorted variable-name order. Q inputs use signed codes and
+    Boolean inputs use 0/1; fixed-point codes represent code * 2**-frac_bits.
+    """
+    input_dtypes = _spec_input_dtypes(spec)
+    output_dtype = spec.return_annotation
+    if not all(
+        isinstance(dtype, (Q, UQ, Bool))
+        for dtype in [*input_dtypes.values(), output_dtype]
+    ):
+        raise NotImplementedError("spec domain analysis requires exact Q, UQ, or Bool dtypes")
+
+    assumes = BoolLit(True)
+    for assume in spec.spec_ctx.assumes:
+        assumes = assumes & assume
+    checks = BoolLit(True)
+    for check in spec.spec_ctx.checks:
+        checks = checks & check
+    output = spec.spec_ast
+
+    # Scaling with respect to fractional bits
+    for source, dtype in input_dtypes.items():
+        code = RealVar(source.name)
+        decoded = (
+            code.ne(RealLit(0)) if isinstance(dtype, Bool)
+            else code * (RealLit(2) ** RealLit(-dtype.frac_bits))
+        )
+        assumes = substitute_spec_node(assumes, source, decoded)
+        checks = substitute_spec_node(checks, source, decoded)
+        output = substitute_spec_node(output, source, decoded)
+
+    # Creating Rival Machines
+    kwargs = dict(
+        free_vars=collect_free_vars([assumes, checks, output]),
+        input_total_bits=max((dtype.total_bits() for dtype in input_dtypes.values()), default=1),
+    )
+    # The precondition path lets an error-free false conjunct reject the box.
+    assumes_machine = build_integer_evaluator(
+        RealLit(0), precondition=assumes, output_total_bits=1, **kwargs,
+    )
+    checks_machine = build_boolean_evaluator(checks, **kwargs)
+    output_scale = Fraction(1) if isinstance(output_dtype, Bool) else Fraction(2) ** output_dtype.frac_bits
+    if isinstance(output_dtype, Bool):
+        output_machine = build_boolean_evaluator(output, **kwargs)
+    else:
+        output_machine = build_integer_evaluator(
+            output * RealLit(output_scale),
+            output_total_bits=output_dtype.total_bits(), **kwargs,
+        )
+
+    # Creating Initial Rectangulars
+    dtypes_by_name = {source.name: dtype for source, dtype in input_dtypes.items()}
+    initial_box: list[tuple[int, int]] = []
+    for name in kwargs["free_vars"]:
+        dtype = dtypes_by_name[name]
+        width = dtype.total_bits()
+        if isinstance(dtype, Q):
+            lower, upper = -(1 << (width - 1)), (1 << (width - 1)) - 1
+        else:
+            lower, upper = 0, (1 << width) - 1
+        initial_box.append((lower, upper))
+
+    def split_box(box: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
+        """Bisect the widest integer-code interval; point boxes have no children."""
+        axis = max(range(len(box)), key=lambda i: box[i][1] - box[i][0], default=None)
+        if axis is None or box[axis][0] == box[axis][1]:
+            return []
+        lower, upper = box[axis]
+        middle = (lower + upper) // 2
+        left, right = list(box), list(box)
+        left[axis] = (lower, middle)
+        right[axis] = (middle + 1, upper)
+        return [left, right]
+
+    def evaluate_box(machine, box, is_point, location):
+        try:
+            if is_point:
+                return machine.apply_point([lower for lower, _ in box])
+            return machine.apply_range(box)
+        except ValueError as exc:
+            raise ZolotoneError(
+                f"Could not evaluate {location} at input point {box}: {exc}"
+            ) from exc
+
+    reachable = False
+    output_bounds = None
+    pending = [initial_box]
+    while pending:
+        box = pending.pop()
+        is_point = all(lower == upper for lower, upper in box)
+
+        assumes = evaluate_box(assumes_machine, box, is_point, "assumptions")
+        if not assumes.precondition_error and assumes.precondition in (False, (False, False)):
+            # An error-free rejection excludes this box.
+            continue
+        if assumes.precondition_total_error:
+            raise ZolotoneError(f"Domain error in assumptions at input point {box}")
+        if assumes.precondition_error or assumes.precondition not in (True, (True, True)):
+            if is_point:
+                raise ZolotoneError(f"Unresolved assumptions at input point {box}")
+            pending.extend(split_box(box))
+            continue
+
+        # Every point in this box satisfies all assumptions.
+        reachable = True
+
+        checks = evaluate_box(checks_machine, box, is_point, "checks")
+        if checks.output_total_error:
+            raise ZolotoneError(f"Domain error in checks at input box {box}")
+        if checks.output_error or checks.output not in (0, 1, (0, 0), (1, 1)):
+            if is_point:
+                raise ZolotoneError(f"Unresolved checks at input point {box}")
+            pending.extend(split_box(box))
+            continue
+        if checks.output in (0, (0, 0)):
+            raise InfeasibleError(f"Specification check does not hold at input point {box}")
+
+        output = evaluate_box(output_machine, box, is_point, "output")
+        if output.output_total_error:
+            raise ZolotoneError(f"Domain error in output at input point {box}")
+        if output.output_error or output.output is None:
+            if is_point:
+                raise ZolotoneError(f"Unresolved output at input point {box}")
+            pending.extend(split_box(box))
+            continue
+
+        lower, upper = (output.output, output.output) if is_point else output.output
+        lower, upper = lower / output_scale, upper / output_scale
+        output_bounds = (
+            (lower, upper) if output_bounds is None else
+            (min(output_bounds[0], lower), max(output_bounds[1], upper))
+        )
+
+    if not reachable:
+        raise InfeasibleError(f"Specification {spec.name!r} is unreachable")
+    return reachable, output_bounds
 
 
 def reject_untyped_inputs(contract: _SpecContract):
@@ -242,8 +399,22 @@ def _fixed_point_result_fits(
     return (spec_ast >= ctx.real_val(min_bound)) & (spec_ast <= ctx.real_val(max_bound))
 
 
-def _check_spec_reachability(spec: Spec) -> None:
+def _check_spec_reachability(
+    spec: Spec,
+    analysis: SpecDomainAnalysis | None = None,
+) -> None:
     """Prove user assumptions admit an input within the typed input domain."""
+    if analysis is not None:
+        if analysis.assumption_domain_error is not None:
+            # Domain diagnostics below provide the more useful location; an
+            # invalid assumption cannot establish a valid reachable point.
+            return
+        if not analysis.reachable:
+            raise InfeasibleError(
+                f"Specification {spec.spec_ctx.name!r} is unreachable: "
+                "no input satisfies its assumptions"
+            )
+        return
     if not spec.has_user_assumptions:
         # The input domain is feasible by construction without user constraints.
         return
@@ -279,7 +450,20 @@ def _check_spec_reachability(spec: Spec) -> None:
         )
 
 
-def _check_spec_obligations(spec: Spec) -> None:
+def _check_spec_obligations(
+    spec: Spec,
+    analysis: SpecDomainAnalysis | None = None,
+) -> None:
+    if analysis is not None:
+        if any(witness is not None for witness in analysis.check_domain_errors):
+            raise ZolotoneError(
+                f"Specification {spec.spec_ctx.name!r} has a domain error in a check"
+            )
+        if any(witness is not None for witness in analysis.failed_checks):
+            raise InfeasibleError(
+                f"Specification {spec.spec_ctx.name!r} has a check that does not hold"
+            )
+        return
     if not spec.spec_ctx.checks:
         return
 
@@ -304,7 +488,29 @@ def _domain_nodes(location: str, expression: SpecNode):
     yield location, expression
 
 
-def _warn_about_domain_errors(spec: Spec) -> None:
+def _warn_about_domain_errors(
+    spec: Spec,
+    analysis: SpecDomainAnalysis | None = None,
+) -> None:
+    if analysis is not None:
+        findings = [
+            ("assumptions", analysis.assumption_domain_error),
+            ("result", analysis.result_domain_error),
+            *((f"check {index}", witness)
+              for index, witness in enumerate(analysis.check_domain_errors, start=1)),
+            *((f"requirement {index}", witness)
+              for index, witness in enumerate(analysis.requirement_domain_errors, start=1)),
+        ]
+        for location, witness in findings:
+            if witness is not None:
+                rendered = ", ".join(str(code) for code in witness) or "no input variables"
+                warnings.warn(
+                    f"Specification {spec.spec_ctx.name!r} triggers a domain error "
+                    f"in {location} at input codes [{rendered}]",
+                    UserWarning,
+                    stacklevel=3,
+                )
+        return
     roots: list[tuple[str, SpecNode]] = [
         (f"assumption {index}", assume)
         for index, assume in enumerate(spec.spec_ctx.assumes, start=1)
@@ -453,6 +659,26 @@ def _output_format_suggestion_with_range_analysis(
         return Q(int_bits, frac_bits)
 
 
+def _output_format_suggestion_from_exact_bounds(
+    output_range: tuple[Fraction, Fraction],
+    return_annotation: Q | UQ,
+) -> Q | UQ:
+    """Choose the smallest format from cached integer-machine bounds."""
+    lower, upper = output_range
+    frac_bits = return_annotation.frac_bits
+    scale = 1 << frac_bits
+    if lower >= 0:
+        required_raw = max(0, math.ceil(upper * scale))
+        total_bits = max(1, frac_bits, required_raw.bit_length())
+        return UQ(total_bits - frac_bits, frac_bits)
+    lower_raw = math.floor(lower * scale)
+    upper_raw = math.ceil(upper * scale)
+    required_magnitude = max(1, -lower_raw, upper_raw + 1)
+    magnitude_bits = (required_magnitude - 1).bit_length()
+    total_bits = max(1, frac_bits, magnitude_bits + 1)
+    return Q(total_bits - frac_bits, frac_bits)
+
+
 def _output_format_suggestion(
     spec_ast: RealExpr,
     return_annotation: object,
@@ -508,26 +734,47 @@ def _format_output_annotation(annotation: object) -> str:
 
 def _check_output_format(
     spec: Spec,
+    analysis: SpecDomainAnalysis | None = None,
 ) -> None:
-    input_dtypes = {
-        spec_input: spec.annotations[parameter.name]
-        for spec_input, parameter in zip(
-            spec.spec_inputs, tuple(spec.signature.parameters.values())[:-1], strict=True,
-        )
-    }
-    # TODO: counterexample
-    if not _prove_result_fits(
-        spec.spec_ast,
-        spec.return_annotation,
-        spec.spec_ctx,
-        input_dtypes,
+    input_dtypes = _spec_input_dtypes(spec)
+    cached_fit: bool | None = None
+    if (
+        analysis is not None
+        and isinstance(spec.return_annotation, (Q, UQ))
+        and analysis.output_bounds is not None
+        and analysis.assumption_domain_error is None
+        and analysis.result_domain_error is None
     ):
-        suggestion = _output_format_suggestion(
+        lower, upper = analysis.output_bounds
+        minimum, maximum = _fixed_point_real_bounds(spec.return_annotation)
+        if minimum <= lower <= upper <= maximum:
+            cached_fit = True
+        elif analysis.exact_output_bounds is not None:
+            cached_fit = False
+    # TODO: counterexample
+    if cached_fit is False or (
+        cached_fit is None and not _prove_result_fits(
             spec.spec_ast,
             spec.return_annotation,
             spec.spec_ctx,
             input_dtypes,
         )
+    ):
+        if (
+            analysis is not None
+            and analysis.exact_output_bounds is not None
+            and isinstance(spec.return_annotation, (Q, UQ))
+        ):
+            suggestion = _output_format_suggestion_from_exact_bounds(
+                analysis.exact_output_bounds, tp.cast(Q | UQ, spec.return_annotation),
+            )
+        else:
+            suggestion = _output_format_suggestion(
+                spec.spec_ast,
+                spec.return_annotation,
+                spec.spec_ctx,
+                input_dtypes,
+            )
         message = (
             "Specification result range does not fit "
             f"{spec.return_annotation!r}"
@@ -538,12 +785,23 @@ def _check_output_format(
             message += "; could not find a fixed-point format that would fit the range"
         raise InfeasibleError(message)
 
-    suggestion = _output_format_suggestion(
-        spec.spec_ast,
-        spec.return_annotation,
-        spec.spec_ctx,
-        input_dtypes,
-    )
+    if (
+        analysis is not None
+        and isinstance(spec.return_annotation, (Q, UQ))
+        and analysis.exact_output_bounds is not None
+        and analysis.assumption_domain_error is None
+        and analysis.result_domain_error is None
+    ):
+        suggestion = _output_format_suggestion_from_exact_bounds(
+            analysis.exact_output_bounds, spec.return_annotation,
+        )
+    else:
+        suggestion = _output_format_suggestion(
+            spec.spec_ast,
+            spec.return_annotation,
+            spec.spec_ctx,
+            input_dtypes,
+        )
     if suggestion != spec.return_annotation:
         warnings.warn(
             f"Output type {spec.return_annotation} is wider than necessary; "
