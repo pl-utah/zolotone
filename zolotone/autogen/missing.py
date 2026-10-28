@@ -26,7 +26,7 @@ from .spec_validation import (
 )
 
 
-MAX_GENERATED_TABLE_ENTRIES = 4_096
+MAX_GENERATED_TABLE_ENTRIES = 1 << 20
 
 
 def _suggest_missing_output_dtype(

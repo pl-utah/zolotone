@@ -487,6 +487,26 @@ def _validate_spec_shape(
     )
 
 
+def _validate_only_lut_spec(spec: Spec) -> None:
+    """Validate result eligibility for a single-input LUT before simplification."""
+    from .missing import MAX_GENERATED_TABLE_ENTRIES
+
+    root = spec.spec_ast
+    if not isinstance(root, Round) or root.frac_bits is None:
+        raise MissingError("only_LUT requires root rounding with resolved frac_bits")
+    dtype = spec.return_annotation
+    if dtype not in (Q, UQ) and not isinstance(dtype, (Q, UQ)):
+        raise MissingError("only_LUT requires a Q or UQ output")
+    if isinstance(dtype, (Q, UQ)):
+        if dtype.total_bits() > 64:
+            raise MissingError("Generated LUT outputs must have at most 64 bits")
+    inputs = tuple(_spec_input_dtypes(spec).values())
+    if len(inputs) != 1 or not isinstance(inputs[0], (Q, UQ)):
+        raise MissingError("only_LUT currently requires exactly one Q or UQ input")
+    if inputs[0].total_bits() > MAX_GENERATED_TABLE_ENTRIES.bit_length() - 1:
+        raise MissingError(f"only_LUT exceeds the {MAX_GENERATED_TABLE_ENTRIES}-entry table limit")
+
+
 def _validate_rounding_precision(spec: Spec) -> None:
     """Require resolved precision everywhere and reject narrowing root rounding."""
     pending = [

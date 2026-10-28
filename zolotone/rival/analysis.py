@@ -223,7 +223,11 @@ def analyze_typed_domain(
         RealLit(0), precondition=assumes, output_total_bits=1, **kwargs,
     )
     checks_machine = build_boolean_evaluator(checks, **kwargs)
-    output_frac_bits = 30 if generic_output else (
+    generic_frac_bits = (
+        output.frac_bits
+        if isinstance(output, Round) and output.frac_bits is not None else 30
+    )
+    output_frac_bits = generic_frac_bits if generic_output else (
         0 if isinstance(output_dtype, Bool) else output_dtype.frac_bits
     )
     output_scale = Fraction(2) ** output_frac_bits

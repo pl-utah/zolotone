@@ -31,6 +31,7 @@ from .spec_validation import (
     _validate_spec_requirements,
     _validate_rounding_precision,
     _validate_spec_shape,
+    _validate_only_lut_spec,
     add_input_ranges,
     add_output_guards,
     reject_untyped_inputs,
@@ -331,8 +332,10 @@ def _expand_faithful_roundings(spec: Spec) -> Spec:
 def Autogenerate(
     name: str,
     spec: tp.Callable[..., tp.Any],
+    *,
+    only_LUT: bool = False,
 ):
-    """Lower a specification, creating missing real Primitives in memory."""
+    """Lower a specification; only_LUT adds LUT eligibility validation."""
     # Step 1: Obtain spec AST
     current_spec = get_spec(name, spec)
 
@@ -345,6 +348,8 @@ def Autogenerate(
     current_spec = add_input_ranges(current_spec)
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
+    if only_LUT:
+        _validate_only_lut_spec(current_spec)
     current_spec = _expand_faithful_roundings(current_spec)
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
