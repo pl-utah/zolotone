@@ -45,6 +45,7 @@ impl Discretization for RangeDiscretization {
 #[derive(Clone, Copy)]
 enum OutputRounding {
     Exact,
+    F64,
     Rne,
     Rtz,
     Raz,
@@ -54,6 +55,7 @@ impl OutputRounding {
     fn convert(self, value: &Float) -> Float {
         match self {
             Self::Exact => value.clone(),
+            Self::F64 => Float::with_val(53, value.to_f64()),
             Self::Rne => value.clone().round_even(),
             Self::Rtz => value.clone().trunc(),
             Self::Raz if value.is_sign_negative() => value.clone().floor(),
@@ -62,7 +64,7 @@ impl OutputRounding {
     }
 }
 
-/// Resolve output 0 as a Boolean and discretize output 1 as an integer code.
+/// Resolve output 0 as a Boolean and output 1 using its selected discretization.
 #[derive(Clone)]
 struct EvaluationDiscretization {
     target_bits: u32,
@@ -76,11 +78,12 @@ impl Discretization for EvaluationDiscretization {
     }
 
     fn convert(&self, idx: usize, value: &Float) -> Float {
-        if idx == 0 {
+        if idx == 0 || (matches!(self.rounding, OutputRounding::F64)
+            && self.range_mode.load(Ordering::Relaxed)) {
             return value.clone();
         }
-        // Preserve the endpoint's precision and non-finite values.  Narrowing
-        // to target_bits here could merge distinct integer output codes.
+        // Integer modes preserve endpoint precision so distinct codes cannot
+        // merge; F64 mode rounds only for point-convergence checks.
         self.rounding.convert(value)
     }
 
@@ -92,6 +95,9 @@ impl Discretization for EvaluationDiscretization {
             // A Boolean must resolve exactly; never treat false/true as an
             // adjacent rounding boundary.
             return if lo == hi { 0 } else { 2 };
+        }
+        if matches!(self.rounding, OutputRounding::F64) {
+            return ordinal_distance_f64(lo.to_f64(), hi.to_f64());
         }
         if !lo.is_finite() || !hi.is_finite() {
             return 2;
@@ -149,6 +155,50 @@ struct RawEvaluator {
     machine: Machine<EvaluationDiscretization>,
     rounding: OutputRounding,
     range_mode: Arc<AtomicBool>,
+}
+
+#[pyclass(module = "zolotone._rival3")]
+struct RawFloatEvaluator {
+    evaluator: RawEvaluator,
+}
+
+type FloatEvaluationRange = ((bool, bool), (f64, f64), bool, bool, bool, bool);
+
+#[pymethods]
+impl RawFloatEvaluator {
+    fn apply_point(&mut self, point: Vec<String>) -> PyResult<(bool, f64, bool, bool, bool, bool)> {
+        let args = self.evaluator.code_args(
+            point.into_iter().map(|code| (code.clone(), code)).collect()
+        )?;
+        let outputs = self.evaluator.machine.apply(&args, None, 10_000)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let precondition = &outputs[0];
+        let output = &outputs[1];
+        Ok((
+            !precondition.lo().is_zero(), output.lo().to_f64(),
+            precondition.error_flags().partial(), output.error_flags().partial(),
+            precondition.error_flags().total(), output.error_flags().total(),
+        ))
+    }
+
+    fn apply_range(&mut self, intervals: Vec<(String, String)>) -> PyResult<Option<FloatEvaluationRange>> {
+        let args = self.evaluator.code_args(intervals)?;
+        self.evaluator.range_mode.store(true, Ordering::Relaxed);
+        let result = self.evaluator.machine.apply(&args, None, 1);
+        self.evaluator.range_mode.store(false, Ordering::Relaxed);
+        let outputs = match result {
+            Ok(outputs) => outputs,
+            Err(_) => return Ok(None),
+        };
+        let precondition = &outputs[0];
+        let output = &outputs[1];
+        Ok(Some((
+            (!precondition.lo().is_zero(), !precondition.hi().is_zero()),
+            (output.lo().to_f64_round(Round::Down), output.hi().to_f64_round(Round::Up)),
+            precondition.error_flags().partial(), output.error_flags().partial(),
+            precondition.error_flags().total(), output.error_flags().total(),
+        )))
+    }
 }
 
 type EvaluationRange = ((bool, bool), Option<(String, String)>, bool, bool, bool, bool);
@@ -332,10 +382,9 @@ fn build_machine(exprs: &PyList, free_vars: Vec<String>) -> PyResult<RawRivalMac
 }
 
 #[pyfunction]
-#[pyo3(signature = (expr, input_total_bits, output_total_bits, rounding_mode=None, precondition=None, free_vars=None))]
+#[pyo3(signature = (expr, output_total_bits, rounding_mode=None, precondition=None, free_vars=None))]
 fn build_integer_evaluator(
     expr: &PyAny,
-    input_total_bits: u32,
     output_total_bits: u32,
     rounding_mode: Option<&str>,
     precondition: Option<&PyAny>,
@@ -352,17 +401,37 @@ fn build_integer_evaluator(
             )))
         }
     };
+    build_evaluator(expr, output_total_bits, rounding, precondition, free_vars)
+}
+
+#[pyfunction]
+#[pyo3(signature = (expr, precondition=None, free_vars=None))]
+fn build_float_evaluator(
+    expr: &PyAny,
+    precondition: Option<&PyAny>,
+    free_vars: Option<Vec<String>>,
+) -> PyResult<RawFloatEvaluator> {
+    Ok(RawFloatEvaluator {
+        evaluator: build_evaluator(expr, 53, OutputRounding::F64, precondition, free_vars)?,
+    })
+}
+
+fn build_evaluator(
+    expr: &PyAny,
+    output_total_bits: u32,
+    rounding: OutputRounding,
+    precondition: Option<&PyAny>,
+    free_vars: Option<Vec<String>>,
+) -> PyResult<RawEvaluator> {
+    if output_total_bits == 0 {
+        return Err(PyValueError::new_err("output bit width must be positive"));
+    }
     let rival_expr = parse_expr(expr)?;
     let range_mode = Arc::new(AtomicBool::new(false));
     let disc = EvaluationDiscretization {
         rounding,
         range_mode: range_mode.clone(),
-        // Seed interval evaluation from the requested code widths with two
-        // guard bits. The discretization itself preserves endpoint precision.
-        target_bits: input_total_bits
-            .max(output_total_bits)
-            .saturating_add(2)
-            .max(20),
+        target_bits: output_total_bits,
     };
     let precondition = match precondition {
         Some(precondition) => parse_expr(precondition)?,
@@ -506,9 +575,11 @@ fn parse_ternary(
 fn _rival3(_py: Python<'_>, module: &PyModule) -> PyResult<()> {
     module.add_class::<RawRivalMachine>()?;
     module.add_class::<RawEvaluator>()?;
+    module.add_class::<RawFloatEvaluator>()?;
     module.add_class::<RivalHints>()?;
     module.add_function(wrap_pyfunction!(build_machine, module)?)?;
     module.add_function(wrap_pyfunction!(build_integer_evaluator, module)?)?;
+    module.add_function(wrap_pyfunction!(build_float_evaluator, module)?)?;
     module.add("__doc__", "Native Rival3 bridge for zolotone")?;
     Ok(())
 }

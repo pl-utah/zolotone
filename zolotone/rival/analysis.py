@@ -216,7 +216,6 @@ def analyze_typed_domain(
         raise ZolotoneError(f"Typed domain analysis needs input dtypes for: {sorted(missing)}")
     kwargs = dict(
         free_vars=free_vars,
-        input_total_bits=max((dtype.total_bits() for dtype in input_dtypes.values()), default=1),
     )
     # The precondition path lets an error-free false conjunct reject the box.
     assumes_machine = build_integer_evaluator(
@@ -379,7 +378,6 @@ def rival_prove_result_fits(
     free_vars = []
     input_domains = []
     initial_box = []
-    input_bits = 1
     for source, dtype in input_dtypes.items():
         if not (variables(expr) | variables(precondition)) & variables(source):
             continue
@@ -403,7 +401,6 @@ def rival_prove_result_fits(
         free_vars.append(name)
         input_domains.append((source, dtype))
         initial_box.append((lower, upper))
-        input_bits = max(input_bits, width)
     # Expression keys may cover only some occurrences of their variables.
     missing = set(collect_free_vars([expr, precondition])) - set(free_vars)
     if missing:
@@ -439,7 +436,7 @@ def rival_prove_result_fits(
 
     machine = build_integer_evaluator(
         integer_expr, precondition, free_vars=free_vars,
-        input_total_bits=input_bits, output_total_bits=output_bits,
+        output_total_bits=output_bits,
     )
     pending = [tuple(initial_box)]
     while pending:

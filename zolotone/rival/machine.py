@@ -13,6 +13,7 @@ __all__ = [
     "build_boolean_evaluator",
     "RivalMachine", "RivalIntegerMachine", "RivalAnalysis", "RivalEvaluation",
     "build_machine", "build_integer_evaluator", "collect_free_vars", "to_rival_ir",
+    "RivalFloatMachine", "build_float_evaluator",
 ]
 
 
@@ -58,11 +59,27 @@ class RivalEvaluation(NamedTuple):
     """Point values or interval bounds; error-flagged values are not valid."""
 
     precondition: bool | tuple[bool, bool] | None = None
-    output: int | tuple[Fraction, Fraction] | None = None
+    output: int | float | tuple[Fraction, Fraction] | tuple[float, float] | None = None
     precondition_error: bool = False
     output_error: bool = False
     precondition_total_error: bool = False
     output_total_error: bool = False
+
+
+class RivalFloatMachine:
+    """Evaluate integer input codes with binary64 output values and bounds."""
+
+    def __init__(self, raw_machine: Any):
+        self._raw_machine = raw_machine
+
+    def apply_point(self, point: Sequence[int]) -> RivalEvaluation:
+        """Return a rounded float, not an enclosure; use apply_range for bounds."""
+        return RivalEvaluation(*self._raw_machine.apply_point([str(code) for code in point]))
+
+    def apply_range(self, rect: Sequence[tuple[int, int]]) -> RivalEvaluation:
+        """Return outward-rounded bounds, including for singleton intervals."""
+        result = self._raw_machine.apply_range([(str(lo), str(hi)) for lo, hi in rect])
+        return RivalEvaluation() if result is None else RivalEvaluation(*result)
 
 
 class RivalIntegerMachine:
@@ -99,7 +116,6 @@ class RivalIntegerMachine:
 def build_boolean_evaluator(
     expr: BoolExpr,
     *,
-    input_total_bits: int,
     free_vars: Sequence[str],
 ) -> RivalIntegerMachine:
     """Compile a Boolean expression as an integer output code, 0 or 1."""
@@ -107,7 +123,6 @@ def build_boolean_evaluator(
         raise TypeError("Boolean evaluation requires a Boolean expression")
     return build_integer_evaluator(
         If(expr, RealLit(1), RealLit(0)),
-        input_total_bits=input_total_bits, 
         output_total_bits=1,
         free_vars=free_vars,
     )
@@ -155,18 +170,43 @@ def _evaluator_precondition(precondition: BoolExpr) -> RivalIR:
     }
 
 
+def build_float_evaluator(
+    expr: RealExpr,
+    precondition: BoolExpr | None = None,
+    *,
+    free_vars: Sequence[str] = ("x",),
+) -> RivalFloatMachine:
+    """Compile integer-coded inputs to floating-point values without output scaling.
+
+    Explicit Round nodes retain their numeric-value semantics, including at
+    the root. Callers encode any input fixed-point scaling in the expression.
+    """
+    if precondition is None:
+        precondition = BoolLit(True)
+    if not isinstance(precondition, BoolExpr):
+        raise TypeError("evaluation precondition must be a Boolean expression")
+    if not isinstance(expr, RealExpr):
+        raise TypeError("floating-point evaluation requires a real expression")
+    var_list = _validate_free_vars(free_vars)
+    _validate_referenced_vars([expr, precondition], var_list)
+    native = _load_native_module()
+    return RivalFloatMachine(native.build_float_evaluator(
+        to_rival_ir(expr), _evaluator_precondition(precondition), var_list,
+    ))
+
+
 def build_integer_evaluator(
     expr: RealExpr,
     precondition: BoolExpr | None = None,
     *,
-    input_total_bits: int,
     output_total_bits: int,
     free_vars: Sequence[str] = ("x",),
 ) -> RivalIntegerMachine:
     """Compile one precondition/output pair for ordered integer-code inputs.
 
-    input_total_bits is the maximum input-width precision hint. Callers encode
-    any input scales in their expressions. The default declares one input, x.
+    output_total_bits sets Rival's target precision. Integer inputs are loaded
+    exactly; callers encode any input scales in their expressions. The default
+    declares one input, x.
     """
     if precondition is None:
         precondition = BoolLit(True)
@@ -177,11 +217,10 @@ def build_integer_evaluator(
     if not isinstance(expr, RealExpr):
         raise TypeError("integer evaluation requires a real expression")
     _validate_referenced_vars([expr], var_list)
-    for label, total in (("input", input_total_bits), ("output", output_total_bits)):
-        if type(total) is not int:
-            raise TypeError(f"{label} bit width must be an integer")
-        if total < 1:
-            raise ValueError(f"invalid {label} integer bit width")
+    if type(output_total_bits) is not int:
+        raise TypeError("output bit width must be an integer")
+    if output_total_bits < 1:
+        raise ValueError("invalid output integer bit width")
 
     rounding_mode = None
     if isinstance(expr, Round):
@@ -194,7 +233,6 @@ def build_integer_evaluator(
     return RivalIntegerMachine(
         native.build_integer_evaluator(
             to_rival_ir(expr),
-            input_total_bits,
             output_total_bits,
             rounding_mode,
             _evaluator_precondition(precondition),
