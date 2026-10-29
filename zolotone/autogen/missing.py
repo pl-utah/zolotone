@@ -160,7 +160,6 @@ def _build_missing_primitive(
     evaluator = build_integer_evaluator(
         integer_expression,
         precondition,
-        output_total_bits=output_dtype.total_bits(),
     )
 
     output_bits = output_dtype.total_bits()

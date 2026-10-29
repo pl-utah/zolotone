@@ -67,14 +67,13 @@ impl OutputRounding {
 /// Resolve output 0 as a Boolean and output 1 using its selected discretization.
 #[derive(Clone)]
 struct EvaluationDiscretization {
-    target_bits: u32,
     rounding: OutputRounding,
     range_mode: Arc<AtomicBool>,
 }
 
 impl Discretization for EvaluationDiscretization {
     fn target(&self) -> u32 {
-        self.target_bits
+        128
     }
 
     fn convert(&self, idx: usize, value: &Float) -> Float {
@@ -382,10 +381,9 @@ fn build_machine(exprs: &PyList, free_vars: Vec<String>) -> PyResult<RawRivalMac
 }
 
 #[pyfunction]
-#[pyo3(signature = (expr, output_total_bits, rounding_mode=None, precondition=None, free_vars=None))]
+#[pyo3(signature = (expr, rounding_mode=None, precondition=None, free_vars=None))]
 fn build_integer_evaluator(
     expr: &PyAny,
-    output_total_bits: u32,
     rounding_mode: Option<&str>,
     precondition: Option<&PyAny>,
     free_vars: Option<Vec<String>>,
@@ -401,7 +399,7 @@ fn build_integer_evaluator(
             )))
         }
     };
-    build_evaluator(expr, output_total_bits, rounding, precondition, free_vars)
+    build_evaluator(expr, rounding, precondition, free_vars)
 }
 
 #[pyfunction]
@@ -412,26 +410,21 @@ fn build_float_evaluator(
     free_vars: Option<Vec<String>>,
 ) -> PyResult<RawFloatEvaluator> {
     Ok(RawFloatEvaluator {
-        evaluator: build_evaluator(expr, 53, OutputRounding::F64, precondition, free_vars)?,
+        evaluator: build_evaluator(expr, OutputRounding::F64, precondition, free_vars)?,
     })
 }
 
 fn build_evaluator(
     expr: &PyAny,
-    output_total_bits: u32,
     rounding: OutputRounding,
     precondition: Option<&PyAny>,
     free_vars: Option<Vec<String>>,
 ) -> PyResult<RawEvaluator> {
-    if output_total_bits == 0 {
-        return Err(PyValueError::new_err("output bit width must be positive"));
-    }
     let rival_expr = parse_expr(expr)?;
     let range_mode = Arc::new(AtomicBool::new(false));
     let disc = EvaluationDiscretization {
         rounding,
         range_mode: range_mode.clone(),
-        target_bits: output_total_bits,
     };
     let precondition = match precondition {
         Some(precondition) => parse_expr(precondition)?,

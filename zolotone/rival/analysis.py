@@ -219,7 +219,7 @@ def analyze_typed_domain(
     )
     # The precondition path lets an error-free false conjunct reject the box.
     assumes_machine = build_integer_evaluator(
-        RealLit(0), precondition=assumes, output_total_bits=1, **kwargs,
+        RealLit(0), precondition=assumes, **kwargs,
     )
     checks_machine = build_boolean_evaluator(checks, **kwargs)
     generic_frac_bits = (
@@ -235,7 +235,7 @@ def analyze_typed_domain(
     else:
         output_machine = build_integer_evaluator(
             output * RealLit(output_scale),
-            output_total_bits=30 if generic_output else output_dtype.total_bits(), **kwargs,
+            **kwargs,
         )
 
     # Creating Initial Rectangulars
@@ -419,7 +419,6 @@ def rival_prove_result_fits(
         # scale. Encode that predicate as an exact integer Boolean indicator.
         integer_expr = If(precondition, If(expr >= RealLit(0), RealLit(1), RealLit(0)), RealLit(1))
         minimum = maximum = 1
-        output_bits = 1
     else:
         output_bits = output_type.total_bits()
         minimum = -(1 << (output_bits - 1)) if isinstance(output_type, Q) else 0
@@ -436,7 +435,6 @@ def rival_prove_result_fits(
 
     machine = build_integer_evaluator(
         integer_expr, precondition, free_vars=free_vars,
-        output_total_bits=output_bits,
     )
     pending = [tuple(initial_box)]
     while pending:

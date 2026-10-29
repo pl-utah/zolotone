@@ -123,7 +123,6 @@ def build_boolean_evaluator(
         raise TypeError("Boolean evaluation requires a Boolean expression")
     return build_integer_evaluator(
         If(expr, RealLit(1), RealLit(0)),
-        output_total_bits=1,
         free_vars=free_vars,
     )
 
@@ -199,14 +198,13 @@ def build_integer_evaluator(
     expr: RealExpr,
     precondition: BoolExpr | None = None,
     *,
-    output_total_bits: int,
     free_vars: Sequence[str] = ("x",),
 ) -> RivalIntegerMachine:
     """Compile one precondition/output pair for ordered integer-code inputs.
 
-    output_total_bits sets Rival's target precision. Integer inputs are loaded
-    exactly; callers encode any input scales in their expressions. The default
-    declares one input, x.
+    Rival uses a 128-bit target precision. Integer inputs are loaded exactly;
+    callers encode any input scales in their expressions. The default declares
+    one input, x.
     """
     if precondition is None:
         precondition = BoolLit(True)
@@ -217,10 +215,6 @@ def build_integer_evaluator(
     if not isinstance(expr, RealExpr):
         raise TypeError("integer evaluation requires a real expression")
     _validate_referenced_vars([expr], var_list)
-    if type(output_total_bits) is not int:
-        raise TypeError("output bit width must be an integer")
-    if output_total_bits < 1:
-        raise ValueError("invalid output integer bit width")
 
     rounding_mode = None
     if isinstance(expr, Round):
@@ -233,7 +227,6 @@ def build_integer_evaluator(
     return RivalIntegerMachine(
         native.build_integer_evaluator(
             to_rival_ir(expr),
-            output_total_bits,
             rounding_mode,
             _evaluator_precondition(precondition),
             var_list,
