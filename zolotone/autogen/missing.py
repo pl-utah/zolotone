@@ -12,7 +12,7 @@ from ..rival import (
     collect_free_vars,
 )
 from ..rival.analysis import analyze_typed_domain
-from ..spec.spec_ast import RealExpr, RealLit, RealVar, Round, SpecNode, substitute_spec_node
+from ..spec.spec_ast import If, RealExpr, RealLit, RealVar, Round, SpecNode, substitute_spec_node
 from ..spec.spec_context import SpecContext
 from ..types import DataType, Q, UQ
 from ..ast.helpers import integer_lookup
@@ -27,6 +27,17 @@ from .spec_validation import (
 
 
 MAX_GENERATED_TABLE_ENTRIES = 1 << 20
+
+
+def _lut_frac_bits(expression: RealExpr) -> int | None:
+    """Recognize an explicit rounding grid, including rounded conditional branches."""
+    if isinstance(expression, Round):
+        return expression.frac_bits
+    if isinstance(expression, If):
+        precision = _lut_frac_bits(expression.on_true)
+        if precision is not None and precision == _lut_frac_bits(expression.on_false):
+            return precision
+    return None
 
 
 def _suggest_missing_output_dtype(
@@ -81,7 +92,7 @@ def _build_missing_primitive(
     input_dtypes: dict[SpecNode, DataType],
 ) -> Node:
     """Generate a univariate typed LUT from one materialized input."""
-    if not isinstance(missing, Round):
+    if _lut_frac_bits(missing) is None:
         raise MissingError(
             "LUT synthesis requires explicit ctx.rne, ctx.rtz, or ctx.raz with frac_bits"
         )
@@ -114,7 +125,12 @@ def _build_missing_primitive(
         input_expr,
         raw * (RealLit(2) ** RealLit(-dtype.frac_bits)),
     )
-    pattern = f"{missing.mode.value.lower()}_f{missing.frac_bits}"
+    if isinstance(missing, Round):
+        pattern = f"{missing.mode.value.lower()}_f{missing.frac_bits}"
+    else:
+        # Unlike a root Round, a conditional evaluates to values, not codes.
+        integer_expression = integer_expression * RealLit(1 << output_dtype.frac_bits)
+        pattern = f"conditional_f{output_dtype.frac_bits}"
     dtype_part = "_".join(
         f"{type(format_).__name__.lower()}{format_.int_bits}_{format_.frac_bits}"
         for format_ in (dtype, output_dtype)

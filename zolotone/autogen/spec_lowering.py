@@ -31,7 +31,7 @@ from ..spec.spec_ast import (
 )
 from ..spec.spec_context import SpecContext
 from ..types import Bool, DataType, Q, UQ, Value
-from .missing import _build_missing_primitive
+from .missing import _build_missing_primitive, _lut_frac_bits
 from ..ast.node import Node
 from ..ast.nodes import (
     Composite,
@@ -491,7 +491,7 @@ class _LoweringSearch:
         key = expression
         if key not in self.suggested_lut_types:
             try:
-                precision_dtype = UQ(1, expression.frac_bits)
+                precision_dtype = UQ(1, _lut_frac_bits(expression))
                 self.suggested_lut_types[key] = _suggest_missing_output_dtype(
                     expression, precision_dtype, self.ctx, self.input_dtypes
                 )
@@ -505,7 +505,7 @@ class _LoweringSearch:
         # Consider whole regions before their children so a cheap fused LUT can
         # prune more expensive chains. Components still compete by total cost.
         for expression in self.expressions:
-            if not isinstance(expression, Round):
+            if _lut_frac_bits(expression) is None:
                 continue
             pool = sorted(
                 (
