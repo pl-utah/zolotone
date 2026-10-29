@@ -378,7 +378,7 @@ def Autogenerate(
     # Step 1: Obtain spec AST
     current_spec = get_spec(name, spec)
 
-    print(current_spec)
+    # print(current_spec)
 
     # Step 2: establish the abstract input domain and validate its shape.
     # Error on undeclared variables, warn about unused variables.
@@ -390,7 +390,8 @@ def Autogenerate(
     if only_LUT:
         _validate_only_lut_spec(current_spec)
     current_spec = _expand_faithful_roundings(current_spec)
-    print(current_spec)
+    # print(current_spec)
+
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 
@@ -419,8 +420,7 @@ def Autogenerate(
     # Step 7: derive guards for the selected implementation result.
     current_spec = add_output_guards(current_spec)
 
-    print(current_spec)
-
+    # print(current_spec)
 
     # Step 8: lower and attach assumptions, user checks, and output guards.
     attach_lowered_conditions(lowered_composite, current_spec)
