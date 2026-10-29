@@ -40,18 +40,15 @@ from zolotone.solver.report import (
     build_proof_report,
 )
 from zolotone.rival import (
-    MAX_RECTS_ENV,
     RivalAnalysis,
-    RivalRectLimitExceeded,
+    RivalEvaluation,
     build_machine,
-    build_range_machine,
     collect_free_vars,
-    get_rival_rects,
-    rival_feasibility_check,
-    rival_domain_errors,
-    rival_range_analysis,
-    rival_trim_context,
     to_rival_ir,
+)
+from zolotone.rival.analysis import (
+    MAX_RECTS_ENV, RivalRectLimitExceeded, get_rival_rects,
+    rival_feasibility_check, rival_domain_errors, analyze_typed_domain, rival_trim_context,
 )
 from zolotone.spec.spec_context import normalize_ctx, simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
@@ -3233,13 +3230,13 @@ class TestFaithfulRoundingSpecNode(unittest.TestCase):
                     translate()
 
     def test_integer_machine_rejects_faithful_before_native_compilation(self):
-        from zolotone import rival
+        from zolotone.rival import machine as rival
 
         ctx = SpecContext("unsupported-faithful-output")
         node = ctx.fr(ctx.real("x"), 6)
         with patch.object(rival, "_load_native_module") as native:
             with self.assertRaisesRegex(NotImplementedError, "faithful rounding"):
-                rival.build_integer_machine(node, 3, 8)
+                rival.build_integer_evaluator(node, input_total_bits=3, output_total_bits=8)
         native.assert_not_called()
 
     def test_faithful_precision_uses_shared_inference_and_validation(self):
@@ -3344,7 +3341,8 @@ class TestFaithfulRoundingExpansion(unittest.TestCase):
         original = get_spec("shared-faithful-rounding", spec)
         expanded = _expand_faithful_roundings(original)
         self.assertEqual(len(expanded.rounding_choices), 1)
-        self.assertEqual(expanded.spec_ast.on_true.frac_bits, 3)
+        self.assertEqual(expanded.spec_ast.on_true.on_true.frac_bits, 3)
+        self.assertIs(_expand_faithful_roundings(expanded), expanded)
         for location in ("assumes", "checks", "requirements"):
             self.assertIs(getattr(expanded.spec_ctx, location)[0].lhs, expanded.spec_ast)
             self.assertIs(getattr(original.spec_ctx, location)[0].lhs, original.spec_ast)
@@ -3934,10 +3932,8 @@ class TestRoundSpecZ3(unittest.TestCase):
                     return result
 
                 current = validation.add_input_ranges(get_spec("rounded-validation", spec))
-                validation._check_spec_reachability(current)
-                validation._warn_about_domain_errors(current)
+                current = validation.spec_domain_analysis(current)
                 validation._validate_spec_requirements(current)
-                validation._check_spec_obligations(current)
                 validation._check_output_format(current)
 
     def test_rounded_assumptions_are_translated(self):
@@ -8466,13 +8462,13 @@ class TestBFloat16ReLU(unittest.TestCase):
 
 class TestRivalIntegerCodes(unittest.TestCase):
     def machine(self, expr, input_frac=0, output_frac=0, input_bits=64, output_bits=64):
-        from zolotone.rival import build_integer_machine
+        from zolotone.rival import build_integer_evaluator
 
         x = RealVar("x")
         integer_expr = substitute_spec_node(
             expr, x, x * (RealLit(2) ** RealLit(-input_frac))
         )
-        return build_integer_machine(
+        return build_integer_evaluator(
             Round(integer_expr, RoundingMode.RNE, output_frac),
             input_total_bits=input_bits,
             output_total_bits=output_bits,
@@ -8483,7 +8479,7 @@ class TestRivalIntegerCodes(unittest.TestCase):
         for code, expected in ((1, 0), (3, 2), (5, 2), (7, 4),
                                (-1, 0), (-3, -2), (-5, -2), (-7, -4)):
             with self.subTest(code=code):
-                self.assertEqual(machine.apply(code), expected)
+                self.assertEqual(machine.apply_point([code]), RivalEvaluation(True, expected))
 
     def test_precision_increases_near_rounding_boundaries(self):
         for exponent in (30, 100, 1000):
@@ -8491,39 +8487,43 @@ class TestRivalIntegerCodes(unittest.TestCase):
                 expr = RealVar("x") * RealLit(0.5) + RealLit(sign * 2.0**-exponent)
                 machine = self.machine(expr, input_bits=2, output_bits=4)
                 with self.subTest(exponent=exponent, sign=sign):
-                    self.assertEqual(machine.apply(1), int(sign > 0))
-                    self.assertEqual(machine.apply(-1), -int(sign < 0))
+                    self.assertEqual(machine.apply_point([1]), RivalEvaluation(True, int(sign > 0)))
+                    self.assertEqual(machine.apply_point([-1]), RivalEvaluation(True, -int(sign < 0)))
 
     def test_reciprocal_uses_input_and_output_scales(self):
         machine = self.machine(RealVar("x") ** RealLit(-1), input_frac=2, output_frac=3)
         for code in (-31, -7, -3, 1, 3, 7, 31):
             with self.subTest(code=code):
-                self.assertEqual(machine.apply(code), round(Fraction(32, code)))
+                self.assertEqual(machine.apply_point([code]), RivalEvaluation(True, round(Fraction(32, code))))
 
     def test_rounds_directly_to_actual_output_precision(self):
         expr = RealVar("x") * RealLit(3) * (RealLit(5) ** RealLit(-1))
         machine = self.machine(expr)
         # 0.6 rounds to 1; rounding first to a half-integer would give 0.
-        self.assertEqual(machine.apply(1), 1)
+        self.assertEqual(machine.apply_point([1]), RivalEvaluation(True, 1))
 
     def test_integer_input_preserves_bits_beyond_binary64(self):
         machine = self.machine(RealVar("x"), input_frac=60)
-        self.assertEqual(machine.apply((3 << 59) - 1), 1)
-        self.assertEqual(machine.apply((3 << 59) + 1), 2)
+        self.assertEqual(machine.apply_point([(3 << 59) - 1]), RivalEvaluation(True, 1))
+        self.assertEqual(machine.apply_point([(3 << 59) + 1]), RivalEvaluation(True, 2))
 
     def test_scaling_beyond_binary64_exponent_range(self):
         expr = RealVar("x") * (RealLit(2) ** RealLit(1200))
         machine = self.machine(expr, input_frac=1200, input_bits=1201)
-        self.assertEqual(machine.apply(3), 3)
-        self.assertEqual(machine.apply(-3), -3)
+        self.assertEqual(machine.apply_point([3]), RivalEvaluation(True, 3))
+        self.assertEqual(machine.apply_point([-3]), RivalEvaluation(True, -3))
 
-    def test_undefined_and_nonfinite_results_raise_normal_errors(self):
+    def test_undefined_result_preserves_error_flag(self):
         reciprocal = self.machine(RealVar("x") ** RealLit(-1))
-        with self.assertRaises(ValueError):
-            reciprocal.apply(0)
+        result = reciprocal.apply_point([0])
+        self.assertTrue(result.precondition)
+        self.assertFalse(result.precondition_error)
+        self.assertTrue(result.output_error)
+
+    def test_unresolved_nonfinite_result_raises(self):
         overflowing = self.machine(RealLit(2) ** RealVar("x"))
         with self.assertRaises(ValueError):
-            overflowing.apply(1 << 31)
+            overflowing.apply_point([1 << 31])
 
     def test_rejects_unknown_variables_before_native_compilation(self):
         with self.assertRaisesRegex(ValueError, "missing referenced variables"):
@@ -8548,13 +8548,487 @@ class TestRivalIntegerCodes(unittest.TestCase):
                 tempdir.cleanup()
 
 
+class TestRivalEvaluator(unittest.TestCase):
+    def test_exact_point_rejects_fractional_outputs(self):
+        from zolotone.rival import build_integer_evaluator
+
+        evaluator = build_integer_evaluator(RealVar("x") * RealLit(0.5), input_total_bits=4, output_total_bits=4)
+        for code in (-3, -1, 1, 3):
+            with self.subTest(code=code), self.assertRaisesRegex(ValueError, "non-integer output"):
+                evaluator.apply_point([code])
+        self.assertEqual(evaluator.apply_point([2]), RivalEvaluation(True, 1))
+        self.assertEqual(evaluator.apply_point([-2]), RivalEvaluation(True, -1))
+
+    def test_exact_ranges_preserve_fractional_bounds(self):
+        from zolotone.rival import build_integer_evaluator
+
+        evaluator = build_integer_evaluator(RealVar("x") * RealLit(0.5), input_total_bits=4, output_total_bits=4)
+        self.assertEqual(evaluator.apply_range([(1, 3)]),
+                         RivalEvaluation((True, True), (Fraction(1, 2), Fraction(3, 2))))
+        with self.assertRaisesRegex(ValueError, "non-integer output"):
+            evaluator.apply_point([1])
+        self.assertEqual(evaluator.apply_range([(1, 1)]).output, (Fraction(1, 2), Fraction(1, 2)))
+
+    def test_exact_domain_errors_remain_flagged(self):
+        from zolotone.rival import build_integer_evaluator
+
+        for precondition in (BoolLit(True), BoolLit(False)):
+            with self.subTest(precondition=precondition):
+                evaluator = build_integer_evaluator(RealVar("x") ** RealLit(-1), precondition,
+                                                    input_total_bits=4, output_total_bits=4)
+                result = evaluator.apply_point([0])
+                self.assertEqual(result.precondition, precondition.value)
+                self.assertTrue(result.output_error)
+                self.assertIsNone(result.output)
+
+    def test_multivariate_order_preconditions_and_ranges(self):
+        from zolotone.rival import build_integer_evaluator
+
+        x, y, z = RealVar("x"), RealVar("y"), RealVar("z")
+        evaluator = build_integer_evaluator(
+            x + RealLit(10) * y + RealLit(100) * z,
+            (x >= y) & (z > RealLit(0)),
+            free_vars=["y", "x", "z"], input_total_bits=8, output_total_bits=16,
+        )
+        self.assertEqual(evaluator.apply_point([2, 5, 1]), RivalEvaluation(True, 125))
+        self.assertEqual(evaluator.apply_point([5, 2, 1]), RivalEvaluation(False, 152))
+        self.assertEqual(evaluator.apply_range([(2, 3), (5, 7), (1, 2)]),
+                         RivalEvaluation((True, True), (125, 237)))
+
+    def test_multivariate_wide_exact_codes(self):
+        from zolotone.rival import build_integer_evaluator
+
+        x, y = RealVar("x"), RealVar("y")
+        evaluator = build_integer_evaluator(x + y, free_vars=["x", "y"], input_total_bits=128, output_total_bits=128)
+        large = 1 << 100
+        self.assertEqual(evaluator.apply_point([large + 1, -large]), RivalEvaluation(True, 1))
+        self.assertEqual(evaluator.apply_range([(large + 1, large + 2), (-large, -large + 1)]),
+                         RivalEvaluation((True, True), (1, 3)))
+
+    def test_multivariate_rounding_and_errors(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("multivariate-rounding")
+        x, y = RealVar("x"), RealVar("y")
+        evaluator = build_integer_evaluator(
+            ctx.rne(x * y ** RealLit(-1), frac_bits=0), y > RealLit(0),
+            free_vars=["x", "y"], input_total_bits=4, output_total_bits=4,
+        )
+        self.assertEqual(evaluator.apply_point([3, 2]), RivalEvaluation(True, 2))
+        self.assertEqual(evaluator.apply_point([1, 2]), RivalEvaluation(True, 0))
+        self.assertEqual(evaluator.apply_range([(1, 3), (2, 2)]).output, (0, 2))
+        invalid = evaluator.apply_point([3, 0])
+        self.assertFalse(invalid.precondition)
+        self.assertTrue(invalid.output_error)
+        self.assertIsNone(evaluator.apply_range([(1, 3), (0, 2)]).output)
+        self.assertEqual(evaluator.apply_point([3, 2]), RivalEvaluation(True, 2))
+
+    def test_multivariate_input_arity(self):
+        from zolotone.rival import build_integer_evaluator
+
+        x, y = RealVar("x"), RealVar("y")
+        evaluator = build_integer_evaluator(x + y, free_vars=["x", "y"], input_total_bits=4, output_total_bits=8)
+        for point in ([], [1], [1, 2, 3]):
+            with self.subTest(point=point), self.assertRaisesRegex(ValueError, "expected 2 inputs"):
+                evaluator.apply_point(point)
+        for box in ([], [(0, 1)], [(0, 1)] * 3):
+            with self.subTest(box=box), self.assertRaisesRegex(ValueError, "expected 2 inputs"):
+                evaluator.apply_range(box)
+        with self.assertRaisesRegex(ValueError, "reversed"):
+            evaluator.apply_range([(0, 1), (2, 1)])
+        self.assertEqual(evaluator.apply_point([1, 2]), RivalEvaluation(True, 3))
+
+    def test_multivariate_variable_validation(self):
+        from zolotone.rival import machine as rival
+
+        x, y = RealVar("x"), RealVar("y")
+        with patch.object(rival, "_load_native_module") as native:
+            for names in (["x"], ["x", "x"]):
+                with self.subTest(names=names), self.assertRaises(ValueError):
+                    rival.build_integer_evaluator(x + y, free_vars=names, input_total_bits=4, output_total_bits=8)
+            with self.assertRaises(TypeError):
+                rival.build_integer_evaluator(x, free_vars=[1], input_total_bits=4, output_total_bits=8)
+            with self.assertRaisesRegex(ValueError, "missing referenced variables"):
+                rival.build_integer_evaluator(x, y > RealLit(0), free_vars=["x"], input_total_bits=4, output_total_bits=8)
+        native.assert_not_called()
+
+    def test_multivariate_native_api(self):
+        from zolotone.rival import build_integer_evaluator
+
+        evaluator = build_integer_evaluator(RealVar("x") + RealVar("y"), free_vars=["x", "y"], input_total_bits=4, output_total_bits=8)
+        raw = evaluator._raw_machine
+        self.assertEqual(raw.apply_point(["3", "4"]), (True, "7", False, False, False, False))
+        self.assertEqual(raw.apply_range([("1", "2"), ("3", "4")]),
+                         ((True, True), ("4", "6"), False, False, False, False))
+        with self.assertRaisesRegex(ValueError, "expected 2 inputs"):
+            raw.apply_point(["1"])
+        with self.assertRaisesRegex(ValueError, "expected 2 inputs"):
+            raw.apply_range([("0", "1")])
+
+    def test_sequence_and_zero_input_calls(self):
+        from zolotone.rival import build_integer_evaluator
+
+        evaluator = build_integer_evaluator(RealVar("x"), input_total_bits=4, output_total_bits=4)
+        self.assertEqual(evaluator.apply_point([3]), evaluator.apply_point((3,)))
+        self.assertEqual(evaluator.apply_range([(1, 3)]), evaluator.apply_range(((1, 3),)))
+        with self.assertRaises(TypeError):
+            evaluator.apply_point(3)
+        with self.assertRaises(TypeError):
+            evaluator.apply_range((1, 3))
+        with self.assertRaises(TypeError):
+            evaluator._raw_machine.apply_point("3")
+        with self.assertRaises(TypeError):
+            evaluator._raw_machine.apply_range("1", "3")
+        constant = build_integer_evaluator(RealLit(7), free_vars=[], input_total_bits=1, output_total_bits=4)
+        self.assertEqual(constant.apply_point([]), RivalEvaluation(True, 7))
+        self.assertEqual(constant.apply_range([]), RivalEvaluation((True, True), (7, 7)))
+
+    def test_range_and_point_share_one_compiled_evaluator(self):
+        from zolotone.rival import machine as rival
+
+        ctx = SpecContext("point-range-evaluator")
+        x = ctx.real("x")
+        native = rival._load_native_module()
+        with patch.object(native, "build_integer_evaluator", wraps=native.build_integer_evaluator) as compile_machine:
+            evaluator = rival.build_integer_evaluator(
+                ctx.rne(x * ctx.real_val(0.5), frac_bits=0),
+                input_total_bits=4, output_total_bits=4,
+            )
+            self.assertEqual(evaluator.apply_range([(-3, 5)]), RivalEvaluation((True, True), (-2, 2)))
+            self.assertEqual(evaluator.apply_point([1]), RivalEvaluation(True, 0))
+            self.assertEqual(evaluator.apply_point([3]), RivalEvaluation(True, 2))
+            self.assertEqual(evaluator.apply_range([(-1, 1)]), RivalEvaluation((True, True), (0, 0)))
+            compile_machine.assert_called_once()
+
+    def test_integer_range_preserves_exact_bounds_and_precondition(self):
+        from zolotone.rival import build_integer_evaluator
+
+        x = RealVar("x")
+        evaluator = build_integer_evaluator(x * RealLit(2), x >= RealLit(0), input_total_bits=64, output_total_bits=65)
+        result = evaluator.apply_range([(-2, 2)])
+        self.assertEqual(result, RivalEvaluation((False, True), (Fraction(-4), Fraction(4))))
+        large = (1 << 60) + 1
+        self.assertEqual(evaluator.apply_range([(large, large + 1)]).output, (2 * large, 2 * large + 2))
+        self.assertEqual(evaluator.apply_point([-1]), RivalEvaluation(False, -2))
+
+    def test_range_refinement_is_restored_before_point_evaluation(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("range-then-refine")
+        x = ctx.real("x")
+        expression = ctx.rne(x * ctx.real_val(0.5) + ctx.two() ** ctx.real_val(-1000), frac_bits=0)
+        evaluator = build_integer_evaluator(expression, input_total_bits=2, output_total_bits=2)
+        self.assertEqual(evaluator.apply_range([(0, 1)]).output, (0, 1))
+        self.assertEqual(evaluator.apply_point([1]), RivalEvaluation(True, 1))
+
+    def test_integer_range_reports_errors_and_restores_point_evaluation(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("range-errors")
+        x = ctx.real("x")
+        evaluator = build_integer_evaluator(ctx.rne(x ** ctx.real_val(-1), frac_bits=0), input_total_bits=2, output_total_bits=2)
+        self.assertTrue(evaluator.apply_range([(0, 0)]).output_error)
+        self.assertIsNone(evaluator.apply_range([(0, 1)]).output)
+        with self.assertRaisesRegex(ValueError, "reversed"):
+            evaluator.apply_range([(1, 0)])
+        self.assertEqual(evaluator.apply_point([1]), RivalEvaluation(True, 1))
+
+    def test_false_precondition_does_not_hide_output_domain_error(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("false-precondition")
+        machine = build_integer_evaluator(
+            ctx.rne(ctx.zero() ** ctx.real_val(-1), frac_bits=0),
+            ctx.false(), input_total_bits=4, output_total_bits=8,
+        )
+        result = machine.apply_point([0])
+        self.assertFalse(result.precondition)
+        self.assertFalse(result.precondition_error)
+        self.assertTrue(result.output_error)
+        self.assertFalse(result.precondition_total_error)
+        self.assertTrue(result.output_total_error)
+        self.assertEqual(machine._raw_machine.apply_point(["0"])[2:], (False, True, False, True))
+
+    def test_false_precondition_returns_actual_expression_output(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("independent-outputs")
+        x = ctx.real("x")
+        machine = build_integer_evaluator(
+            x * ctx.real_val(3), ctx.false(),
+            input_total_bits=4, output_total_bits=8,
+        )
+        self.assertEqual(machine.apply_point([2]), RivalEvaluation(False, 6))
+        self.assertEqual(machine.apply_point([-2]), RivalEvaluation(False, -6))
+
+    def test_precondition_requires_boolean_expression_and_known_variables(self):
+        from zolotone.rival import machine as rival
+
+        ctx = SpecContext("invalid-precondition")
+        x, y = ctx.real("x"), ctx.real("y")
+        with patch.object(rival, "_load_native_module") as native:
+            for precondition in (True, x):
+                with self.subTest(precondition=precondition), self.assertRaises(TypeError):
+                    rival.build_integer_evaluator(
+                        x, precondition, input_total_bits=4, output_total_bits=8,
+                    )
+            with self.assertRaisesRegex(ValueError, "missing referenced variables"):
+                rival.build_integer_evaluator(
+                    x, y > ctx.zero(), input_total_bits=4, output_total_bits=8,
+                )
+        native.assert_not_called()
+
+    def test_precondition_and_expression_are_evaluated_independently(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("checked-reciprocal")
+        x = ctx.real("x")
+        machine = build_integer_evaluator(
+            ctx.rne(x ** ctx.real_val(-1), frac_bits=2),
+            x.ne(ctx.zero()), input_total_bits=4, output_total_bits=8,
+        )
+        for code, expected in ((1, (True, 4)), (2, (True, 2)), (-2, (True, -2))):
+            with self.subTest(code=code):
+                self.assertEqual(machine.apply_point([code]), RivalEvaluation(*expected))
+        result = machine.apply_point([0])
+        self.assertFalse(result.precondition)
+        self.assertFalse(result.precondition_error)
+        self.assertTrue(result.output_error)
+
+    def test_boolean_output_resolves_without_integer_rounding(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("checked-transcendental")
+        x = ctx.real("x")
+        # Resolving this predicate needs more precision than the initial seed.
+        tiny = ctx.real_val(Fraction(1, 2**200))
+        for mode in (ctx.rne, ctx.rtz, ctx.raz):
+            machine = build_integer_evaluator(
+                mode(x * ctx.real_val(Fraction(1, 2)), frac_bits=0),
+                Sin(x + tiny) > ctx.zero(), input_total_bits=4, output_total_bits=8,
+            )
+            with self.subTest(mode=mode):
+                self.assertEqual(machine.apply_point([0]), RivalEvaluation(True, 0))
+                self.assertEqual(machine.apply_point([-1]), RivalEvaluation(False, -1 if mode == ctx.raz else 0))
+                self.assertEqual(machine.apply_point([3]), RivalEvaluation(True, 2 if mode != ctx.rtz else 1))
+
+    def test_default_precondition_and_exact_large_input(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("checked-large-input")
+        x = ctx.real("x")
+        point = (1 << 60) + 1
+        machine = build_integer_evaluator(x, input_total_bits=64, output_total_bits=64)
+        self.assertEqual(machine.apply_point([point]), RivalEvaluation(True, point))
+        machine = build_integer_evaluator(x, x.eq(ctx.real_val(point)), input_total_bits=64, output_total_bits=64)
+        self.assertEqual(machine.apply_point([point]), RivalEvaluation(True, point))
+        self.assertEqual(machine.apply_point([point - 1]), RivalEvaluation(False, point - 1))
+
+    def test_undefined_outputs_have_independent_error_flags(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("checked-undefined")
+        x = ctx.real("x")
+        reciprocal = x ** ctx.real_val(-1)
+        for expr, precondition, expected in (
+            (reciprocal, None, (False, True)),
+            (x, reciprocal > ctx.zero(), (True, False)),
+            (reciprocal, reciprocal < ctx.zero(), (True, True)),
+        ):
+            machine = build_integer_evaluator(ctx.rne(expr, frac_bits=0), precondition, input_total_bits=4, output_total_bits=8)
+            with self.subTest(expr=expr, precondition=precondition):
+                result = machine.apply_point([0])
+                self.assertEqual((result.precondition_error, result.output_error), expected)
+
+
+class TestRivalResultFits(unittest.TestCase):
+    def setUp(self):
+        self.ctx = SpecContext("rival-result-fit")
+        self.x, self.y = self.ctx.real("x"), self.ctx.real("y")
+
+    def prove(self, expression, dtype, inputs):
+        from zolotone.rival.analysis import rival_prove_result_fits
+        return rival_prove_result_fits(expression, dtype, self.ctx, inputs)
+
+    def test_compiles_once_and_checks_every_point_in_dependent_multivariate_box(self):
+        from zolotone.rival import analysis
+
+        machines = []
+        compile_machine = analysis.build_integer_evaluator
+
+        def track(*args, **kwargs):
+            machine = Mock(wraps=compile_machine(*args, **kwargs))
+            machines.append(machine)
+            return machine
+
+        with patch.object(analysis, "build_integer_evaluator", side_effect=track) as compile_mock:
+            expression = (self.x - self.x) + (self.y - self.y)
+            self.assertTrue(self.prove(expression, UQ(1, 0), {self.x: Q(1, 1), self.y: UQ(1, 0)}))
+        compile_mock.assert_called_once()
+        machine, = machines
+        self.assertEqual(machine.apply_range.call_count, 7)
+        points = [tuple(call_.args[0]) for call_ in machine.apply_point.call_args_list]
+        self.assertCountEqual(points, [(x, y) for x in range(-2, 2) for y in range(2)])
+        for call_ in machine.apply_range.call_args_list:
+            self.assertTrue(any(lower < upper for lower, upper in call_.args[0]))
+
+    def test_wide_identity_is_proved_by_one_enclosure(self):
+        from zolotone.rival import analysis
+
+        machine = Mock(wraps=analysis.build_integer_evaluator(
+            self.x, free_vars=["x"], input_total_bits=128, output_total_bits=128,
+        ))
+        with patch.object(analysis, "build_integer_evaluator", return_value=machine):
+            self.assertTrue(self.prove(self.x, UQ(128, 0), {self.x: UQ(128, 0)}))
+        machine.apply_range.assert_called_once_with(((0, (1 << 128) - 1),))
+        machine.apply_point.assert_not_called()
+
+    def test_exact_signed_and_unsigned_output_limits(self):
+        for dtype, lower, upper in ((UQ(54, 0), 0, (1 << 54) - 1),
+                                    (Q(55, 0), -(1 << 54), (1 << 54) - 1),
+                                    (Q(0, 60), Fraction(-1, 2), Fraction(1, 2) - Fraction(1, 1 << 60))):
+            quantum = Fraction(1, 1 << dtype.frac_bits)
+            for value, fits in ((lower - quantum, False), (lower, True), (upper, True), (upper + quantum, False)):
+                with self.subTest(dtype=dtype, value=value):
+                    self.assertEqual(self.prove(self.ctx.real_val(value), dtype, {}), fits)
+
+    def test_discrete_assumptions_do_not_include_between_code_values(self):
+        self.ctx.assume(self.x.eq(self.ctx.real_val(Fraction(1, 4))))
+        self.assertTrue(self.prove(self.ctx.real_val(100), UQ(1, 0), {self.x: UQ(1, 1)}))
+
+    def test_split_preserves_values_between_adjacent_binary64_numbers(self):
+        target = Fraction(1) + Fraction(1, 1 << 53)
+        self.ctx.assume(self.x.eq(self.ctx.real_val(target)))
+        self.assertFalse(self.prove(self.ctx.two(), UQ(1, 0), {self.x: UQ(2, 54)}))
+
+    def test_relational_assumptions_prove_unsigned_subtraction(self):
+        inputs = {self.x: UQ(3, 1), self.y: UQ(1, 2)}
+        self.assertFalse(self.prove(self.x - self.y, UQ, inputs))
+        self.ctx.assume(self.x >= self.y)
+        self.assertTrue(self.prove(self.x - self.y, UQ, inputs))
+        self.assertTrue(self.prove(self.x - self.y, UQ(3, 2), inputs))
+
+    def test_boolean_input_and_unreachable_undefined_output(self):
+        selected = self.ctx.bool("selected")
+        self.ctx.assume(selected)
+        expression = If(selected, self.x, self.ctx.zero() ** -self.ctx.one())
+        self.assertTrue(self.prove(expression, UQ(2, 1), {selected: Bool(), self.x: UQ(2, 1)}))
+
+    def test_guard_excludes_undefined_point(self):
+        self.ctx.assume(self.x > self.ctx.zero())
+        expression = self.ctx.rne(self.x ** -self.ctx.one(), frac_bits=2)
+        self.assertTrue(self.prove(expression, UQ(1, 2), {self.x: UQ(2, 0)}))
+
+    def test_reachable_domain_errors_cannot_be_proved(self):
+        expression = self.ctx.rne(self.x ** -self.ctx.one(), frac_bits=0)
+        with self.assertRaisesRegex(ZolotoneError, "domain error in result"):
+            self.prove(expression, UQ(1, 0), {self.x: UQ(1, 0)})
+        self.ctx.assume((self.x ** -self.ctx.one()) > self.ctx.zero())
+        with self.assertRaisesRegex(ZolotoneError, "assumptions"):
+            self.prove(self.x, UQ(1, 0), {self.x: UQ(1, 0)})
+
+    def test_rounding_and_output_scale_match_exhaustive_fraction_oracle(self):
+        inputs = {self.x: Q(2, 1), self.y: UQ(1, 1)}
+        for mode in ("rne", "rtz", "raz"):
+            expression = getattr(self.ctx, mode)((self.x - self.y) * self.ctx.real_val(Fraction(3, 4)), frac_bits=1)
+            codes = []
+            for x in range(-4, 4):
+                for y in range(4):
+                    scaled = Fraction(3 * (x - y), 4)
+                    code = (round(scaled) if mode == "rne" else math.trunc(scaled) if mode == "rtz"
+                            else math.ceil(scaled) if scaled >= 0 else math.floor(scaled))
+                    codes.append(code)
+            for dtype in (Q(2, 1), Q(3, 1), Q(3, 2), UQ(3, 1)):
+                lower = -(1 << (dtype.total_bits() - 1)) if isinstance(dtype, Q) else 0
+                upper = (1 << (dtype.total_bits() - isinstance(dtype, Q))) - 1
+                fits = all(lower <= Fraction(code, 2) * (1 << dtype.frac_bits) <= upper for code in codes)
+                with self.subTest(mode=mode, dtype=dtype):
+                    self.assertEqual(self.prove(expression, dtype, inputs), fits)
+
+    def test_unresolved_ranges_fall_back_to_point_evaluation(self):
+        from zolotone.rival import analysis
+
+        real_compile = analysis.build_integer_evaluator
+        machines = []
+
+        def track(*args, **kwargs):
+            machine = Mock(wraps=real_compile(*args, **kwargs))
+            machine.apply_range.return_value = RivalEvaluation()
+            machines.append(machine)
+            return machine
+
+        with patch.object(analysis, "build_integer_evaluator", side_effect=track):
+            self.assertTrue(self.prove(self.x, UQ(2, 0), {self.x: UQ(2, 0)}))
+        self.assertEqual(machines[0].apply_point.call_count, 4)
+
+    def test_point_failure_is_not_success_or_overflow(self):
+        from zolotone.rival import analysis
+
+        for result in (RivalEvaluation(True, None), RivalEvaluation(None, 0)):
+            machine = Mock()
+            machine.apply_point.return_value = result
+            with self.subTest(result=result), patch.object(analysis, "build_integer_evaluator", return_value=machine):
+                with self.assertRaises(ZolotoneError):
+                    self.prove(self.ctx.one(), UQ(1, 0), {})
+        machine.apply_point.side_effect = ValueError("unresolved point")
+        with patch.object(analysis, "build_integer_evaluator", return_value=machine):
+            with self.assertRaisesRegex(ZolotoneError, "unresolved point"):
+                self.prove(self.ctx.one(), UQ(1, 0), {})
+
+    def test_point_errors_show_named_decoded_input_values(self):
+        from zolotone.rival import analysis
+
+        selected = self.ctx.bool("selected")
+        expression = If(selected, self.x, self.ctx.zero())
+        inputs = {self.y: UQ(1, 0), self.x: Q(2, 1), selected: Bool()}
+        failures = (
+            RivalEvaluation(True, None, output_error=True),
+            RivalEvaluation(None, None, precondition_error=True),
+            ValueError("unresolved point"),
+        )
+        for failure in failures:
+            machine = Mock()
+            machine.apply_range.return_value = RivalEvaluation()
+            if isinstance(failure, Exception):
+                machine.apply_point.side_effect = failure
+            else:
+                machine.apply_point.return_value = failure
+            with self.subTest(failure=failure), patch.object(analysis, "build_integer_evaluator", return_value=machine):
+                with self.assertRaisesRegex(ZolotoneError, r"input point \[x=3/2, selected=True\]"):
+                    self.prove(expression, Q(2, 1), inputs)
+
+    def test_unknown_real_input_dtype_is_reported(self):
+        for dtype in (UQ(2, 0), Q, Bool()):
+            with self.subTest(dtype=dtype), self.assertRaisesRegex(ZolotoneError, "needs input dtypes"):
+                self.prove(self.x, dtype, {})
+
+    def test_unknown_assumption_input_dtype_is_reported_before_early_return(self):
+        self.ctx.assume(self.y >= self.ctx.zero())
+        with self.assertRaisesRegex(ZolotoneError, "needs input dtypes for: y"):
+            self.prove(self.x, Q, {self.x: UQ(2, 0)})
+
+    def test_materialized_input_does_not_cover_separate_variable_occurrences(self):
+        source = self.x + self.y
+        with self.assertRaisesRegex(ZolotoneError, "needs input dtypes for: x"):
+            self.prove(source + self.x, UQ(3, 0), {source: UQ(2, 0)})
+
+    def test_fit_proof_uses_no_solver(self):
+        from zolotone.autogen import spec_validation
+
+        self.ctx.assume(self.x >= self.y)
+        with patch.object(solver_engine, "check_equivalence", side_effect=AssertionError("solver called")):
+            self.assertTrue(spec_validation._prove_result_fits(
+                self.x - self.y, UQ(2, 0), self.ctx, {self.x: UQ(2, 0), self.y: UQ(2, 0)},
+            ))
+
+
 class TestRivalTranslation(unittest.TestCase):
     def test_nearest_even_expression_rounds_points_and_ties(self):
         ctx = SpecContext("rival-nearest-even")
         x = ctx.real("x")
         for frac_bits in (0, 2, 60):
             scale = 1 << frac_bits
-            machine = build_range_machine(ctx.rne(x, frac_bits), ["x"])
+            machine = build_machine([ctx.rne(x, frac_bits)], ["x"])
             values = [numerator / 8 for numerator in range(-25, 26)]
             for lower in range(-3, 3):
                 tie = lower + 0.5
@@ -8574,7 +9048,7 @@ class TestRivalTranslation(unittest.TestCase):
         x = ctx.real("x")
         for frac_bits in (0, 2):
             scale = 1 << frac_bits
-            machine = build_range_machine(ctx.rne(x, frac_bits), ["x"])
+            machine = build_machine([ctx.rne(x, frac_bits)], ["x"])
             for lower, upper in (
                 (1.125, 1.375), (1.25, 1.75), (1.5, 2.5),
                 (-1.375, -1.125), (-1.75, -1.25), (-2.5, -1.5),
@@ -8644,15 +9118,16 @@ class TestRivalTranslation(unittest.TestCase):
 
         self.assertEqual(collect_free_vars(exprs), ["a", "flag", "z"])
 
-    def test_build_machine_combines_exprs_into_single_asserted_and(self):
+    def test_analysis_compiles_one_asserted_conjunction(self):
+        from zolotone.rival.analysis import _build_predicate_machine
         x = RealVar("x")
         y = RealVar("y")
         raw_machine = object()
         native = Mock()
         native.build_machine.return_value = raw_machine
 
-        with patch("zolotone.rival._load_native_module", return_value=native):
-            machine = build_machine(
+        with patch("zolotone.rival.machine._load_native_module", return_value=native):
+            machine = _build_predicate_machine(
                 [
                     x >= RealLit(0),
                     y <= RealLit(1),
@@ -8692,14 +9167,29 @@ class TestRivalTranslation(unittest.TestCase):
             ["x", "y"],
         )
 
-    def test_build_range_machine_keeps_numeric_expression(self):
+
+    def test_build_machine_preserves_expression_outputs(self):
+        x = RealVar("x")
+        y = RealVar("y")
+        expressions = [x >= RealLit(0), y <= RealLit(1), x + y]
+        raw_machine = object()
+        native = Mock()
+        native.build_machine.return_value = raw_machine
+        with patch("zolotone.rival.machine._load_native_module", return_value=native):
+            machine = build_machine(expressions, ["x", "y"])
+        self.assertIs(machine._raw_machine, raw_machine)
+        native.build_machine.assert_called_once_with(
+            [to_rival_ir(expr) for expr in expressions], ["x", "y"]
+        )
+
+    def test_build_machine_keeps_numeric_expression(self):
         x = RealVar("x")
         raw_machine = object()
         native = Mock()
         native.build_machine.return_value = raw_machine
 
-        with patch("zolotone.rival._load_native_module", return_value=native):
-            machine = build_range_machine(x + RealLit(1), ["x"])
+        with patch("zolotone.rival.machine._load_native_module", return_value=native):
+            machine = build_machine([x + RealLit(1)], ["x"])
 
         self.assertIs(machine._raw_machine, raw_machine)
         native.build_machine.assert_called_once_with(
@@ -8757,13 +9247,13 @@ class TestRivalTranslation(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.rival.get_rival_rects",
+                "zolotone.rival.analysis.get_rival_rects",
                 return_value=[
                     [(0.0, 0.0), (0.0, 0.0)],
                     [(1.0, 1.0), (1.0, 1.0)],
                 ],
             ),
-            patch("zolotone.rival._build_domain_machine", side_effect=build),
+            patch("zolotone.rival.analysis._build_domain_machine", side_effect=build),
         ):
             findings = rival_domain_errors(
                 [x_reciprocal, y_reciprocal, x_reciprocal + y_reciprocal],
@@ -8787,53 +9277,8 @@ class TestRivalTranslation(unittest.TestCase):
             for finding in findings
         ))
 
-    def test_rival_range_analysis_unions_rectangle_outputs(self):
-        ctx = SpecContext("rival-output-range")
-        x = ctx.real("x")
-        machine = Mock()
-        machine.apply_range.side_effect = [
-            (-2.0, 1.0),
-            (0.5, 4.0),
-        ]
 
-        with (
-            patch(
-                "zolotone.rival.get_rival_rects",
-                return_value=[[(0.0, 1.0)], [(2.0, 3.0)]],
-            ),
-            patch("zolotone.rival.build_range_machine", return_value=machine),
-        ):
-            bounds = rival_range_analysis(x + ctx.one(), ctx)
 
-        self.assertEqual(bounds, (-2.0, 4.0))
-
-    def test_rival_range_analysis_treats_unsamplable_rect_as_unavailable(self):
-        ctx = SpecContext("rival-unsamplable-range")
-        x = ctx.real("x")
-        machine = Mock()
-        machine.apply_range.return_value = (math.nan, math.nan)
-
-        with (
-            patch(
-                "zolotone.rival.get_rival_rects",
-                return_value=[[(0.0, 0.0)]],
-            ),
-            patch("zolotone.rival.build_range_machine", return_value=machine),
-        ):
-            bounds = rival_range_analysis(x ** ctx.real_val(-1), ctx)
-
-        self.assertIsNone(bounds)
-
-    def test_rival_range_analysis_returns_numeric_output_interval(self):
-        ctx = SpecContext("rival-native-output-range")
-        x = ctx.real("x")
-        y = ctx.real("y")
-        ctx.assume(x >= ctx.zero())
-        ctx.assume(x <= ctx.real_val(3))
-        ctx.assume(y >= ctx.real_val(-4))
-        ctx.assume(y <= ctx.real_val(3))
-
-        self.assertEqual(rival_range_analysis(x + y, ctx), (-4.0, 6.0))
 
     def test_rival_rects_default_to_unbounded(self):
         ctx = SpecContext("rival-rects-default")
@@ -8899,7 +9344,7 @@ class TestRivalTranslation(unittest.TestCase):
             conjunction = conjunction & bound
         ctx.assume(conjunction)
 
-        with patch("zolotone.rival.variables", wraps=variables) as collect:
+        with patch("zolotone.rival.analysis.variables", wraps=variables) as collect:
             rects = get_rival_rects(
                 ctx.assumes,
                 [variable.name for variable in variables_],
@@ -9187,7 +9632,7 @@ class TestRivalTranslation(unittest.TestCase):
                 )
             return machine
 
-        with patch("zolotone.rival.build_machine", side_effect=build):
+        with patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build):
             status = rival_feasibility_check(ctx, max_depth=1, checks=True)
 
         self.assertEqual(status, "not feasible")
@@ -9239,8 +9684,8 @@ class TestRivalTranslation(unittest.TestCase):
             return machine
 
         with (
-            patch("zolotone.rival.get_rival_rects", return_value=[clean_rect, bad_rect]),
-            patch("zolotone.rival.build_machine", side_effect=build),
+            patch("zolotone.rival.analysis.get_rival_rects", return_value=[clean_rect, bad_rect]),
+            patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build),
         ):
             status = rival_feasibility_check(ctx, max_depth=1, checks=True)
 
@@ -9275,7 +9720,7 @@ class TestRivalTranslation(unittest.TestCase):
             machine.apply_with_hints.side_effect = apply
             return machine
 
-        with patch("zolotone.rival.build_machine", side_effect=build):
+        with patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build):
             trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.assumes, [bounded])
@@ -9338,7 +9783,7 @@ class TestRivalTranslation(unittest.TestCase):
             )
             return machine
 
-        with patch("zolotone.rival.build_machine", side_effect=build):
+        with patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build):
             trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.assumes, [assume])
@@ -9442,7 +9887,7 @@ class TestRivalTranslation(unittest.TestCase):
                 machine.apply_with_hints.side_effect = apply
             return machine
 
-        with patch("zolotone.rival.build_machine", side_effect=build):
+        with patch("zolotone.rival.analysis._build_predicate_machine", side_effect=build):
             trimmed = rival_trim_context(ctx)
 
         self.assertEqual(trimmed.assumes, [bit_domain])
@@ -10454,6 +10899,34 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
 
 class TestSpecificationDTypeContracts(unittest.TestCase):
+    def test_autogenerate_abs_extends_initial_signed_input(self):
+        def spec(x: Q(2, 3), ctx) -> Q(3, 3):
+            return abs(x)
+
+        generated = Autogenerate("extended_abs", spec)
+        self.assertEqual(generated.inner_tree.name, "q_abs")
+        self.assertEqual(generated.inner_tree.args[0].name, "q_sign_extend")
+        for code in range(1 << 5):
+            value = Q(2, 3).from_bits(code)
+            generated.args[0].load_value(value)
+            self.assertEqual(generated.evaluate().to_python(), abs(value.to_python()))
+
+    def test_initial_signed_extension_is_bounded_and_optional(self):
+        from zolotone.autogen.spec_lowering import _LoweringSearch
+
+        ctx = SpecContext("bounded-initial-extension")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.real_val(-1))
+        source = Var("x", Q(2, 3))
+        search = _LoweringSearch(abs(x), {x: source}, Q(2, 3), ctx)
+        self.assertEqual(set(search.candidates[x]), {Q(2, 3), Q(3, 3)})
+        self.assertEqual(search.candidates[x][Q(3, 3)].cost, 1)
+        result = search.run()
+        self.assertEqual(result.name, "q_abs")
+        self.assertIs(result.args[0], source)
+        self.assertEqual(search.result.cost, 1)
+        self.assertNotIn(Q(4, 3), search.candidates[x])
+
     def test_autogenerate_lowers_float_literals_exactly(self):
         from zolotone.autogen.spec_lowering import _exact_fixed_point_value
 
@@ -10772,10 +11245,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             result = search.run()
 
         self.assertTrue(result.name.startswith("LUT_rne_"))
-        self.assertEqual(search.result.cost, 100)
+        self.assertEqual(search.result.cost, 104)
         self.assertIs(result.args[0], source)
-        self.assertEqual(set(search.candidates[x]), {UQ(2, 0)})
-        self.assertEqual(set(search.candidates[x + ctx.one()]), {UQ(3, 0)})
+        self.assertEqual(set(search.candidates[x]), {UQ(2, 0), UQ(3, 0)})
+        self.assertEqual(set(search.candidates[x + ctx.one()]), {UQ(3, 0), UQ(4, 0)})
         for value in range(4):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(result.evaluate().to_python(), (value + 1) ** 2)
@@ -10793,7 +11266,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         ctx = SpecContext("bounded-extension")
         x = ctx.real("x")
-        for input_bits, expected_cost in ((2, 100), (4, 1)):
+        for input_bits, expected_cost in ((2, 104), (4, 1)):
             with (
                 self.subTest(input_bits=input_bits),
                 patch(
@@ -10809,11 +11282,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 result = search.run()
                 self.assertEqual(search.result.cost, expected_cost)
                 self.assertGreater(result.dtype.total_bits(), input_bits)
-                self.assertEqual(set(search.candidates[x]), {source.dtype})
+                self.assertEqual(set(search.candidates[x]), {source.dtype, UQ(input_bits + 1, 0)})
                 source.load_value(source.dtype.from_bits(3))
                 self.assertEqual(result.evaluate().to_python(), 9)
 
-    def test_lowering_extends_final_result_directly_without_operand_variants(self):
+    def test_lowering_extends_final_result_directly(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _uq_fraction_extend, _uq_zero_extend
 
@@ -10833,7 +11306,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     self.assertEqual(result.dtype, dtype(40, 2))
                     self.assertIs(result.args[0], source)
                     self.assertEqual(search.result.cost, 1)
-                    self.assertEqual(set(search.candidates[x]), {source.dtype})
+                    expected_formats = {source.dtype, dtype(3, 0)}
+                    self.assertEqual(set(search.candidates[x]), expected_formats)
                     for code in range(4):
                         source.load_value(source.dtype.from_bits(code))
                         self.assertEqual(result.evaluate().to_python(), source.evaluate().to_python())
@@ -10852,7 +11326,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 (squared + y) + squared, {x: source, y: other}, UQ, ctx
             )
             result = search.run()
-        self.assertEqual(search.result.cost, 102)
+        self.assertEqual(search.result.cost, 106)
         self.assertIs(result.args[0].args[0], result.args[1])
         source.load_value(UQ(2, 0).from_bits(3))
         other.load_value(UQ(2, 0).from_bits(1))
@@ -10869,7 +11343,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     x, {x: Var("x", UQ(2, 2))}, UQ(3, 1), ctx
                 )
 
-    def test_conditional_aligns_branches_without_searching_extensions(self):
+    def test_conditional_aligns_branches_with_initial_extensions(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _if_then_else
 
@@ -10885,8 +11359,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                         dtype(5, 2), ctx,
                     )
                     result = search.run()
-                self.assertEqual(set(search.candidates[x]), {left.dtype})
-                self.assertEqual(set(search.candidates[y]), {right.dtype})
+                left_formats = {left.dtype, dtype(3, 2)}
+                right_formats = {right.dtype, dtype(4, 0)}
+                self.assertEqual(set(search.candidates[x]), left_formats)
+                self.assertEqual(set(search.candidates[y]), right_formats)
                 left.load_value(left.dtype.from_bits(15))
                 right.load_value(right.dtype.from_bits(7))
                 for choice, expected in ((1, left), (0, right)):
@@ -10984,7 +11460,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(result.name, "uq_resize")
         self.assertEqual(result.args[0].dtype, UQ(4, 0))
         self.assertTrue(result.args[0].name.startswith("LUT_rne_"))
-        self.assertEqual(search.result.cost, 101)
+        self.assertEqual(search.result.cost, 105)
         source.load_value(UQ(2, 0).from_bits(3))
         self.assertEqual(result.evaluate().to_python(), 9)
 
@@ -11340,7 +11816,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         generated = Autogenerate("partly-unreachable-disjunction", spec)
         self.assertEqual(generated.dtype, UQ(2, 0))
 
-    def test_autogenerate_uses_z3_when_reachability_is_unknown(self):
+    def test_autogenerate_resolves_discrete_reachability(self):
         def spec(x: UQ(2, 0), y: UQ(2, 0), ctx) -> Bool:
             ctx.assume((x * (y + ctx.one())).ne((x * y) + x))
             return x.eq(y)
@@ -11417,61 +11893,18 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertLess(result_position, check_position)
         self.assertLess(check_position, return_position)
 
-    def test_domain_warning_reports_innermost_result_computation(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
 
-        ctx = SpecContext("domain-result")
-        x = ctx.real("x")
-        reciprocal = x ** ctx.real_val(-1)
-
-        with self.assertWarnsRegex(
-            UserWarning,
-            r"Specification 'domain-result'.*result: \(real\(x\) \*\* -1\)",
-        ):
-            _warn_about_domain_errors(
-                _spec_state(reciprocal + ctx.one(), (x,), ctx)
-            )
-
-    def test_domain_warning_prunes_parent_error_expressions(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
-
-        ctx = SpecContext("domain-pruned-parents")
-        x = ctx.real("x")
-        y = ctx.real("y")
-        ctx.assume((x >= ctx.real_val(-8)) & (x <= ctx.real_val(7)))
-        ctx.assume((y >= ctx.zero()) & (y <= ctx.real_val(15)))
-        x_reciprocal = x ** ctx.real_val(-1)
-        y_reciprocal = y ** ctx.real_val(-1)
-        result = (x_reciprocal + ctx.one()) + y_reciprocal
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _warn_about_domain_errors(_spec_state(result, (x, y), ctx))
-
-        messages = [str(warning.message) for warning in caught]
-        self.assertEqual(len(messages), 2)
-        self.assertIn(str(x_reciprocal), messages[0])
-        self.assertIn(str(y_reciprocal), messages[1])
-        self.assertNotIn(str(x_reciprocal + ctx.one()), "\n".join(messages))
-        self.assertNotIn(str(result), "\n".join(messages))
 
     def test_spec_validation_runs_domain_error_check(self):
         from zolotone.autogen.autogen import get_spec
-        from zolotone.autogen.spec_validation import (
-            add_input_ranges,
-            _warn_about_domain_errors,
-        )
+        from zolotone.autogen.spec_validation import spec_domain_analysis
 
         def spec(x: UQ(2, 0), ctx) -> Bool:
             return (x ** ctx.real_val(-1)) > ctx.zero()
 
-        current_spec = add_input_ranges(get_spec("domain-pipeline", spec))
+        with self.assertRaisesRegex(ZolotoneError, "Domain error in output"):
+            spec_domain_analysis(get_spec("domain-pipeline", spec))
 
-        with self.assertWarnsRegex(
-            UserWarning,
-            r"Specification .*domain-pipeline.*result: .*\*\* -1",
-        ):
-            _warn_about_domain_errors(current_spec)
 
     def test_literal_comparison_does_not_need_lowering(self):
         from zolotone.autogen.autogen import get_spec
@@ -11790,26 +12223,17 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(ctx.checks, [x <= ctx.zero()])
         self.assertEqual(ctx.requirements, [x >= ctx.real_val(0.5)])
 
-    def test_tightened_inclusive_bound_prevents_reciprocal_domain_warning(self):
+    def test_discrete_bound_excludes_reciprocal_domain_error(self):
         from zolotone.autogen.autogen import get_spec
-        from zolotone.autogen.spec_lowering import rewrite_strict_conditions
-        from zolotone.autogen.spec_validation import add_input_ranges, _warn_about_domain_errors
+        from zolotone.autogen.spec_validation import spec_domain_analysis
 
         def spec(x: UQ(1, 0), ctx) -> UQ(3, 0):
             ctx.assume(x >= ctx.real_val(0.5))
             return (x - ctx.real_val(0.75)) ** ctx.real_val(-1)
 
-        source_spec = add_input_ranges(get_spec("tight-reciprocal-domain", spec))
-        with self.assertWarnsRegex(UserWarning, "domain error"):
-            _warn_about_domain_errors(source_spec)
+        analyzed = spec_domain_analysis(get_spec("tight-reciprocal-domain", spec))
+        self.assertEqual(analyzed.output_bounds, (4, 4))
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _warn_about_domain_errors(rewrite_strict_conditions(source_spec))
-
-        self.assertFalse(
-            any("domain error" in str(warning.message) for warning in caught)
-        )
 
     def test_autogenerate_keeps_source_case_coverage_without_lattice_gap(self):
         def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
@@ -11823,66 +12247,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertIsInstance(generated, ast_nodes.Node)
 
-    def test_domain_warning_uses_all_assumptions_for_shared_rects(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
 
-        ctx = SpecContext("domain-assumption")
-        x = ctx.real("x")
-        reciprocal_positive = (x ** ctx.real_val(-1)) > ctx.zero()
-        ctx.assume(reciprocal_positive)
-        with self.assertWarnsRegex(
-            UserWarning,
-            r"assumption 1: .*\*\* -1.*x in \[-inf, inf\]",
-        ):
-            _warn_about_domain_errors(
-                _spec_state(ctx.one(), (x,), ctx)
-            )
 
-        ctx.assume(x >= ctx.one())
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _warn_about_domain_errors(
-                _spec_state(ctx.one(), (x,), ctx)
-            )
-        self.assertEqual(caught, [])
-
-    def test_domain_warning_covers_checks_and_requirements(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
-
-        for collection, expected_location in (
-            ("checks", "check 1"),
-            ("requirements", "requirement 1"),
-        ):
-            with self.subTest(collection=collection):
-                ctx = SpecContext(f"domain-{collection}")
-                x = ctx.real("x")
-                expression = (x ** ctx.real_val(-1)) > ctx.zero()
-                getattr(ctx, collection).append(expression)
-
-                with self.assertWarnsRegex(UserWarning, expected_location):
-                    _warn_about_domain_errors(
-                        _spec_state(ctx.one(), (x,), ctx)
-                    )
-
-    def test_domain_warning_evaluates_each_if_branch_node(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
-
-        ctx = SpecContext("domain-dead-branch")
-        x = ctx.real("x")
-        result = If(
-            x.eq(ctx.zero()),
-            ctx.one(),
-            x ** ctx.real_val(-1),
-        )
-
-        ctx.assume(x.eq(ctx.zero()))
-        with self.assertWarnsRegex(
-            UserWarning,
-            r"result: \(real\(x\) \*\* -1\); ranges: x in \[0\.0, 0\.0\]",
-        ):
-            _warn_about_domain_errors(
-                _spec_state(result, (x,), ctx)
-            )
 
     def test_autogenerate_prefers_depth_zero_identity(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
@@ -12341,22 +12707,18 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                         Autogenerate("unsafe-msb-truncation", spec)
                     lower.assert_not_called()
 
-    def test_output_optimization_propagates_range_analysis_failure(self):
+    def test_output_optimization_reuses_domain_analysis_bounds(self):
         def spec(x: UQ(2, 0), ctx) -> UQ(4, 0):
-            del ctx
             return x
 
-        with (
-            patch(
-                "zolotone.autogen.spec_validation.rival_range_analysis",
-                return_value=None,
-            ),
-            self.assertRaisesRegex(
-                ZolotoneError,
-                "Could not obtain output range",
-            ),
-        ):
-            Autogenerate("generated_without_range", spec)
+        with patch(
+            "zolotone.autogen.spec_validation.analyze_typed_domain",
+            wraps=analyze_typed_domain,
+        ) as analyze:
+            generated = Autogenerate("generated_cached_range", spec)
+        analyze.assert_called_once()
+        self.assertEqual(generated.dtype, UQ(4, 0))
+
 
     def test_infeasible_signed_output_suggests_unsigned_format(self):
         def spec(x: UQ(2, 0), ctx) -> Q(2, 0):
@@ -12456,7 +12818,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.autogen.spec_validation.rival_range_analysis",
+                "zolotone.autogen.spec_validation.analyze_typed_domain",
                 return_value=(1.0, 4.0),
             ),
             self.assertRaisesRegex(
@@ -12487,23 +12849,16 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ctx = SpecContext("missing-range-analysis")
         spec_ast = ctx.real("x")
 
-        for output_range in (None, (-math.inf, math.inf)):
-            with (
-                self.subTest(output_range=output_range),
-                patch(
-                    "zolotone.autogen.spec_validation.rival_range_analysis",
-                    return_value=output_range,
-                ),
-                self.assertRaisesRegex(
-                    ZolotoneError,
-                    "Could not obtain.*output range",
-                ),
-            ):
-                _output_format_suggestion_with_range_analysis(
-                    spec_ast,
-                    UQ(2, 0),
-                    ctx,
-                )
+        with (
+            patch(
+                "zolotone.autogen.spec_validation.analyze_typed_domain",
+                side_effect=ZolotoneError("Unresolved output"),
+            ),
+            self.assertRaisesRegex(ZolotoneError, "Unresolved output"),
+        ):
+            _output_format_suggestion_with_range_analysis(
+                spec_ast, UQ(2, 0), ctx, input_dtypes={spec_ast: UQ(2, 0)},
+            )
 
     def test_range_analysis_suggestion_matches_solver_search(self):
         from zolotone.autogen.spec_validation import (
@@ -12521,12 +12876,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         range_suggestion = _output_format_suggestion_with_range_analysis(
             spec_ast,
             return_annotation,
-            ctx,
+            ctx, input_dtypes={x: UQ(2, 0)},
         )
         search_suggestion = _output_format_suggestion_with_search(
             spec_ast,
             range_suggestion,
             ctx,
+            {x: UQ(2, 0)},
         )
 
         self.assertEqual(range_suggestion, search_suggestion)
@@ -12537,6 +12893,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         from zolotone.autogen.spec_validation import (
             _derive_output_guards,
             add_input_ranges,
+            spec_domain_analysis,
         )
 
         def spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
@@ -12544,13 +12901,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x + ctx.one()
 
         current_spec = add_input_ranges(get_spec("derived-output-range", spec))
+        current_spec = spec_domain_analysis(current_spec)
         spec_ast = current_spec.spec_ast
         ctx = current_spec.spec_ctx
 
         with (
             patch(
-                "zolotone.autogen.spec_validation.rival_range_analysis",
-                return_value=(1.0, 8.0),
+                "zolotone.autogen.spec_validation.analyze_typed_domain",
+                side_effect=AssertionError("cached range was recomputed"),
             ) as range_analysis,
         ):
             output_guards = _derive_output_guards(current_spec)
@@ -12561,7 +12919,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         )
         self.assertEqual(output_guards, (expected_check,))
         self.assertEqual(current_spec.spec_ctx.checks, [])
-        range_analysis.assert_any_call(spec_ast, ctx)
+        range_analysis.assert_not_called()
 
     def test_derive_output_guards_adds_boolean_exhaustiveness_check(self):
         from zolotone.autogen.spec_validation import _derive_output_guards
@@ -12571,7 +12929,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 ctx = SpecContext("derived-boolean-output")
                 result = ctx.bool("result")
                 with patch(
-                    "zolotone.autogen.spec_validation.rival_range_analysis"
+                    "zolotone.autogen.spec_validation.analyze_typed_domain"
                 ) as range_analysis:
                     output_guards = _derive_output_guards(
                         _spec_state(
@@ -12596,13 +12954,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ctx.assume(x.eq(ctx.one()))
 
         with patch(
-            "zolotone.autogen.spec_validation.rival_range_analysis",
+            "zolotone.autogen.spec_validation.analyze_typed_domain",
             return_value=(-4.0, 7.0),
         ):
             suggestion = _output_format_suggestion(
                 x,
                 UQ(4, 0),
                 ctx,
+                {x: UQ(4, 0)},
             )
 
         self.assertEqual(suggestion, UQ(1, 0))
@@ -12613,7 +12972,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.autogen.spec_validation.rival_range_analysis",
+                "zolotone.autogen.spec_validation.analyze_typed_domain",
                 return_value=(-0.5, -0.5),
             ),
             self.assertRaisesRegex(InfeasibleError, r"try Q\(0, 1\)"),
@@ -12638,8 +12997,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         generated = Autogenerate("generated_assumed_subtraction", spec)
 
-        self.assertEqual(generated.inner_tree.name, "uq_sub")
-        self.assertEqual(generated.dtype, UQ(4, 0))
+        self.assertEqual(generated.dtype, UQ(3, 0))
+        for x in range(8):
+            for y in range(2):
+                if x >= y:
+                    generated.inner_args[0].load_value(UQ(3, 0).from_bits(x))
+                    generated.inner_args[1].load_value(UQ(1, 0).from_bits(y))
+                    self.assertEqual(generated.inner_tree.evaluate().to_python(), x - y)
 
     def test_autogenerate_rejects_unsigned_intermediate_with_negative_range(self):
         def result_spec(x: UQ(4, 0), ctx) -> Q:
@@ -12656,7 +13020,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             assumption_spec,
         )
 
-        self.assertEqual(generated_result.inner_tree.name, "q_sub")
+        self.assertIsInstance(generated_result.dtype, Q)
+        for x in range(16):
+            generated_result.inner_args[0].load_value(UQ(4, 0).from_bits(x))
+            self.assertEqual(generated_result.inner_tree.evaluate().to_python(), x - 1)
         lowered_assumption = generated_assumption.inner_assumes[-1]
         self.assertEqual(lowered_assumption.name, "q_le")
         self.assertEqual(lowered_assumption.args[0].name, "q_sub")
@@ -13905,7 +14272,185 @@ class TestSignSpecs(unittest.TestCase):
                 self.assertEqual(report["status"], "unsat", report)
 
 
+class TestReciprocalDomainScenarios(unittest.TestCase):
+    def setUp(self):
+        self.ctx = SpecContext("reciprocal-domain-scenarios")
+        self.x = self.ctx.real("x")
+        self.reciprocal = self.x ** self.ctx.real_val(-1)
+        self.input_dtype = Q(3, 0)
+        self.output_dtype = Q(3, 2)
+
+    def evaluator(self, expression, assumptions):
+        from zolotone.rival import build_integer_evaluator
+
+        precondition = self.ctx.true()
+        for assumption in assumptions:
+            precondition = precondition & assumption
+        return build_integer_evaluator(
+            self.ctx.rne(expression, frac_bits=2), precondition,
+            input_total_bits=self.input_dtype.total_bits(),
+            output_total_bits=self.output_dtype.total_bits(),
+        )
+
+    def primitive(self, expression, assumptions):
+        from zolotone.autogen.missing import _build_missing_primitive
+
+        source = Var("x", self.input_dtype)
+        node = _build_missing_primitive(
+            self.ctx.rne(expression, frac_bits=2), self.x, source,
+            self.ctx.copy(assumes=list(assumptions)), output_dtype=self.output_dtype, input_dtypes={self.x: source.dtype},
+        )
+        return source, node
+
+    def test_scenario_1_guard_avoids_domain_error(self):
+        """assume x > 0; assume 1/x > 0; return 1/x."""
+        from zolotone.autogen.autogen import get_spec
+
+        guard = self.x > self.ctx.zero()
+        positive_reciprocal = self.reciprocal > self.ctx.zero()
+        for reverse in (False, True):
+            for combined in (False, True):
+                with self.subTest(reverse=reverse, combined=combined):
+                    assumptions = [guard, positive_reciprocal]
+                    if reverse:
+                        assumptions.reverse()
+                    if combined:
+                        assumptions = [assumptions[0] & assumptions[1]]
+                    machine = self.evaluator(self.reciprocal, assumptions)
+                    for point in range(-4, 4):
+                        with self.subTest(point=point):
+                            result = machine.apply_point([point])
+                            self.assertEqual(result.precondition, point > 0)
+                            self.assertFalse(result.precondition_error)
+                            # The independent output can error at a rejected point.
+                            self.assertEqual(result.output_error, point == 0)
+                            if point > 0:
+                                self.assertEqual(result.output, round(Fraction(4, point)))
+
+                    source, node = self.primitive(self.reciprocal, assumptions)
+                    for point in (1, 2, 3):
+                        source.load_value(self.input_dtype.from_bits(point))
+                        self.assertEqual(node.evaluate().raw, round(Fraction(4, point)))
+                    generated = get_spec(node.name, node.spec)
+                    env = {}
+                    solver = z3.Solver()
+                    solver.add(*(assumption.to_z3(env) for assumption in generated.spec_ctx.assumes))
+                    solver.add(generated.spec_inputs[0].to_z3(env) == 0)
+                    self.assertEqual(solver.check(), z3.unsat)
+
+    def test_scenario_2_unguarded_output_has_domain_error(self):
+        """return 1/x: zero is reachable, but its output is undefined."""
+        machine = self.evaluator(self.reciprocal, [])
+        for point in range(-4, 4):
+            with self.subTest(point=point):
+                result = machine.apply_point([point])
+                self.assertTrue(result.precondition)
+                self.assertFalse(result.precondition_error)
+                self.assertEqual(result.output_error, point == 0)
+                if point != 0:
+                    self.assertEqual(result.output, round(Fraction(4, point)))
+        with self.assertRaisesRegex(
+            ZolotoneError, "input code 0: domain error in output at reachable input"
+        ):
+            self.primitive(self.reciprocal, [])
+
+    def test_scenario_3_contradictory_assumptions_are_infeasible(self):
+        """assume x > 0; assume 1/x < 0; return 1/x."""
+        guard = self.x > self.ctx.zero()
+        negative_reciprocal = self.reciprocal < self.ctx.zero()
+        for assumptions in ([guard, negative_reciprocal], [negative_reciprocal, guard]):
+            with self.subTest(assumptions=assumptions):
+                machine = self.evaluator(self.reciprocal, assumptions)
+                for point in range(-4, 4):
+                    with self.subTest(point=point):
+                        result = machine.apply_point([point])
+                        self.assertFalse(result.precondition)
+                        self.assertFalse(result.precondition_error)
+                        self.assertEqual(result.output_error, point == 0)
+                with self.assertRaisesRegex(InfeasibleError, "unreachable|no reachable input codes"):
+                    self.primitive(self.reciprocal, assumptions)
+
+    def test_scenario_4_assumption_has_domain_error(self):
+        """assume 1/x > 0; return x: an assumption is undefined at zero."""
+        assumptions = [self.reciprocal > self.ctx.zero()]
+        machine = self.evaluator(self.x, assumptions)
+        for point in range(-4, 4):
+            with self.subTest(point=point):
+                result = machine.apply_point([point])
+                self.assertEqual(result.precondition_error, point == 0)
+                self.assertFalse(result.output_error)
+                self.assertEqual(result.output, 4 * point)
+                # The Boolean value is meaningful only without its error flag.
+                if point != 0:
+                    self.assertEqual(result.precondition, point > 0)
+        with self.assertRaisesRegex(
+            ZolotoneError, r"Domain error in assumptions.*x=0"
+        ):
+            self.primitive(self.x, assumptions)
+
+
+class TestRivalEvaluatorPreconditions(unittest.TestCase):
+    def test_undefined_false_value_is_not_a_rejection(self):
+        from zolotone.rival import build_integer_evaluator
+
+        ctx = SpecContext("undefined-evaluator")
+        x = ctx.real("x")
+        condition = (x ** ctx.real_val(-1)) < ctx.zero()
+        for precondition in (condition, ctx.true() & condition, ctx.false() | condition):
+            machine = build_integer_evaluator(
+                x, precondition, input_total_bits=4, output_total_bits=8,
+            )
+            with self.subTest(precondition=precondition):
+                result = machine.apply_point([0])
+                self.assertTrue(result.precondition_error)
+                self.assertFalse(result.output_error)
+                self.assertEqual(result.output, 0)
+
+
 class TestMissingPrimitiveRuntime(unittest.TestCase):
+    def test_univariate_lookup_checks_transcendental_assumptions_without_z3(self):
+        from zolotone.autogen import missing
+        from zolotone.autogen.autogen import get_spec
+
+        ctx = SpecContext("checked-transcendental-lut")
+        x = ctx.real("x")
+        ctx.assume(Sin(x) > ctx.zero())
+        source = Var("x", UQ(2, 0))
+        with patch.object(z3, "Solver", side_effect=AssertionError("unexpected Z3")):
+            primitive = missing._build_missing_primitive(
+                ctx.rne(x ** ctx.two(), frac_bits=2),
+                x, source, ctx, output_dtype=UQ(4, 2), input_dtypes={x: source.dtype},
+            )
+        for point, expected in ((1, 1), (2, 4), (3, 9)):
+            source.load_value(UQ(2, 0).from_bits(point))
+            self.assertEqual(primitive.evaluate().to_python(), expected)
+        spec = get_spec(primitive.name, primitive.spec)
+        env = {}
+        solver = z3.Solver()
+        solver.add(*(assume.to_z3(env) for assume in spec.spec_ctx.assumes))
+        solver.add(spec.spec_inputs[0].to_z3(env) == 0)
+        self.assertEqual(solver.check(), z3.unsat)
+
+    def test_compound_input_conservatively_evaluates_without_z3(self):
+        from zolotone.autogen import missing
+        from zolotone.components import uq_add
+
+        ctx = SpecContext("checked-compound-lut")
+        x, y = ctx.real("x"), ctx.real("y")
+        ctx.assume((x >= ctx.zero()) & (x <= ctx.one()))
+        ctx.assume((y >= ctx.zero()) & (y <= ctx.one()))
+        ctx.assume(x.ne(y))
+        lhs, rhs = Var("x", UQ(1, 0)), Var("y", UQ(1, 0))
+        with patch.object(z3, "Solver", side_effect=AssertionError("unexpected Z3")):
+            primitive = missing._build_missing_primitive(
+                ctx.rne((x + y) ** ctx.two(), frac_bits=0),
+                x + y, uq_add(lhs, rhs), ctx, output_dtype=UQ(3, 0),
+                input_dtypes={x: UQ(1, 0), y: UQ(1, 0)},
+            )
+        lhs.load_value(UQ(1, 0).from_bits(0))
+        rhs.load_value(UQ(1, 0).from_bits(1))
+        self.assertEqual(primitive.evaluate().to_python(), 1)
+
     def test_lut_boundaries_cover_every_nonliteral_dependency(self):
         from zolotone.autogen.spec_lowering import lut_inputs
 
@@ -13939,9 +14484,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(1, 2), ctx)
             result = search.run()
 
-        self.assertEqual(search.result.cost, 100)
+        self.assertEqual(search.result.cost, 104)
         self.assertIs(result.args[0], source)
-        build.assert_called_once_with(expression, x, source, search.ctx, output_dtype=UQ(1, 2))
+        build.assert_called_once_with(expression, x, source, search.ctx, output_dtype=UQ(1, 2), input_dtypes={x: UQ(2, 0)})
         for value, expected in ((1, 1), (2, 0.75), (3, 0.5)):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(result.evaluate().to_python(), expected)
@@ -13968,7 +14513,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(1, 2), ctx)
             result = search.run()
 
-        self.assertEqual(search.result.cost, 200)
+        self.assertEqual(search.result.cost, 208)
         self.assertTrue(result.args[0].name.startswith("LUT_rne_"))
         for value, expected in ((1, 1), (2, 1), (3, 0.5)):
             source.load_value(UQ(2, 0).from_bits(value))
@@ -13984,7 +14529,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(2, 3), ctx)
         result = search.run()
 
-        self.assertEqual(search.result.cost, 100)
+        self.assertEqual(search.result.cost, 104)
         self.assertTrue(result.name.startswith("LUT_rne_"))
         self.assertIs(result.args[0], source)
         for value, expected in ((0, 2), (1, 1), (2, 0.625), (3, 0.5)):
@@ -14009,7 +14554,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         # another search iteration after the whole-expression LUT is available.
         with patch("zolotone.components.LOSSLESS_COMPONENTS", (rounded_add, uq_mul)):
             search = spec_lowering._LoweringSearch(
-                ctx.rne(x + x * x, frac_bits=0), {x: source}, UQ, ctx
+                ctx.rne(x + x * x, frac_bits=0), {x: source}, UQ(5, 0), ctx
             )
             result = search.run()
 
@@ -14020,7 +14565,28 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(result.evaluate().to_python(), value + value * value)
 
-    def test_lut_uses_narrow_materialized_input_when_direct_table_is_too_large(self):
+    def test_lut_cost_rewards_truncating_input(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import uq_truncate_msb
+
+        ctx = SpecContext("truncate-before-lut")
+        x = ctx.real("x")
+        ctx.assume(x <= ctx.real_val(3))
+        source = Var("x", UQ(4, 0))
+        expression = ctx.rne(x ** ctx.two(), frac_bits=0)
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_truncate_msb,)):
+            search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(4, 0), ctx)
+            result = search.run()
+
+        self.assertTrue(result.name.startswith("LUT_"))
+        self.assertEqual(result.args[0].dtype, UQ(2, 0))
+        self.assertEqual(result.args[0].name, "uq_truncate_msb")
+        self.assertEqual(search.result.cost, 104)
+        for value in range(4):
+            source.load_value(source.dtype.from_bits(value))
+            self.assertEqual(result.evaluate().to_python(), value * value)
+
+    def test_lut_prefers_smaller_materialized_input(self):
         from zolotone.autogen import spec_lowering
 
         ctx = SpecContext("narrow-lut-boundary")
@@ -14036,7 +14602,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             )
             result = search.run()
 
-        self.assertEqual(search.result.cost, 100)
+        self.assertEqual(search.result.cost, 104)
         self.assertIs(result.args[0], materialized)
         for value, expected in ((1, 1), (2, 0.5), (3, 0.25)):
             materialized.load_value(UQ(2, 0).from_bits(value))
@@ -14050,17 +14616,18 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x >= ctx.one())
         source = Var("x", UQ(2, 0))
         evaluator = Mock()
-        build = missing.build_integer_machine
+        build = missing.build_integer_evaluator
 
         def track_machine(*args, **kwargs):
-            evaluator.apply.side_effect = build(*args, **kwargs).apply
+            evaluator.apply_point.side_effect = build(*args, **kwargs).apply_point
             return evaluator
 
-        with patch.object(missing, "build_integer_machine", side_effect=track_machine):
+        with patch.object(missing, "build_integer_evaluator", side_effect=track_machine) as compile_machine:
             primitive = missing._build_missing_primitive(
-                ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=UQ(4, 0)
+                ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=UQ(4, 0), input_dtypes={x: source.dtype}
             )
-        self.assertEqual(evaluator.apply.call_args_list, [call(1), call(2), call(3)])
+        compile_machine.assert_called_once()
+        self.assertEqual(evaluator.apply_point.call_args_list, [call([1]), call([2]), call([3])])
         for value in (1, 2, 3):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(primitive.evaluate().to_python(), value * value)
@@ -14071,14 +14638,14 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx = SpecContext("rival-failed-lookup")
         x = ctx.real("x")
         evaluator = Mock()
-        evaluator.apply.side_effect = ValueError("Cannot evaluate")
-        with patch.object(missing, "build_integer_machine", return_value=evaluator):
+        evaluator.apply_point.side_effect = ValueError("Cannot evaluate")
+        with patch.object(missing, "build_integer_evaluator", return_value=evaluator):
             with self.assertRaisesRegex(ZolotoneError, "Could not evaluate generated component"):
                 missing._build_missing_primitive(
                     ctx.rne(x ** ctx.two(), frac_bits=0), x, Var("x", UQ(2, 0)), ctx,
-                    output_dtype=UQ(4, 0),
+                    output_dtype=UQ(4, 0), input_dtypes={x: UQ(2, 0)},
                 )
-        evaluator.apply.assert_called_once_with(0)
+        evaluator.apply_point.assert_called_once_with([0])
 
     def test_missing_lookup_requires_explicit_output_dtype(self):
         from zolotone.autogen.missing import _build_missing_primitive
@@ -14087,9 +14654,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
         with self.assertRaises(TypeError):
-            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx)
+            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, input_dtypes={x: source.dtype})
         with self.assertRaisesRegex(MissingError, "output requires a Q or UQ"):
-            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=None)
+            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=None, input_dtypes={x: source.dtype})
 
     def test_missing_lookup_rejects_output_overflow(self):
         from zolotone.autogen.missing import _build_missing_primitive
@@ -14106,7 +14673,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             with self.subTest(expression=expression, output_dtype=output_dtype):
                 with self.assertRaisesRegex(ZolotoneError, "does not fit"):
                     _build_missing_primitive(
-                        ctx.rne(expression, frac_bits=0), x, source, ctx, output_dtype=output_dtype
+                        ctx.rne(expression, frac_bits=0), x, source, ctx, output_dtype=output_dtype, input_dtypes={x: source.dtype}
                     )
 
     def test_lossy_lookup_rounds_to_even(self):
@@ -14117,7 +14684,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
         rounded = _build_missing_primitive(
-            ctx.rne(x * ctx.real_val(0.5), frac_bits=0), x, source, ctx, output_dtype=UQ(2, 0)
+            ctx.rne(x * ctx.real_val(0.5), frac_bits=0), x, source, ctx, output_dtype=UQ(2, 0), input_dtypes={x: source.dtype}
         )
         generated_spec = get_spec(rounded.name, rounded.spec)
         self.assertTrue(generated_spec.spec_ast.identical(
@@ -14143,7 +14710,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             x + y,
             uq_add(lhs, rhs),
             ctx,
-            output_dtype=UQ(6, 0),
+            output_dtype=UQ(6, 0), input_dtypes={x: UQ(2, 0), y: UQ(2, 0)},
         )
 
         self.assertEqual(primitive.inner_tree.name, "Tuple_get_item")
@@ -14165,12 +14732,12 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
         source = Var("x", Q(2, 1))
         primitive = _build_missing_primitive(
-            ctx.rne(x ** ctx.real_val(-1), frac_bits=0), x, source, ctx, output_dtype=Q(3, 0)
+            ctx.rne(x * ctx.two(), frac_bits=0), x, source, ctx, output_dtype=Q(3, 0), input_dtypes={x: source.dtype}
         )
         for value in (-0.5, 0.5):
             with self.subTest(value=value):
                 source.load_value(Q(2, 1).from_float(value))
-                self.assertEqual(primitive.evaluate().to_python(), 1 / value)
+                self.assertEqual(primitive.evaluate().to_python(), 2 * value)
 
     def test_missing_lookup_spec_excludes_unreachable_fractional_points(self):
         from zolotone.autogen.missing import _build_missing_primitive
@@ -14182,7 +14749,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x.ne(ctx.one()))
         primitive = _build_missing_primitive(
             ctx.rne(x ** ctx.two(), frac_bits=2), x, Var("x", UQ(2, 2)), ctx,
-            output_dtype=UQ(4, 2),
+            output_dtype=UQ(4, 2), input_dtypes={x: UQ(2, 2)},
         )
         generated_spec = get_spec(primitive.name, primitive.spec)
         env = {}
@@ -14197,17 +14764,27 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
                 self.assertEqual(solver.check(), expected)
                 solver.pop()
 
-    def test_disjoint_input_skips_undefined_lookup_codes(self):
-        def reciprocal(x: Q(2, 1), ctx) -> Q:
-            ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
-            return ctx.rne(x ** ctx.real_val(-1), frac_bits=1)
+    def test_disjoint_input_excludes_undefined_lookup_codes(self):
+        from zolotone.autogen.missing import _build_missing_primitive
+        from zolotone.autogen.autogen import get_spec
 
-        result = Autogenerate("disjoint_reciprocal", reciprocal)
-        self.assertTrue(result.inner_tree.name.startswith("LUT_rne_"))
+        ctx = SpecContext("disjoint-reciprocal")
+        x = ctx.real("x")
+        ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
+        source = Var("x", Q(2, 1))
+        primitive = _build_missing_primitive(
+            ctx.rne(x ** ctx.real_val(-1), frac_bits=1),
+            x, source, ctx, output_dtype=Q(3, 1), input_dtypes={x: source.dtype},
+        )
         for value in (-0.5, 0.5):
-            with self.subTest(value=value):
-                result.args[0].load_value(Q(2, 1).from_float(value))
-                self.assertEqual(result.evaluate().to_python(), 1 / value)
+            source.load_value(Q(2, 1).from_float(value))
+            self.assertEqual(primitive.evaluate().to_python(), 1 / value)
+        spec = get_spec(primitive.name, primitive.spec)
+        env = {}
+        solver = z3.Solver()
+        solver.add(*(assume.to_z3(env) for assume in spec.spec_ctx.assumes))
+        solver.add(spec.spec_inputs[0].to_z3(env) == 0)
+        self.assertEqual(solver.check(), z3.unsat)
 
     def test_missing_reciprocal_creates_typed_runtime_primitive(self):
         from zolotone.autogen.autogen import get_spec
@@ -14382,7 +14959,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         def reciprocal(x: UQ(3, 2), ctx) -> UQ:
             return ctx.rne(x ** ctx.real_val(-1), frac_bits=2)
 
-        with self.assertRaisesRegex(ZolotoneError, "output range"):
+        with self.assertRaisesRegex(ZolotoneError, "Domain error in output"):
             Autogenerate("unbounded", reciprocal)
 
     def test_runtime_component_is_created_only_on_lowering_failure(self):

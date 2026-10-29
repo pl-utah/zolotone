@@ -1,11 +1,12 @@
 from zolotone import *
 
 
-def spec(x: UQ(2, 3), ctx) -> UQ(4, 6):
-    ctx.assume(x > ctx.real_val(0))
-    return ctx.fr(x ** ctx.real_val(-1))
+def spec(x: UQ(4, 2), ctx) -> Q:
+    z = ctx.fr(sin(x), frac_bits=4)
+    ctx.assume(abs(z).ne(ctx.one()))
+    return z
 
-generated = Autogenerate(name=spec.__name__, spec=spec)
+generated = Autogenerate(name=spec.__name__, spec=spec, only_LUT=False)
 print(generated.print_tree(depth=1))
 print(generated.to_cpp())
 with open("examples/c_models/test.cpp", "w") as file:

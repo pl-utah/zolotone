@@ -6,35 +6,50 @@ from fractions import Fraction
 import hashlib
 import math
 
-import z3
-
-from ..errors import MissingError, ZolotoneError
-from ..rival import build_integer_machine, rival_range_analysis
-from ..spec.spec_ast import RealExpr, RealLit, RealVar, Round, substitute_spec_node
+from ..errors import InfeasibleError, MissingError, ZolotoneError
+from ..rival import (
+    build_integer_evaluator,
+    collect_free_vars,
+)
+from ..rival.analysis import analyze_typed_domain
+from ..spec.spec_ast import If, RealExpr, RealLit, RealVar, Round, SpecNode, substitute_spec_node
 from ..spec.spec_context import SpecContext
-from ..types import Q, UQ
+from ..types import DataType, Q, UQ
 from ..ast.helpers import integer_lookup
 from ..ast.node import Node
 from ..ast.nodes import Primitive
 from .spec_validation import (
+    _condition_conjuncts,
     _fixed_point_result_fits,
     _output_format_suggestion_with_range_analysis,
     _output_format_suggestion_with_search,
 )
 
 
-MAX_GENERATED_TABLE_ENTRIES = 4_096
+MAX_GENERATED_TABLE_ENTRIES = 1 << 20
+
+
+def _lut_frac_bits(expression: RealExpr) -> int | None:
+    """Recognize an explicit rounding grid, including rounded conditional branches."""
+    if isinstance(expression, Round):
+        return expression.frac_bits
+    if isinstance(expression, If):
+        precision = _lut_frac_bits(expression.on_true)
+        if precision is not None and precision == _lut_frac_bits(expression.on_false):
+            return precision
+    return None
 
 
 def _suggest_missing_output_dtype(
-    expression: RealExpr, precision_dtype: Q | UQ, range_ctx: SpecContext
+    expression: RealExpr, precision_dtype: Q | UQ, range_ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> Q | UQ:
     """Keep the supplied fractional width and infer sign/integer bits from range."""
     conservative = _output_format_suggestion_with_range_analysis(
-        expression, precision_dtype, range_ctx
+        expression, precision_dtype, range_ctx, input_dtypes=input_dtypes,
     )
     output = _output_format_suggestion_with_search(
-        expression, conservative, range_ctx
+        expression, conservative, range_ctx, input_dtypes
     )
     if output is None:
         raise ZolotoneError(
@@ -44,13 +59,10 @@ def _suggest_missing_output_dtype(
 
 
 def _expression_bounds(
-    expression: RealExpr, dtype: Q | UQ, ctx: SpecContext
+    expression: RealExpr, dtype: Q | UQ, ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> tuple[int, int]:
-    value_range = rival_range_analysis(expression, ctx)
-    if value_range is None or not all(math.isfinite(bound) for bound in value_range):
-        raise ZolotoneError(
-            f"Could not obtain a finite input range for component input {expression!r}"
-        )
+    value_range = analyze_typed_domain(expression, ctx, input_dtypes, dtype)
     scale = 1 << dtype.frac_bits
     lower = math.ceil(Fraction(value_range[0]) * scale)
     upper = math.floor(Fraction(value_range[1]) * scale)
@@ -76,9 +88,11 @@ def _build_missing_primitive(
     input_node: Node,
     range_ctx: SpecContext,
     output_dtype: Q | UQ,
+    *,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> Node:
     """Generate a univariate typed LUT from one materialized input."""
-    if not isinstance(missing, Round):
+    if _lut_frac_bits(missing) is None:
         raise MissingError(
             "LUT synthesis requires explicit ctx.rne, ctx.rtz, or ctx.raz with frac_bits"
         )
@@ -97,7 +111,7 @@ def _build_missing_primitive(
     if output_dtype.total_bits() > 64:
         raise MissingError("Generated LUT outputs must have at most 64 bits")
 
-    lower, upper = _expression_bounds(input_expr, dtype, generation_ctx)
+    lower, upper = _expression_bounds(input_expr, dtype, generation_ctx, input_dtypes)
     table_size = 1 << dtype.total_bits()
     if table_size > MAX_GENERATED_TABLE_ENTRIES:
         raise ZolotoneError(
@@ -111,7 +125,12 @@ def _build_missing_primitive(
         input_expr,
         raw * (RealLit(2) ** RealLit(-dtype.frac_bits)),
     )
-    pattern = f"{missing.mode.value.lower()}_f{missing.frac_bits}"
+    if isinstance(missing, Round):
+        pattern = f"{missing.mode.value.lower()}_f{missing.frac_bits}"
+    else:
+        # Unlike a root Round, a conditional evaluates to values, not codes.
+        integer_expression = integer_expression * RealLit(1 << output_dtype.frac_bits)
+        pattern = f"conditional_f{output_dtype.frac_bits}"
     dtype_part = "_".join(
         f"{type(format_).__name__.lower()}{format_.int_bits}_{format_.frac_bits}"
         for format_ in (dtype, output_dtype)
@@ -119,16 +138,31 @@ def _build_missing_primitive(
     digest = hashlib.sha256(repr(integer_expression).encode()).hexdigest()[:10]
     component_name = f"LUT_{pattern}_{dtype_part}_{digest}"
 
-    evaluator = build_integer_machine(
+    # Use a fresh placeholder so an original variable named x cannot be
+    # mistaken for the materialized LUT input after substitution.
+    original_names = set(collect_free_vars(generation_ctx.assumes))
+    placeholder_name = "__lut_input"
+    while placeholder_name in original_names:
+        placeholder_name += "_"
+    placeholder = RealVar(placeholder_name)
+    normalized_input = placeholder * (RealLit(2) ** RealLit(-dtype.frac_bits))
+    precondition = generation_ctx.true()
+    for assume in (
+        conjunct
+        for condition in generation_ctx.assumes
+        for conjunct in _condition_conjuncts(condition)
+    ):
+        substituted = substitute_spec_node(assume, input_expr, normalized_input)
+        if set(collect_free_vars([substituted])) <= {placeholder_name}:
+            precondition = precondition & substitute_spec_node(substituted, placeholder, raw)
+        # Assumptions involving other variables cannot be decided at this
+        # input alone, so conservatively leave those points reachable.
+    evaluator = build_integer_evaluator(
         integer_expression,
+        precondition,
         input_total_bits=dtype.total_bits(),
         output_total_bits=output_dtype.total_bits(),
     )
-
-    solver = z3.Solver()
-    env: dict[object, object] = {}
-    solver.add(*(assume.to_z3(env) for assume in generation_ctx.assumes))
-    input_term = input_expr.to_z3(env)
 
     output_bits = output_dtype.total_bits()
     mask = (1 << output_bits) - 1
@@ -143,16 +177,18 @@ def _build_missing_primitive(
     unreachable_points: list[int] = []
     try:
         for point in range(lower, upper + 1):
-            # check with z3 that the point belongs to assumes
-            solver.push()
-            solver.add(input_term == z3.RealVal(f"{point}/{1 << dtype.frac_bits}"))
-            reachable = solver.check() != z3.unsat
-            solver.pop()
-            if not reachable:
+            result = evaluator.apply_point([point])
+            if result.precondition_error:
+                raise ValueError("domain error in assumptions")
+            if not result.precondition:
                 entries.append(0)
                 unreachable_points.append(point)
                 continue
-            scaled = evaluator.apply(point)
+            if result.output_error:
+                raise ValueError("domain error in output at reachable input")
+            if result.output is None:
+                raise ValueError("output at reachable input evaluated to inf/nan")
+            scaled = result.output
             if not output_minimum <= scaled <= output_maximum:
                 raise ZolotoneError(
                     f"Generated LUT output {scaled} at input point {point} "
@@ -168,6 +204,10 @@ def _build_missing_primitive(
             f"Could not evaluate generated component {component_name!r} "
             f"at input code {point}: {exc}"
         ) from exc
+    if len(unreachable_points) == len(entries):
+        raise InfeasibleError(
+            f"Generated component {component_name!r} has no reachable input codes"
+        )
     dtype_minimum = (
         -(1 << (dtype.total_bits() - 1)) if isinstance(dtype, Q) else 0
     )

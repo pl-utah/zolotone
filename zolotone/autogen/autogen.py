@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field, replace
+from fractions import Fraction
 import inspect
 import typing as tp
 
@@ -24,14 +25,13 @@ from .spec_lowering import (
 )
 from .spec_validation import (
     _check_output_format,
-    _check_spec_obligations,
-    _check_spec_reachability,
+    spec_domain_analysis,
     _simplify_spec_ast,
     _spec_value_variables,
     _validate_spec_requirements,
     _validate_rounding_precision,
     _validate_spec_shape,
-    _warn_about_domain_errors,
+    _validate_only_lut_spec,
     add_input_ranges,
     add_output_guards,
     reject_untyped_inputs,
@@ -55,6 +55,8 @@ class Spec:
     spec_inputs: tuple[tp.Any, ...]
     spec_ctx: SpecContext
     rounding_choices: dict[Round, BoolVar] = field(default_factory=dict)
+    has_user_assumptions: bool = False
+    output_bounds: tuple[Fraction, Fraction] | None = None
 
     def to_function(self) -> tp.Callable[..., tp.Any]:
         """Derive a callable from this AST and contract, without replaying source."""
@@ -194,7 +196,11 @@ def get_spec(
         )
         for parameter in input_parameters
     )
+    # Input descriptors can introduce their own well-formedness assumptions.
+    # Only assumptions added by the specification need a reachability proof.
+    input_assumption_count = len(spec_ctx.assumes)
     spec_ast = function(*spec_inputs, spec_ctx)
+    has_user_assumptions = len(spec_ctx.assumes) > input_assumption_count
     if isinstance(spec_ast, Round) and spec_ast.frac_bits is None:
         if isinstance(output_dtype, (Q, UQ)):
             unresolved = spec_ast
@@ -234,11 +240,12 @@ def get_spec(
         spec_ast=spec_ast,
         spec_inputs=spec_inputs,
         spec_ctx=spec_ctx,
+        has_user_assumptions=has_user_assumptions,
     )
 
 
 def _expand_faithful_roundings(spec: Spec) -> Spec:
-    """Expand FR into explicit choices without adding ordinary function inputs."""
+    """Expand FR choices and correct assumptions for a single choice."""
     # Check the original root before an If could hide narrowing or missing precision.
     _validate_rounding_precision(spec)
     ctx = spec.spec_ctx.copy()
@@ -301,6 +308,45 @@ def _expand_faithful_roundings(spec: Spec) -> Spec:
     ]
     if not expanded:
         return spec
+    choice_vars = tuple(choices.values())
+    if set(choice_vars) & _spec_value_variables(tuple(ctx.assumes)):
+        if len(choices) > 1:
+            raise MissingError(
+                "Assumption-based faithful rounding correction supports only one "
+                f"choice; found {len(choices)} choices"
+            )
+        allowed = ctx.true()
+        for assumption in ctx.assumes:
+            allowed = allowed & assumption
+
+        choice, = choice_vars
+        raz_allowed = substitute_spec_node(allowed, choice, ctx.true())._constant_fold()
+        rtz_allowed = substitute_spec_node(allowed, choice, ctx.false())._constant_fold()
+        rounded, = choices
+        original = rewritten[rounded]
+        raz, rtz = original.on_true, original.on_false
+        # Keep the correction inside each branch so a univariate LUT can absorb it.
+        resolved = If(choice, If(raz_allowed, raz, rtz), If(rtz_allowed, rtz, raz))
+
+        def rewrite(node):
+            return substitute_spec_node(node, original, resolved)
+
+        for location in ("assumes", "checks", "requirements"):
+            conditions = getattr(ctx, location)
+            conditions[:] = [rewrite(condition) for condition in conditions]
+        ctx.case_partitions = [
+            replace(
+                partition,
+                entries=tuple(
+                    replace(entry, condition=rewrite(entry.condition), value=rewrite(entry.value))
+                    for entry in partition.entries
+                ),
+                value=rewrite(partition.value),
+            )
+            for partition in ctx.case_partitions
+        ]
+        spec_ast = rewrite(spec_ast)
+
     new_choices = tuple(choice for choice in choices.values() if choice not in spec.spec_inputs)
     parameters = tuple(spec.signature.parameters.values())
     choice_parameters = tuple(
@@ -325,12 +371,14 @@ def _expand_faithful_roundings(spec: Spec) -> Spec:
 def Autogenerate(
     name: str,
     spec: tp.Callable[..., tp.Any],
+    *,
+    only_LUT: bool = False,
 ):
-    """Lower a specification, creating missing real Primitives in memory."""
+    """Lower a specification; only_LUT adds LUT eligibility validation."""
     # Step 1: Obtain spec AST
     current_spec = get_spec(name, spec)
 
-    print(current_spec)
+    # print(current_spec)
 
     # Step 2: establish the abstract input domain and validate its shape.
     # Error on undeclared variables, warn about unused variables.
@@ -339,7 +387,11 @@ def Autogenerate(
     current_spec = add_input_ranges(current_spec)
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
+    if only_LUT:
+        _validate_only_lut_spec(current_spec)
     current_spec = _expand_faithful_roundings(current_spec)
+    # print(current_spec)
+
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 
@@ -349,10 +401,8 @@ def Autogenerate(
 
     # Step 5: validate the complete, eventually bit-precise specification.
     # Every check below requires bit-precise assumptions.
-    _check_spec_reachability(current_spec)
-    _warn_about_domain_errors(current_spec)
+    current_spec = spec_domain_analysis(current_spec)
     _validate_spec_requirements(current_spec)
-    _check_spec_obligations(current_spec)
     _check_output_format(current_spec)
 
     # Step 6: lower the result before deriving implementation guards.
@@ -370,8 +420,7 @@ def Autogenerate(
     # Step 7: derive guards for the selected implementation result.
     current_spec = add_output_guards(current_spec)
 
-    print(current_spec)
-
+    # print(current_spec)
 
     # Step 8: lower and attach assumptions, user checks, and output guards.
     attach_lowered_conditions(lowered_composite, current_spec)

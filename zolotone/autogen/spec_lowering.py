@@ -9,7 +9,7 @@ import math
 import typing as tp
 
 from ..errors import MissingError, ZolotoneError, _SpecProbeLimitExceeded
-from ..rival import rival_range_analysis
+from ..rival.analysis import analyze_typed_domain
 from ..spec.spec_ast import (
     BoolExpr,
     BoolLit,
@@ -31,7 +31,7 @@ from ..spec.spec_ast import (
 )
 from ..spec.spec_context import SpecContext
 from ..types import Bool, DataType, Q, UQ, Value
-from .missing import _build_missing_primitive
+from .missing import _build_missing_primitive, _lut_frac_bits
 from ..ast.node import Node
 from ..ast.nodes import (
     Composite,
@@ -110,7 +110,12 @@ def _operation_cost(arguments, operation_cost):
 
 
 MAX_SPEC_PROBES = 5_000
-LUT_COST = 100
+LUT_BASE_COST = 100
+
+
+def _lut_cost(input_dtype: Q | UQ) -> int:
+    """Charge the fixed lookup cost plus the number of allocated entries."""
+    return LUT_BASE_COST + (1 << input_dtype.total_bits())
 
 
 # TODO: this is not too good
@@ -195,6 +200,8 @@ def _probe_input_category(annotation: object) -> type[SpecNode] | None:
 def _candidate_output_range_fits(
     candidate: _Candidate,
     range_ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType] | None = None,
+    output_bounds: tuple[Fraction, Fraction] | None = None,
 ) -> bool:
     if not isinstance(candidate.spec, RealExpr):
         return True
@@ -205,19 +212,16 @@ def _candidate_output_range_fits(
             f"{candidate.node.name!r}"
         )
 
-    output_range = rival_range_analysis(candidate.spec, range_ctx)
-    if output_range is not None:
-        lower, upper = output_range
-        dtype_lower, dtype_upper = _fixed_point_real_bounds(candidate.node.dtype)
-        if (
-            math.isfinite(lower)
-            and math.isfinite(upper)
-            and lower >= dtype_lower
-            and upper <= dtype_upper
-        ):
-            return True
+    if output_bounds is None:
+        output_bounds = analyze_typed_domain(
+            candidate.spec, range_ctx, input_dtypes or {}, candidate.node.dtype,
+        )
+    lower, upper = output_bounds
+    dtype_lower, dtype_upper = _fixed_point_real_bounds(candidate.node.dtype)
+    if lower >= dtype_lower and upper <= dtype_upper:
+        return True
 
-    return _prove_result_fits(candidate.spec, candidate.node.dtype, range_ctx)
+    return _prove_result_fits(candidate.spec, candidate.node.dtype, range_ctx, input_dtypes or {})
 
 
 def _initial_candidates(subexpressions, spec_input_nodes):
@@ -257,10 +261,12 @@ def _typed_context(range_ctx: SpecContext, sources: list[_Candidate]) -> SpecCon
 class _LoweringSearch:
     """One candidate table, improved by known components and generated LUTs."""
 
-    def __init__(self, spec_ast, spec_input_nodes, return_annotation, range_ctx):
-        from ..components import LOSSLESS_COMPONENTS
+    def __init__(self, spec_ast, spec_input_nodes, return_annotation, range_ctx, output_bounds=None):
+        from ..components import LOSSLESS_COMPONENTS, q_sign_extend, uq_zero_extend
 
         self.root = spec_ast
+        self.output_bounds = output_bounds
+        self.input_dtypes = {expr: node.dtype for expr, node in spec_input_nodes.items()}
         self.return_annotation = return_annotation
         self.expressions = _spec_subexpressions(spec_ast)
         self.components = tuple(
@@ -280,6 +286,12 @@ class _LoweringSearch:
         self.ctx = _typed_context(range_ctx, sources)
         for source in sources:
             self.add(source)
+            # Some components need a wider initial input format.
+            if isinstance(source.node.dtype, (UQ, Q)):
+                # Seed one wider format without recursively extending it.
+                extend = q_sign_extend if isinstance(source.node.dtype, Q) else uq_zero_extend
+                extended = extend(source.node, 1)
+                self.add(_Candidate.from_operation(extended, source.spec, (source,), 1))
 
         # Cache both matches and misses across all format variants.
         self.component_matches = {}
@@ -344,8 +356,14 @@ class _LoweringSearch:
             resize = q_resize if isinstance(source, Q) else uq_resize
             node = resize(candidate.node, target.int_bits, target.frac_bits)
             candidate = _Candidate.from_operation(node, self.root, (candidate,), 1)
-        if self.result is None or candidate.cost < self.result.cost:
+        if self.result is None or self.result_rank(candidate) < self.result_rank(self.result):
             self.result = candidate
+
+    def result_rank(self, candidate):
+        """Generic fixed-point outputs minimize width, then computation cost."""
+        if self.return_annotation in (Q, UQ):
+            return candidate.node.dtype.total_bits(), candidate.cost
+        return (candidate.cost,)
 
     # Add candidate if it is cheaper than previous one
     def add(self, candidate):
@@ -357,7 +375,10 @@ class _LoweringSearch:
         self.consider_result(candidate)
         return True
 
-    def worth_trying(self, cost):
+    def worth_trying(self, cost, *, operation_cost=1):
+        # Free shrinking is always eligible; cost cannot bound width-first results.
+        if operation_cost == 0 or self.return_annotation in (Q, UQ):
+            return True
         result = self.result
         return result is None or cost < result.cost
 
@@ -401,15 +422,23 @@ class _LoweringSearch:
         key = (candidate.spec, candidate.node.dtype)
         if key not in self.range_checks:
             try:
-                self.range_checks[key] = _candidate_output_range_fits(candidate, self.ctx)
+                bounds = self.output_bounds if candidate.spec.identical(self.root) else None
+                self.range_checks[key] = _candidate_output_range_fits(
+                    candidate, self.ctx, self.input_dtypes, bounds,
+                )
             except (NotImplementedError, ZolotoneError):
                 self.range_checks[key] = False
         return self.range_checks[key]
 
     def add_component_candidates(self):
+        from ..components import q_truncate_msb, uq_truncate_msb
+
         changed = False
         expressions = tuple(self.candidates.keys())  # Resolved expressions
         for index, component in enumerate(self.components):
+            operation_cost = (
+                0 if component.node is q_truncate_msb or component.node is uq_truncate_msb else 1
+            )
             # Select expressions that can be inputs to new component
             expression_pools = [
                 tuple(
@@ -435,8 +464,8 @@ class _LoweringSearch:
                     )
                 ]
                 for arguments in itertools.product(*pools):
-                    cost = _operation_cost(arguments, 1)
-                    if not self.worth_trying(cost):
+                    cost = _operation_cost(arguments, operation_cost)
+                    if not self.worth_trying(cost, operation_cost=operation_cost):
                         continue
                     key = (index, tuple((arg.spec, arg.node.dtype) for arg in arguments))
                     if self.component_attempts.get(key, math.inf) <= cost:
@@ -448,7 +477,9 @@ class _LoweringSearch:
                         continue
                     if not self.allows_format(node, matched, arguments):
                         continue
-                    candidate = _Candidate.from_operation(node, matched, arguments, operation_cost=1)
+                    candidate = _Candidate.from_operation(
+                        node, matched, arguments, operation_cost=operation_cost
+                    )
                     if self.fits(candidate):
                         changed |= self.add(candidate)
         return changed
@@ -460,9 +491,9 @@ class _LoweringSearch:
         key = expression
         if key not in self.suggested_lut_types:
             try:
-                precision_dtype = UQ(1, expression.frac_bits)
+                precision_dtype = UQ(1, _lut_frac_bits(expression))
                 self.suggested_lut_types[key] = _suggest_missing_output_dtype(
-                    expression, precision_dtype, self.ctx
+                    expression, precision_dtype, self.ctx, self.input_dtypes
                 )
             except (ZolotoneError, NotImplementedError) as exc:
                 self.errors.append(exc)
@@ -474,13 +505,8 @@ class _LoweringSearch:
         # Consider whole regions before their children so a cheap fused LUT can
         # prune more expensive chains. Components still compete by total cost.
         for expression in self.expressions:
-            if not isinstance(expression, Round):
+            if _lut_frac_bits(expression) is None:
                 continue
-            # Does it worth trying a LUT
-            existing = self.candidates.get(expression, {})
-            if any(candidate.cost < LUT_COST for candidate in existing.values()):
-                continue
-            
             pool = sorted(
                 (
                     candidate
@@ -488,10 +514,11 @@ class _LoweringSearch:
                     for candidate in self.candidates.get(operand, {}).values()
                     if isinstance(candidate.node.dtype, (Q, UQ))
                 ),
-                key=lambda candidate: candidate.cost,
+                key=lambda candidate: candidate.cost + _lut_cost(candidate.node.dtype),
             )
             for argument in pool:
-                cost = argument.cost + LUT_COST
+                operation_cost = _lut_cost(argument.node.dtype)
+                cost = argument.cost + operation_cost
                 if not self.worth_trying(cost):
                     continue
                 dtype = self.lut_output_type(expression)
@@ -512,13 +539,13 @@ class _LoweringSearch:
                 try:
                     node = _build_missing_primitive(
                         expression, argument.spec, argument.node,
-                        self.ctx, output_dtype=dtype,
+                        self.ctx, output_dtype=dtype, input_dtypes=self.input_dtypes,
                     )
                 except (MissingError, ZolotoneError, NotImplementedError) as exc:
                     self.errors.append(exc)
                     continue
                 changed |= self.add(
-                    _Candidate.from_operation(node, expression, (argument,), LUT_COST)
+                    _Candidate.from_operation(node, expression, (argument,), operation_cost)
                 )
         return changed
 
@@ -565,10 +592,11 @@ def search_lower_spec_to_impl(
     spec_input_nodes: dict[tp.Any, Node],
     return_annotation: object,
     range_ctx: SpecContext,
+    output_bounds: tuple[Fraction, Fraction] | None = None,
 ) -> Node:
     """Find the cheapest typed derivation of a specification expression."""
     return _LoweringSearch(
-        spec_ast, spec_input_nodes, return_annotation, range_ctx
+        spec_ast, spec_input_nodes, return_annotation, range_ctx, output_bounds
     ).run()
 
 
@@ -746,6 +774,7 @@ def lower_spec_result(
             spec_input_nodes,
             spec.return_annotation,
             spec.spec_ctx,
+            output_bounds=spec.output_bounds,
         )
 
     input_parameters = list(spec.contract.signature.parameters.values())[:-1]

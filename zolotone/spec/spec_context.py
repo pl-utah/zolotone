@@ -5,7 +5,7 @@ from .spec_ast import _CasePartition
 from ..egglog import *
 from egglog import rewrite, vars_
 from ..solver.report import ProofReport, build_proof_report
-from ..rival import rival_feasibility_check, rival_trim_context
+from ..rival.analysis import rival_feasibility_check, rival_trim_context
 
 import dreal
 from time import perf_counter

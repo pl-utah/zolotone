@@ -3,6 +3,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use rival::{Discretization, Expr, Hint, Ival, Machine, MachineBuilder};
 use rug::{float::Round, Float, Integer, Rational};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 #[derive(Clone)]
 struct F64Discretization;
@@ -58,25 +62,37 @@ impl OutputRounding {
     }
 }
 
-/// Discretize an expression already expressed in integer output-code units.
+/// Resolve output 0 as a Boolean and discretize output 1 as an integer code.
 #[derive(Clone)]
-struct IntegerDiscretization {
+struct EvaluationDiscretization {
     target_bits: u32,
     rounding: OutputRounding,
+    range_mode: Arc<AtomicBool>,
 }
 
-impl Discretization for IntegerDiscretization {
+impl Discretization for EvaluationDiscretization {
     fn target(&self) -> u32 {
         self.target_bits
     }
 
-    fn convert(&self, _: usize, value: &Float) -> Float {
+    fn convert(&self, idx: usize, value: &Float) -> Float {
+        if idx == 0 {
+            return value.clone();
+        }
         // Preserve the endpoint's precision and non-finite values.  Narrowing
         // to target_bits here could merge distinct integer output codes.
         self.rounding.convert(value)
     }
 
-    fn distance(&self, _: usize, lo: &Float, hi: &Float) -> usize {
+    fn distance(&self, idx: usize, lo: &Float, hi: &Float) -> usize {
+        if self.range_mode.load(Ordering::Relaxed) {
+            return 0;
+        }
+        if idx == 0 {
+            // A Boolean must resolve exactly; never treat false/true as an
+            // adjacent rounding boundary.
+            return if lo == hi { 0 } else { 2 };
+        }
         if !lo.is_finite() || !hi.is_finite() {
             return 2;
         }
@@ -129,24 +145,60 @@ struct RawRivalMachine {
 }
 
 #[pyclass(module = "zolotone._rival3")]
-struct RawIntegerMachine {
-    machine: Machine<IntegerDiscretization>,
+struct RawEvaluator {
+    machine: Machine<EvaluationDiscretization>,
     rounding: OutputRounding,
+    range_mode: Arc<AtomicBool>,
+}
+
+type EvaluationRange = ((bool, bool), Option<(String, String)>, bool, bool, bool, bool);
+
+impl RawEvaluator {
+    fn code_args(&self, intervals: Vec<(String, String)>) -> PyResult<Vec<Ival>> {
+        if intervals.len() != self.machine.argument_count() {
+            return Err(PyValueError::new_err(format!(
+                "expected {} inputs, got {}",
+                self.machine.argument_count(),
+                intervals.len(),
+            )));
+        }
+        intervals
+            .into_iter()
+            .map(|(lower, upper)| {
+                let lower = parse_integer(&lower, "lower input code")?;
+                let upper = parse_integer(&upper, "upper input code")?;
+                if lower > upper {
+                    return Err(PyValueError::new_err("reversed input code interval"));
+                }
+                let precision = self
+                    .machine
+                    .argument_precision()
+                    .max(lower.significant_bits())
+                    .max(upper.significant_bits());
+                Ok(Ival::from_lo_hi(
+                    Float::with_val(precision, lower),
+                    Float::with_val(precision, upper),
+                ))
+            })
+            .collect()
+    }
+}
+
+fn rect_args(rect: Vec<(f64, f64)>, precision: u32) -> Vec<Ival> {
+    rect.into_iter()
+        .map(|(lo, hi)| {
+            Ival::from_lo_hi(
+                Float::with_val(precision, lo),
+                Float::with_val(precision, hi),
+            )
+        })
+        .collect()
 }
 
 #[pymethods]
 impl RawRivalMachine {
     fn domain_errors(&mut self, rect: Vec<(f64, f64)>) -> PyResult<Vec<(bool, bool)>> {
-        let precision = self.range_machine.argument_precision();
-        let rival_rect = rect
-            .into_iter()
-            .map(|(lo, hi)| {
-                Ival::from_lo_hi(
-                    Float::with_val(precision, lo),
-                    Float::with_val(precision, hi),
-                )
-            })
-            .collect::<Vec<_>>();
+        let rival_rect = rect_args(rect, self.range_machine.argument_precision());
 
         let outputs = self
             .range_machine
@@ -163,16 +215,7 @@ impl RawRivalMachine {
         rect: Vec<(f64, f64)>,
         hints: Option<PyRef<'_, RivalHints>>,
     ) -> PyResult<((bool, bool), RivalHints)> {
-        let precision = self.machine.argument_precision();
-        let rival_rect = rect
-            .into_iter()
-            .map(|(lo, hi)| {
-                Ival::from_lo_hi(
-                    Float::with_val(precision, lo),
-                    Float::with_val(precision, hi),
-                )
-            })
-            .collect::<Vec<_>>();
+        let rival_rect = rect_args(rect, self.machine.argument_precision());
 
         let hint_slice = hints.as_ref().map(|h| h.hints.as_slice());
         let (status, next_hints, _) = self.machine.analyze_with_hints(&rival_rect, hint_slice);
@@ -181,16 +224,7 @@ impl RawRivalMachine {
     }
 
     fn apply_range(&mut self, rect: Vec<(f64, f64)>) -> PyResult<(f64, f64)> {
-        let precision = self.machine.argument_precision();
-        let rival_rect = rect
-            .into_iter()
-            .map(|(lo, hi)| {
-                Ival::from_lo_hi(
-                    Float::with_val(precision, lo),
-                    Float::with_val(precision, hi),
-                )
-            })
-            .collect::<Vec<_>>();
+        let rival_rect = rect_args(rect, self.machine.argument_precision());
 
         let outputs = match self.range_machine.apply(&rival_rect, None, 1) {
             Ok(outputs) => outputs,
@@ -210,36 +244,69 @@ impl RawRivalMachine {
 }
 
 #[pymethods]
-impl RawIntegerMachine {
-    /// Evaluate an integer input and extract a code using the same rounding
-    /// as output discretization. Strings avoid host integer-width limits.
-    fn apply(&mut self, raw_input: &str) -> PyResult<String> {
-        let integer = Integer::from_str_radix(raw_input, 10)
-            .map_err(|_| PyValueError::new_err("invalid integer input code"))?;
-        let precision = self
-            .machine
-            .argument_precision()
-            .max(integer.significant_bits());
-        let value = Float::with_val(precision, integer);
-        let args = [Ival::from_lo_hi(value.clone(), value)];
+impl RawEvaluator {
+    fn apply_range(
+        &mut self,
+        intervals: Vec<(String, String)>,
+    ) -> PyResult<Option<EvaluationRange>> {
+        let args = self.code_args(intervals)?;
+        // The same compiled evaluator produces a single-pass enclosure here;
+        // point evaluation still refines until its output code is resolved.
+        self.range_mode.store(true, Ordering::Relaxed);
+        let result = self.machine.apply(&args, None, 1);
+        self.range_mode.store(false, Ordering::Relaxed);
+        let outputs = match result {
+            Ok(outputs) => outputs,
+            Err(_) => return Ok(None),
+        };
+        let precondition = &outputs[0];
+        let output = &outputs[1];
+        let lower = self.rounding.convert(output.lo()).to_rational();
+        let upper = self.rounding.convert(output.hi()).to_rational();
+        Ok(Some((
+            (!precondition.lo().is_zero(), !precondition.hi().is_zero()),
+            lower
+                .zip(upper)
+                .map(|(lo, hi)| (lo.to_string(), hi.to_string())),
+            precondition.error_flags().partial(),
+            output.error_flags().partial(),
+            precondition.error_flags().total(),
+            output.error_flags().total(),
+        )))
+    }
+
+    /// Evaluate both outputs using exact integer input codes.
+    /// Strings avoid host integer-width limits.
+    fn apply_point(&mut self, point: Vec<String>) -> PyResult<(bool, Option<String>, bool, bool, bool, bool)> {
+        let args = self.code_args(point.into_iter().map(|code| (code.clone(), code)).collect())?;
         let outputs = self
             .machine
             .apply(&args, None, 10_000)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        let output = outputs
-            .first()
-            .ok_or_else(|| PyValueError::new_err("integer machine returned no outputs"))?;
-        // Successful apply already guarantees agreement after discretization.
-        let rounded = self.rounding.convert(output.lo());
-        if !rounded.is_integer() {
+
+        let feasible = &outputs[0];
+        let output = &outputs[1];
+        if matches!(self.rounding, OutputRounding::Exact)
+            && !output.error_flags().partial()
+            && output.lo().is_finite()
+            && !output.lo().is_integer()
+        {
             return Err(PyValueError::new_err(
-                "expression did not produce an integer output code",
+                "Exact integer evaluation produced a non-integer output",
             ));
         }
-        let integer = rounded
-            .to_integer()
-            .ok_or_else(|| PyValueError::new_err("could not determine integer output code"))?;
-        Ok(integer.to_string())
+        // Preserve flags and non-finite values for the caller to interpret.
+        // Error-free outputs already agree after discretization.
+        let rounded = self.rounding.convert(output.lo());
+        let integer = rounded.to_integer().map(|value| value.to_string());
+        Ok((
+            !feasible.lo().is_zero(),
+            integer,
+            feasible.error_flags().partial(),
+            output.error_flags().partial(),
+            feasible.error_flags().total(),
+            output.error_flags().total(),
+        ))
     }
 }
 
@@ -265,13 +332,15 @@ fn build_machine(exprs: &PyList, free_vars: Vec<String>) -> PyResult<RawRivalMac
 }
 
 #[pyfunction]
-#[pyo3(signature = (expr, input_total_bits, output_total_bits, rounding_mode=None))]
-fn build_integer_machine(
+#[pyo3(signature = (expr, input_total_bits, output_total_bits, rounding_mode=None, precondition=None, free_vars=None))]
+fn build_integer_evaluator(
     expr: &PyAny,
     input_total_bits: u32,
     output_total_bits: u32,
     rounding_mode: Option<&str>,
-) -> PyResult<RawIntegerMachine> {
+    precondition: Option<&PyAny>,
+    free_vars: Option<Vec<String>>,
+) -> PyResult<RawEvaluator> {
     let rounding = match rounding_mode {
         None => OutputRounding::Exact,
         Some("RNE") => OutputRounding::Rne,
@@ -284,8 +353,10 @@ fn build_integer_machine(
         }
     };
     let rival_expr = parse_expr(expr)?;
-    let disc = IntegerDiscretization {
+    let range_mode = Arc::new(AtomicBool::new(false));
+    let disc = EvaluationDiscretization {
         rounding,
+        range_mode: range_mode.clone(),
         // Seed interval evaluation from the requested code widths with two
         // guard bits. The discretization itself preserves endpoint precision.
         target_bits: input_total_bits
@@ -293,9 +364,24 @@ fn build_integer_machine(
             .saturating_add(2)
             .max(20),
     };
-    Ok(RawIntegerMachine {
+    let precondition = match precondition {
+        Some(precondition) => parse_expr(precondition)?,
+        None => Expr::Literal(Float::with_val(2, 1)),
+    };
+    // Rival otherwise rejects the entire call when every output has a total
+    // domain error. A valid sentinel lets us return both outputs' error flags.
+    let expressions = vec![
+        precondition,
+        rival_expr,
+        Expr::Literal(Float::with_val(2, 0)),
+    ];
+    Ok(RawEvaluator {
         rounding,
-        machine: MachineBuilder::new(disc).build(vec![rival_expr], vec!["x".to_string()]),
+        range_mode,
+        machine: MachineBuilder::new(disc).build(
+            expressions,
+            free_vars.unwrap_or_else(|| vec!["x".to_string()]),
+        ),
     })
 }
 
@@ -322,6 +408,31 @@ fn parse_expr(obj: &PyAny) -> PyResult<Expr> {
         "mul" => parse_binary(dict, Expr::Mul),
         "neg" => parse_unary(dict, Expr::Neg),
         "abs" => parse_unary(dict, Expr::Fabs),
+        "pow2" => parse_unary(dict, Expr::Pow2),
+        "sqrt" => parse_unary(dict, Expr::Sqrt),
+        "cbrt" => parse_unary(dict, Expr::Cbrt),
+        "exp" => parse_unary(dict, Expr::Exp),
+        "exp2" => parse_unary(dict, Expr::Exp2),
+        "expm1" => parse_unary(dict, Expr::Expm1),
+        "log" => parse_unary(dict, Expr::Log),
+        "log2" => parse_unary(dict, Expr::Log2),
+        "log10" => parse_unary(dict, Expr::Log10),
+        "log1p" => parse_unary(dict, Expr::Log1p),
+        "logb" => parse_unary(dict, Expr::Logb),
+        "sin" => parse_unary(dict, Expr::Sin),
+        "cos" => parse_unary(dict, Expr::Cos),
+        "tan" => parse_unary(dict, Expr::Tan),
+        "asin" => parse_unary(dict, Expr::Asin),
+        "acos" => parse_unary(dict, Expr::Acos),
+        "atan" => parse_unary(dict, Expr::Atan),
+        "sinh" => parse_unary(dict, Expr::Sinh),
+        "cosh" => parse_unary(dict, Expr::Cosh),
+        "tanh" => parse_unary(dict, Expr::Tanh),
+        "asinh" => parse_unary(dict, Expr::Asinh),
+        "acosh" => parse_unary(dict, Expr::Acosh),
+        "atanh" => parse_unary(dict, Expr::Atanh),
+        "erf" => parse_unary(dict, Expr::Erf),
+        "erfc" => parse_unary(dict, Expr::Erfc),
         "round_even" => parse_unary(dict, Expr::Round),
         "floor" => parse_unary(dict, Expr::Floor),
         "ceil" => parse_unary(dict, Expr::Ceil),
@@ -394,10 +505,10 @@ fn parse_ternary(
 #[pymodule]
 fn _rival3(_py: Python<'_>, module: &PyModule) -> PyResult<()> {
     module.add_class::<RawRivalMachine>()?;
-    module.add_class::<RawIntegerMachine>()?;
+    module.add_class::<RawEvaluator>()?;
     module.add_class::<RivalHints>()?;
     module.add_function(wrap_pyfunction!(build_machine, module)?)?;
-    module.add_function(wrap_pyfunction!(build_integer_machine, module)?)?;
+    module.add_function(wrap_pyfunction!(build_integer_evaluator, module)?)?;
     module.add("__doc__", "Native Rival3 bridge for zolotone")?;
     Ok(())
 }

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from fractions import Fraction
 import math
 import typing as tp
 import warnings
 
 from ..errors import InfeasibleError, MissingError, ZolotoneError
-from ..rival import rival_domain_errors, rival_range_analysis
-from ..solver import check_equivalence
+from ..rival.analysis import (
+    analyze_typed_domain,
+    rival_prove_result_fits as _prove_result_fits,
+)
 from ..spec.spec_ast import (
     And,
     BoolEq,
@@ -31,14 +34,24 @@ if tp.TYPE_CHECKING:
     from .autogen import Spec
 
 
-FEASIBILITY_SCHEDULE = [
-    {"tool": "simplify"},
-    {"tool": "z3", "timeout_ms": 10_000},
-]
+def _spec_input_dtypes(spec: "Spec") -> dict[SpecNode, DataType]:
+    return {
+        spec_input: spec.annotations[parameter.name]
+        for spec_input, parameter in zip(
+            spec.spec_inputs,
+            tuple(spec.signature.parameters.values())[:-1],
+            strict=True,
+        )
+    }
 
-REACHABILITY_FALLBACK_SCHEDULE = [
-    {"tool": "z3", "timeout_ms": 10_000},
-]
+
+def spec_domain_analysis(spec: Spec) -> Spec:
+    """Validate assumptions, checks and output; cache bounds on a spec copy."""
+    bounds = analyze_typed_domain(
+        spec.spec_ast, spec.spec_ctx, _spec_input_dtypes(spec),
+        spec.return_annotation, obligations=spec.spec_ctx.checks,
+    )
+    return replace(spec, output_bounds=bounds)
 
 
 def reject_untyped_inputs(contract: _SpecContract):
@@ -222,12 +235,11 @@ def _simplify_spec_ast(
     )
 
 
-def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[float, float]:
-    quantum = 2.0 ** -dtype.frac_bits
-    if isinstance(dtype, UQ):
-        return 0.0, (2.0 ** dtype.int_bits) - quantum
-    magnitude = 2.0 ** (dtype.int_bits - 1)
-    return -magnitude, magnitude - quantum
+def _fixed_point_real_bounds(dtype: Q | UQ) -> tuple[Fraction, Fraction]:
+    width = dtype.total_bits()
+    minimum = -(1 << (width - 1)) if isinstance(dtype, Q) else 0
+    maximum = (1 << (width - isinstance(dtype, Q))) - 1
+    return Fraction(minimum, 1 << dtype.frac_bits), Fraction(maximum, 1 << dtype.frac_bits)
 
 
 def _fixed_point_result_fits(
@@ -237,128 +249,6 @@ def _fixed_point_result_fits(
 ) -> BoolExpr:
     min_bound, max_bound = _fixed_point_real_bounds(dtype)
     return (spec_ast >= ctx.real_val(min_bound)) & (spec_ast <= ctx.real_val(max_bound))
-
-
-def _prove_result_fits(spec_ast, output_type, ctx):
-    if output_type is Bool or isinstance(output_type, Bool):
-        return True
-    if output_type is Q:
-        return True
-    if output_type is UQ:
-        result_fits = spec_ast >= ctx.zero()
-    elif isinstance(output_type, (Q, UQ)):
-        result_fits = _fixed_point_result_fits(spec_ast, output_type, ctx)
-    else:
-        raise TypeError(
-            "Result-fit proof expects a Q or UQ output type, got "
-            f"{output_type!r}"
-        )
-
-    range_ctx = ctx.copy(checks=[result_fits])
-    status, _proof_trace = check_equivalence(range_ctx, schedule=FEASIBILITY_SCHEDULE)
-    return status == "unsat"
-
-
-def _check_spec_reachability(spec: Spec) -> None:
-    report = simplify_ctx(spec.spec_ctx.copy(checks=[]))
-    feasibility_status = report.get("feasibility_status", "unknown")
-
-    if feasibility_status == "not feasible":
-        raise InfeasibleError(
-            f"Specification {spec.spec_ctx.name!r} is unreachable: "
-            "no input satisfies its assumptions"
-        )
-    if feasibility_status == "feasible":
-        return
-
-    # Asking whether spec is satisfiable is equivalent to checking the
-    # counterexample query for an always-false property:
-    # assumes && !false == assumes.
-    simplified_ctx = report["new_ctx"]
-    reachability_ctx = simplified_ctx.copy(checks=[simplified_ctx.false()])
-    status, _proof_trace = check_equivalence(
-        reachability_ctx,
-        schedule=REACHABILITY_FALLBACK_SCHEDULE,
-    )
-    if status == "unsat":
-        raise InfeasibleError(
-            f"Specification {spec.spec_ctx.name!r} is unreachable: "
-            "no input satisfies its assumptions"
-        )
-    elif status != "sat":
-        raise ZolotoneError(
-            "Could not determine whether specification "
-            f"{spec.spec_ctx.name!r} has a reachable input"
-        )
-
-
-def _check_spec_obligations(spec: Spec) -> None:
-    if not spec.spec_ctx.checks:
-        return
-
-    status, _proof_trace = check_equivalence(
-        spec.spec_ctx,
-        schedule=FEASIBILITY_SCHEDULE,
-    )
-    if status == "unsat":
-        return
-    if status == "sat":
-        raise InfeasibleError(
-            f"Specification {spec.spec_ctx.name!r} has a check that does not hold"
-        )
-    raise ZolotoneError(
-        f"Could not prove all checks in specification {spec.spec_ctx.name!r}"
-    )
-
-
-def _domain_nodes(location: str, expression: SpecNode):
-    for child in children(expression):
-        yield from _domain_nodes(location, child)
-    yield location, expression
-
-
-def _warn_about_domain_errors(spec: Spec) -> None:
-    roots: list[tuple[str, SpecNode]] = [
-        (f"assumption {index}", assume)
-        for index, assume in enumerate(spec.spec_ctx.assumes, start=1)
-    ]
-    roots.append(("result", spec.spec_ast))
-    roots.extend(
-        (f"check {index}", check)
-        for index, check in enumerate(spec.spec_ctx.checks, start=1)
-    )
-    roots.extend(
-        (f"requirement {index}", requirement)
-        for index, requirement in enumerate(spec.spec_ctx.requirements, start=1)
-    )
-    tagged_nodes = [
-        tagged_node
-        for location, expression in roots
-        for tagged_node in _domain_nodes(location, expression)
-    ]
-    findings = rival_domain_errors(
-        [expression for _, expression in tagged_nodes],
-        spec.spec_ctx.assumes,
-    )
-    if not findings:
-        return
-
-    for finding in findings:
-        location, culprit = tagged_nodes[finding.expression_index]
-        ranges = ", ".join(
-            f"{name} in [{lower}, {upper}]"
-            for name, (lower, upper) in zip(
-                finding.free_vars,
-                finding.rect,
-                strict=True,
-            )
-        ) or "no input variables"
-        warnings.warn(
-            f"Specification {spec.spec_ctx.name!r} may trigger a domain error in "
-            f"{location}: {culprit}; ranges: {ranges}",
-            UserWarning,
-            stacklevel=3,
-        )
 
 
 def _derive_output_guards(
@@ -374,18 +264,10 @@ def _derive_output_guards(
                 "Numeric output assertions require a real expression, got "
                 f"{type(spec.spec_ast).__name__}"
             )
-        output_range = rival_range_analysis(spec.spec_ast, spec.spec_ctx)
+        output_range = spec.output_bounds
         if output_range is None:
-            raise ZolotoneError(
-                f"Could not obtain output range for: {spec.spec_ast}"
-            )
-
+            output_range = spec_domain_analysis(spec).output_bounds
         lower, upper = output_range
-        if not math.isfinite(lower) or not math.isfinite(upper):
-            raise ZolotoneError(
-                f"Could not obtain finite output range, got {output_range} "
-                f"for {spec.spec_ast}"
-            )
         return (
             (spec.spec_ast >= spec.spec_ctx.real_val(lower))
             & (spec.spec_ast <= spec.spec_ctx.real_val(upper)),
@@ -407,8 +289,9 @@ def _output_format_suggestion_with_search(
     spec_ast: RealExpr,
     conservative_format: Q | UQ,
     ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType],
 ) -> Q | UQ | None:
-    dtype_type = UQ if _prove_result_fits(spec_ast, UQ, ctx) else Q
+    dtype_type = UQ if _prove_result_fits(spec_ast, UQ, ctx, input_dtypes) else Q
 
     def candidate(int_bits: int) -> Q | UQ:
         return dtype_type(int_bits, conservative_format.frac_bits)
@@ -417,7 +300,7 @@ def _output_format_suggestion_with_search(
     max_int_bits = conservative_format.int_bits
     widest = candidate(max_int_bits)
 
-    if not _prove_result_fits(spec_ast, widest, ctx):
+    if not _prove_result_fits(spec_ast, widest, ctx, input_dtypes):
         return None
 
     low = min_int_bits
@@ -425,7 +308,7 @@ def _output_format_suggestion_with_search(
     while low < high:
         middle = (low + high) // 2
         middle_dtype = candidate(middle)
-        if _prove_result_fits(spec_ast, middle_dtype, ctx):
+        if _prove_result_fits(spec_ast, middle_dtype, ctx, input_dtypes):
             high = middle
         else:
             low = middle + 1
@@ -436,17 +319,15 @@ def _output_format_suggestion_with_range_analysis(
     spec_ast: RealExpr,
     return_annotation: Q | UQ,
     ctx: SpecContext,
+    output_range: tuple[Fraction, Fraction] | None = None,
+    *,
+    input_dtypes: dict[SpecNode, DataType] | None = None,
 ) -> Q | UQ:
-    output_range = rival_range_analysis(spec_ast, ctx)
     if output_range is None:
-        raise ZolotoneError(f"Could not obtain output range for: {spec_ast}")
-
+        if input_dtypes is None:
+            raise ZolotoneError("Input dtypes are required for output range analysis")
+        output_range = analyze_typed_domain(spec_ast, ctx, input_dtypes, return_annotation)
     lower, upper = output_range
-    if not math.isfinite(lower) or not math.isfinite(upper):
-        raise ZolotoneError(
-            f"Could not obtain finite output range, got {output_range} "
-            f"for {spec_ast}"
-        )
 
     frac_bits = return_annotation.frac_bits
     scale = 1 << frac_bits
@@ -469,17 +350,19 @@ def _output_format_suggestion(
     spec_ast: RealExpr,
     return_annotation: object,
     ctx: SpecContext,
+    input_dtypes: dict[SpecNode, DataType],
+    output_bounds: tuple[Fraction, Fraction] | None = None,
 ) -> object | None:
     """Derive a conservative format with Rival, then shrink it by search."""
     # TODO: provide a counterexample
     if return_annotation is Bool or isinstance(return_annotation, Bool):
         return return_annotation
     if return_annotation is UQ:
-        if not _prove_result_fits(spec_ast, UQ, ctx):
+        if not _prove_result_fits(spec_ast, UQ, ctx, input_dtypes):
             return Q
         return UQ
     elif return_annotation is Q:
-        if _prove_result_fits(spec_ast, UQ, ctx):
+        if _prove_result_fits(spec_ast, UQ, ctx, input_dtypes):
             return UQ
         return Q
     elif isinstance(return_annotation, (Q, UQ)):
@@ -487,18 +370,21 @@ def _output_format_suggestion(
             spec_ast,
             return_annotation,
             ctx,
+            output_bounds,
+            input_dtypes=input_dtypes,
         )
         suggestion = _output_format_suggestion_with_search(
             spec_ast,
             conservative_format,
             ctx,
+            input_dtypes,
         )
         if suggestion is None:
             raise ValueError(
                 "Rival-derived format does not fit the result: "
                 f"{conservative_format}"
             )
-        if not _prove_result_fits(spec_ast, suggestion, ctx):
+        if not _prove_result_fits(spec_ast, suggestion, ctx, input_dtypes):
             raise ValueError("That's a bug, derived dtype does not fit the result")
         return suggestion
     else:
@@ -516,35 +402,34 @@ def _format_output_annotation(annotation: object) -> str:
     return repr(annotation)
 
 
-def _check_output_format(
-    spec: Spec,
-) -> None:
-    # TODO: counterexample
-    if not _prove_result_fits(
-        spec.spec_ast,
-        spec.return_annotation,
-        spec.spec_ctx,
-    ):
-        suggestion = _output_format_suggestion(
-            spec.spec_ast,
-            spec.return_annotation,
-            spec.spec_ctx,
+def _check_output_format(spec: Spec) -> None:
+    input_dtypes = _spec_input_dtypes(spec)
+    bounds = spec.output_bounds
+    fits = False
+    if bounds is not None:
+        lower, upper = bounds
+        if isinstance(spec.return_annotation, (Q, UQ)):
+            minimum, maximum = _fixed_point_real_bounds(spec.return_annotation)
+            fits = minimum <= lower <= upper <= maximum
+        elif spec.return_annotation is UQ:
+            fits = lower >= 0
+        elif spec.return_annotation is Q or isinstance(spec.return_annotation, Bool):
+            fits = True
+    # A loose enclosure cannot establish that a result does not fit.
+    if not fits:
+        fits = _prove_result_fits(
+            spec.spec_ast, spec.return_annotation, spec.spec_ctx, input_dtypes,
         )
-        message = (
-            "Specification result range does not fit "
-            f"{spec.return_annotation!r}"
-        )
+    suggestion = _output_format_suggestion(
+        spec.spec_ast, spec.return_annotation, spec.spec_ctx, input_dtypes, bounds,
+    )
+    if not fits:
+        message = f"Specification result range does not fit {spec.return_annotation!r}"
         if suggestion is not None:
             message += f"; try {_format_output_annotation(suggestion)} as the output format instead"
         else:
             message += "; could not find a fixed-point format that would fit the range"
         raise InfeasibleError(message)
-
-    suggestion = _output_format_suggestion(
-        spec.spec_ast,
-        spec.return_annotation,
-        spec.spec_ctx,
-    )
     if suggestion != spec.return_annotation:
         warnings.warn(
             f"Output type {spec.return_annotation} is wider than necessary; "
@@ -602,6 +487,26 @@ def _validate_spec_shape(
     )
 
 
+def _validate_only_lut_spec(spec: Spec) -> None:
+    """Validate result eligibility for a single-input LUT before simplification."""
+    from .missing import MAX_GENERATED_TABLE_ENTRIES
+
+    root = spec.spec_ast
+    if not isinstance(root, Round) or root.frac_bits is None:
+        raise MissingError("only_LUT requires root rounding with resolved frac_bits")
+    dtype = spec.return_annotation
+    if dtype not in (Q, UQ) and not isinstance(dtype, (Q, UQ)):
+        raise MissingError("only_LUT requires a Q or UQ output")
+    if isinstance(dtype, (Q, UQ)):
+        if dtype.total_bits() > 64:
+            raise MissingError("Generated LUT outputs must have at most 64 bits")
+    inputs = tuple(_spec_input_dtypes(spec).values())
+    if len(inputs) != 1 or not isinstance(inputs[0], (Q, UQ)):
+        raise MissingError("only_LUT currently requires exactly one Q or UQ input")
+    if inputs[0].total_bits() > MAX_GENERATED_TABLE_ENTRIES.bit_length() - 1:
+        raise MissingError(f"only_LUT exceeds the {MAX_GENERATED_TABLE_ENTRIES}-entry table limit")
+
+
 def _validate_rounding_precision(spec: Spec) -> None:
     """Require resolved precision everywhere and reject narrowing root rounding."""
     pending = [
@@ -637,12 +542,10 @@ def _validate_spec_requirements(spec: Spec) -> None:
 
 
 def add_output_guards(spec: Spec) -> Spec:
+    if spec.output_bounds is None:
+        spec = spec_domain_analysis(spec)
     output_guards = _derive_output_guards(spec)
-    guard_spec = replace(
-        spec,
-        spec_ctx=spec.spec_ctx.copy(checks=list(output_guards)),
-    )
-    _check_spec_obligations(guard_spec)
+    # These guards follow directly from the validated output enclosure.
     spec_ctx = spec.spec_ctx.copy()
     spec_ctx.checks.extend(output_guards)
     return replace(spec, spec_ctx=spec_ctx)
