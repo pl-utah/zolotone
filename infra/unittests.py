@@ -48,7 +48,7 @@ from zolotone.rival import (
 )
 from zolotone.rival.analysis import (
     MAX_RECTS_ENV, RivalRectLimitExceeded, get_rival_rects,
-    rival_feasibility_check, rival_domain_errors, rival_range_analysis, rival_trim_context,
+    rival_feasibility_check, rival_domain_errors, analyze_typed_domain, rival_trim_context,
 )
 from zolotone.spec.spec_context import normalize_ctx, simplify_ctx
 from zolotone.spec.spec_utils import from_egglog
@@ -3341,7 +3341,8 @@ class TestFaithfulRoundingExpansion(unittest.TestCase):
         original = get_spec("shared-faithful-rounding", spec)
         expanded = _expand_faithful_roundings(original)
         self.assertEqual(len(expanded.rounding_choices), 1)
-        self.assertEqual(expanded.spec_ast.on_true.frac_bits, 3)
+        self.assertEqual(expanded.spec_ast.on_true.on_true.frac_bits, 3)
+        self.assertIs(_expand_faithful_roundings(expanded), expanded)
         for location in ("assumes", "checks", "requirements"):
             self.assertIs(getattr(expanded.spec_ctx, location)[0].lhs, expanded.spec_ast)
             self.assertIs(getattr(original.spec_ctx, location)[0].lhs, original.spec_ast)
@@ -3931,10 +3932,8 @@ class TestRoundSpecZ3(unittest.TestCase):
                     return result
 
                 current = validation.add_input_ranges(get_spec("rounded-validation", spec))
-                validation._check_spec_reachability(current)
-                validation._warn_about_domain_errors(current)
+                current = validation.spec_domain_analysis(current)
                 validation._validate_spec_requirements(current)
-                validation._check_spec_obligations(current)
                 validation._check_output_format(current)
 
     def test_rounded_assumptions_are_translated(self):
@@ -9276,53 +9275,8 @@ class TestRivalTranslation(unittest.TestCase):
             for finding in findings
         ))
 
-    def test_rival_range_analysis_unions_rectangle_outputs(self):
-        ctx = SpecContext("rival-output-range")
-        x = ctx.real("x")
-        machine = Mock()
-        machine.apply_range.side_effect = [
-            (-2.0, 1.0),
-            (0.5, 4.0),
-        ]
 
-        with (
-            patch(
-                "zolotone.rival.analysis.get_rival_rects",
-                return_value=[[(0.0, 1.0)], [(2.0, 3.0)]],
-            ),
-            patch("zolotone.rival.analysis.build_machine", return_value=machine),
-        ):
-            bounds = rival_range_analysis(x + ctx.one(), ctx)
 
-        self.assertEqual(bounds, (-2.0, 4.0))
-
-    def test_rival_range_analysis_treats_unsamplable_rect_as_unavailable(self):
-        ctx = SpecContext("rival-unsamplable-range")
-        x = ctx.real("x")
-        machine = Mock()
-        machine.apply_range.return_value = (math.nan, math.nan)
-
-        with (
-            patch(
-                "zolotone.rival.analysis.get_rival_rects",
-                return_value=[[(0.0, 0.0)]],
-            ),
-            patch("zolotone.rival.analysis.build_machine", return_value=machine),
-        ):
-            bounds = rival_range_analysis(x ** ctx.real_val(-1), ctx)
-
-        self.assertIsNone(bounds)
-
-    def test_rival_range_analysis_returns_numeric_output_interval(self):
-        ctx = SpecContext("rival-native-output-range")
-        x = ctx.real("x")
-        y = ctx.real("y")
-        ctx.assume(x >= ctx.zero())
-        ctx.assume(x <= ctx.real_val(3))
-        ctx.assume(y >= ctx.real_val(-4))
-        ctx.assume(y <= ctx.real_val(3))
-
-        self.assertEqual(rival_range_analysis(x + y, ctx), (-4.0, 6.0))
 
     def test_rival_rects_default_to_unbounded(self):
         ctx = SpecContext("rival-rects-default")
@@ -10943,6 +10897,34 @@ class TestParallelClassificationVerification(unittest.TestCase):
 
 
 class TestSpecificationDTypeContracts(unittest.TestCase):
+    def test_autogenerate_abs_extends_initial_signed_input(self):
+        def spec(x: Q(2, 3), ctx) -> Q(3, 3):
+            return abs(x)
+
+        generated = Autogenerate("extended_abs", spec)
+        self.assertEqual(generated.inner_tree.name, "q_abs")
+        self.assertEqual(generated.inner_tree.args[0].name, "q_sign_extend")
+        for code in range(1 << 5):
+            value = Q(2, 3).from_bits(code)
+            generated.args[0].load_value(value)
+            self.assertEqual(generated.evaluate().to_python(), abs(value.to_python()))
+
+    def test_initial_signed_extension_is_bounded_and_optional(self):
+        from zolotone.autogen.spec_lowering import _LoweringSearch
+
+        ctx = SpecContext("bounded-initial-extension")
+        x = ctx.real("x")
+        ctx.assume(x >= ctx.real_val(-1))
+        source = Var("x", Q(2, 3))
+        search = _LoweringSearch(abs(x), {x: source}, Q(2, 3), ctx)
+        self.assertEqual(set(search.candidates[x]), {Q(2, 3), Q(3, 3)})
+        self.assertEqual(search.candidates[x][Q(3, 3)].cost, 1)
+        result = search.run()
+        self.assertEqual(result.name, "q_abs")
+        self.assertIs(result.args[0], source)
+        self.assertEqual(search.result.cost, 1)
+        self.assertNotIn(Q(4, 3), search.candidates[x])
+
     def test_autogenerate_lowers_float_literals_exactly(self):
         from zolotone.autogen.spec_lowering import _exact_fixed_point_value
 
@@ -11261,10 +11243,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             result = search.run()
 
         self.assertTrue(result.name.startswith("LUT_rne_"))
-        self.assertEqual(search.result.cost, 100)
+        self.assertEqual(search.result.cost, 104)
         self.assertIs(result.args[0], source)
-        self.assertEqual(set(search.candidates[x]), {UQ(2, 0)})
-        self.assertEqual(set(search.candidates[x + ctx.one()]), {UQ(3, 0)})
+        self.assertEqual(set(search.candidates[x]), {UQ(2, 0), UQ(3, 0)})
+        self.assertEqual(set(search.candidates[x + ctx.one()]), {UQ(3, 0), UQ(4, 0)})
         for value in range(4):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(result.evaluate().to_python(), (value + 1) ** 2)
@@ -11282,7 +11264,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         ctx = SpecContext("bounded-extension")
         x = ctx.real("x")
-        for input_bits, expected_cost in ((2, 100), (4, 1)):
+        for input_bits, expected_cost in ((2, 104), (4, 1)):
             with (
                 self.subTest(input_bits=input_bits),
                 patch(
@@ -11298,11 +11280,11 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 result = search.run()
                 self.assertEqual(search.result.cost, expected_cost)
                 self.assertGreater(result.dtype.total_bits(), input_bits)
-                self.assertEqual(set(search.candidates[x]), {source.dtype})
+                self.assertEqual(set(search.candidates[x]), {source.dtype, UQ(input_bits + 1, 0)})
                 source.load_value(source.dtype.from_bits(3))
                 self.assertEqual(result.evaluate().to_python(), 9)
 
-    def test_lowering_extends_final_result_directly_without_operand_variants(self):
+    def test_lowering_extends_final_result_directly(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _uq_fraction_extend, _uq_zero_extend
 
@@ -11322,7 +11304,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     self.assertEqual(result.dtype, dtype(40, 2))
                     self.assertIs(result.args[0], source)
                     self.assertEqual(search.result.cost, 1)
-                    self.assertEqual(set(search.candidates[x]), {source.dtype})
+                    expected_formats = {source.dtype, dtype(3, 0)}
+                    self.assertEqual(set(search.candidates[x]), expected_formats)
                     for code in range(4):
                         source.load_value(source.dtype.from_bits(code))
                         self.assertEqual(result.evaluate().to_python(), source.evaluate().to_python())
@@ -11341,7 +11324,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 (squared + y) + squared, {x: source, y: other}, UQ, ctx
             )
             result = search.run()
-        self.assertEqual(search.result.cost, 102)
+        self.assertEqual(search.result.cost, 106)
         self.assertIs(result.args[0].args[0], result.args[1])
         source.load_value(UQ(2, 0).from_bits(3))
         other.load_value(UQ(2, 0).from_bits(1))
@@ -11358,7 +11341,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                     x, {x: Var("x", UQ(2, 2))}, UQ(3, 1), ctx
                 )
 
-    def test_conditional_aligns_branches_without_searching_extensions(self):
+    def test_conditional_aligns_branches_with_initial_extensions(self):
         from zolotone.autogen import spec_lowering
         from zolotone.components import _if_then_else
 
@@ -11374,8 +11357,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                         dtype(5, 2), ctx,
                     )
                     result = search.run()
-                self.assertEqual(set(search.candidates[x]), {left.dtype})
-                self.assertEqual(set(search.candidates[y]), {right.dtype})
+                left_formats = {left.dtype, dtype(3, 2)}
+                right_formats = {right.dtype, dtype(4, 0)}
+                self.assertEqual(set(search.candidates[x]), left_formats)
+                self.assertEqual(set(search.candidates[y]), right_formats)
                 left.load_value(left.dtype.from_bits(15))
                 right.load_value(right.dtype.from_bits(7))
                 for choice, expected in ((1, left), (0, right)):
@@ -11473,7 +11458,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(result.name, "uq_resize")
         self.assertEqual(result.args[0].dtype, UQ(4, 0))
         self.assertTrue(result.args[0].name.startswith("LUT_rne_"))
-        self.assertEqual(search.result.cost, 101)
+        self.assertEqual(search.result.cost, 105)
         source.load_value(UQ(2, 0).from_bits(3))
         self.assertEqual(result.evaluate().to_python(), 9)
 
@@ -11829,7 +11814,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         generated = Autogenerate("partly-unreachable-disjunction", spec)
         self.assertEqual(generated.dtype, UQ(2, 0))
 
-    def test_autogenerate_uses_z3_when_reachability_is_unknown(self):
+    def test_autogenerate_resolves_discrete_reachability(self):
         def spec(x: UQ(2, 0), y: UQ(2, 0), ctx) -> Bool:
             ctx.assume((x * (y + ctx.one())).ne((x * y) + x))
             return x.eq(y)
@@ -11906,61 +11891,18 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertLess(result_position, check_position)
         self.assertLess(check_position, return_position)
 
-    def test_domain_warning_reports_innermost_result_computation(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
 
-        ctx = SpecContext("domain-result")
-        x = ctx.real("x")
-        reciprocal = x ** ctx.real_val(-1)
-
-        with self.assertWarnsRegex(
-            UserWarning,
-            r"Specification 'domain-result'.*result: \(real\(x\) \*\* -1\)",
-        ):
-            _warn_about_domain_errors(
-                _spec_state(reciprocal + ctx.one(), (x,), ctx)
-            )
-
-    def test_domain_warning_prunes_parent_error_expressions(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
-
-        ctx = SpecContext("domain-pruned-parents")
-        x = ctx.real("x")
-        y = ctx.real("y")
-        ctx.assume((x >= ctx.real_val(-8)) & (x <= ctx.real_val(7)))
-        ctx.assume((y >= ctx.zero()) & (y <= ctx.real_val(15)))
-        x_reciprocal = x ** ctx.real_val(-1)
-        y_reciprocal = y ** ctx.real_val(-1)
-        result = (x_reciprocal + ctx.one()) + y_reciprocal
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _warn_about_domain_errors(_spec_state(result, (x, y), ctx))
-
-        messages = [str(warning.message) for warning in caught]
-        self.assertEqual(len(messages), 2)
-        self.assertIn(str(x_reciprocal), messages[0])
-        self.assertIn(str(y_reciprocal), messages[1])
-        self.assertNotIn(str(x_reciprocal + ctx.one()), "\n".join(messages))
-        self.assertNotIn(str(result), "\n".join(messages))
 
     def test_spec_validation_runs_domain_error_check(self):
         from zolotone.autogen.autogen import get_spec
-        from zolotone.autogen.spec_validation import (
-            add_input_ranges,
-            _warn_about_domain_errors,
-        )
+        from zolotone.autogen.spec_validation import spec_domain_analysis
 
         def spec(x: UQ(2, 0), ctx) -> Bool:
             return (x ** ctx.real_val(-1)) > ctx.zero()
 
-        current_spec = add_input_ranges(get_spec("domain-pipeline", spec))
+        with self.assertRaisesRegex(ZolotoneError, "Domain error in output"):
+            spec_domain_analysis(get_spec("domain-pipeline", spec))
 
-        with self.assertWarnsRegex(
-            UserWarning,
-            r"Specification .*domain-pipeline.*result: .*\*\* -1",
-        ):
-            _warn_about_domain_errors(current_spec)
 
     def test_literal_comparison_does_not_need_lowering(self):
         from zolotone.autogen.autogen import get_spec
@@ -12279,26 +12221,17 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         self.assertEqual(ctx.checks, [x <= ctx.zero()])
         self.assertEqual(ctx.requirements, [x >= ctx.real_val(0.5)])
 
-    def test_tightened_inclusive_bound_prevents_reciprocal_domain_warning(self):
+    def test_discrete_bound_excludes_reciprocal_domain_error(self):
         from zolotone.autogen.autogen import get_spec
-        from zolotone.autogen.spec_lowering import rewrite_strict_conditions
-        from zolotone.autogen.spec_validation import add_input_ranges, _warn_about_domain_errors
+        from zolotone.autogen.spec_validation import spec_domain_analysis
 
         def spec(x: UQ(1, 0), ctx) -> UQ(3, 0):
             ctx.assume(x >= ctx.real_val(0.5))
             return (x - ctx.real_val(0.75)) ** ctx.real_val(-1)
 
-        source_spec = add_input_ranges(get_spec("tight-reciprocal-domain", spec))
-        with self.assertWarnsRegex(UserWarning, "domain error"):
-            _warn_about_domain_errors(source_spec)
+        analyzed = spec_domain_analysis(get_spec("tight-reciprocal-domain", spec))
+        self.assertEqual(analyzed.output_bounds, (4, 4))
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _warn_about_domain_errors(rewrite_strict_conditions(source_spec))
-
-        self.assertFalse(
-            any("domain error" in str(warning.message) for warning in caught)
-        )
 
     def test_autogenerate_keeps_source_case_coverage_without_lattice_gap(self):
         def spec(x: UQ(2, 0), ctx) -> UQ(2, 0):
@@ -12312,66 +12245,8 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         self.assertIsInstance(generated, ast_nodes.Node)
 
-    def test_domain_warning_uses_all_assumptions_for_shared_rects(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
 
-        ctx = SpecContext("domain-assumption")
-        x = ctx.real("x")
-        reciprocal_positive = (x ** ctx.real_val(-1)) > ctx.zero()
-        ctx.assume(reciprocal_positive)
-        with self.assertWarnsRegex(
-            UserWarning,
-            r"assumption 1: .*\*\* -1.*x in \[-inf, inf\]",
-        ):
-            _warn_about_domain_errors(
-                _spec_state(ctx.one(), (x,), ctx)
-            )
 
-        ctx.assume(x >= ctx.one())
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _warn_about_domain_errors(
-                _spec_state(ctx.one(), (x,), ctx)
-            )
-        self.assertEqual(caught, [])
-
-    def test_domain_warning_covers_checks_and_requirements(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
-
-        for collection, expected_location in (
-            ("checks", "check 1"),
-            ("requirements", "requirement 1"),
-        ):
-            with self.subTest(collection=collection):
-                ctx = SpecContext(f"domain-{collection}")
-                x = ctx.real("x")
-                expression = (x ** ctx.real_val(-1)) > ctx.zero()
-                getattr(ctx, collection).append(expression)
-
-                with self.assertWarnsRegex(UserWarning, expected_location):
-                    _warn_about_domain_errors(
-                        _spec_state(ctx.one(), (x,), ctx)
-                    )
-
-    def test_domain_warning_evaluates_each_if_branch_node(self):
-        from zolotone.autogen.spec_validation import _warn_about_domain_errors
-
-        ctx = SpecContext("domain-dead-branch")
-        x = ctx.real("x")
-        result = If(
-            x.eq(ctx.zero()),
-            ctx.one(),
-            x ** ctx.real_val(-1),
-        )
-
-        ctx.assume(x.eq(ctx.zero()))
-        with self.assertWarnsRegex(
-            UserWarning,
-            r"result: \(real\(x\) \*\* -1\); ranges: x in \[0\.0, 0\.0\]",
-        ):
-            _warn_about_domain_errors(
-                _spec_state(result, (x,), ctx)
-            )
 
     def test_autogenerate_prefers_depth_zero_identity(self):
         def spec(x: UQ(2, 0), ctx) -> UQ:
@@ -12830,22 +12705,18 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                         Autogenerate("unsafe-msb-truncation", spec)
                     lower.assert_not_called()
 
-    def test_output_optimization_propagates_range_analysis_failure(self):
+    def test_output_optimization_reuses_domain_analysis_bounds(self):
         def spec(x: UQ(2, 0), ctx) -> UQ(4, 0):
-            del ctx
             return x
 
-        with (
-            patch(
-                "zolotone.autogen.spec_validation.rival_range_analysis",
-                return_value=None,
-            ),
-            self.assertRaisesRegex(
-                ZolotoneError,
-                "Could not obtain output range",
-            ),
-        ):
-            Autogenerate("generated_without_range", spec)
+        with patch(
+            "zolotone.autogen.spec_validation.analyze_typed_domain",
+            wraps=analyze_typed_domain,
+        ) as analyze:
+            generated = Autogenerate("generated_cached_range", spec)
+        analyze.assert_called_once()
+        self.assertEqual(generated.dtype, UQ(4, 0))
+
 
     def test_infeasible_signed_output_suggests_unsigned_format(self):
         def spec(x: UQ(2, 0), ctx) -> Q(2, 0):
@@ -12945,7 +12816,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.autogen.spec_validation.rival_range_analysis",
+                "zolotone.autogen.spec_validation.analyze_typed_domain",
                 return_value=(1.0, 4.0),
             ),
             self.assertRaisesRegex(
@@ -12976,23 +12847,16 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ctx = SpecContext("missing-range-analysis")
         spec_ast = ctx.real("x")
 
-        for output_range in (None, (-math.inf, math.inf)):
-            with (
-                self.subTest(output_range=output_range),
-                patch(
-                    "zolotone.autogen.spec_validation.rival_range_analysis",
-                    return_value=output_range,
-                ),
-                self.assertRaisesRegex(
-                    ZolotoneError,
-                    "Could not obtain.*output range",
-                ),
-            ):
-                _output_format_suggestion_with_range_analysis(
-                    spec_ast,
-                    UQ(2, 0),
-                    ctx,
-                )
+        with (
+            patch(
+                "zolotone.autogen.spec_validation.analyze_typed_domain",
+                side_effect=ZolotoneError("Unresolved output"),
+            ),
+            self.assertRaisesRegex(ZolotoneError, "Unresolved output"),
+        ):
+            _output_format_suggestion_with_range_analysis(
+                spec_ast, UQ(2, 0), ctx, input_dtypes={spec_ast: UQ(2, 0)},
+            )
 
     def test_range_analysis_suggestion_matches_solver_search(self):
         from zolotone.autogen.spec_validation import (
@@ -13010,7 +12874,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         range_suggestion = _output_format_suggestion_with_range_analysis(
             spec_ast,
             return_annotation,
-            ctx,
+            ctx, input_dtypes={x: UQ(2, 0)},
         )
         search_suggestion = _output_format_suggestion_with_search(
             spec_ast,
@@ -13027,6 +12891,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         from zolotone.autogen.spec_validation import (
             _derive_output_guards,
             add_input_ranges,
+            spec_domain_analysis,
         )
 
         def spec(x: UQ(4, 0), ctx) -> UQ(4, 0):
@@ -13034,13 +12899,14 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             return x + ctx.one()
 
         current_spec = add_input_ranges(get_spec("derived-output-range", spec))
+        current_spec = spec_domain_analysis(current_spec)
         spec_ast = current_spec.spec_ast
         ctx = current_spec.spec_ctx
 
         with (
             patch(
-                "zolotone.autogen.spec_validation.rival_range_analysis",
-                return_value=(1.0, 8.0),
+                "zolotone.autogen.spec_validation.analyze_typed_domain",
+                side_effect=AssertionError("cached range was recomputed"),
             ) as range_analysis,
         ):
             output_guards = _derive_output_guards(current_spec)
@@ -13051,7 +12917,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         )
         self.assertEqual(output_guards, (expected_check,))
         self.assertEqual(current_spec.spec_ctx.checks, [])
-        range_analysis.assert_any_call(spec_ast, ctx)
+        range_analysis.assert_not_called()
 
     def test_derive_output_guards_adds_boolean_exhaustiveness_check(self):
         from zolotone.autogen.spec_validation import _derive_output_guards
@@ -13061,7 +12927,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
                 ctx = SpecContext("derived-boolean-output")
                 result = ctx.bool("result")
                 with patch(
-                    "zolotone.autogen.spec_validation.rival_range_analysis"
+                    "zolotone.autogen.spec_validation.analyze_typed_domain"
                 ) as range_analysis:
                     output_guards = _derive_output_guards(
                         _spec_state(
@@ -13086,7 +12952,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         ctx.assume(x.eq(ctx.one()))
 
         with patch(
-            "zolotone.autogen.spec_validation.rival_range_analysis",
+            "zolotone.autogen.spec_validation.analyze_typed_domain",
             return_value=(-4.0, 7.0),
         ):
             suggestion = _output_format_suggestion(
@@ -13104,7 +12970,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with (
             patch(
-                "zolotone.autogen.spec_validation.rival_range_analysis",
+                "zolotone.autogen.spec_validation.analyze_typed_domain",
                 return_value=(-0.5, -0.5),
             ),
             self.assertRaisesRegex(InfeasibleError, r"try Q\(0, 1\)"),
@@ -13129,8 +12995,13 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         generated = Autogenerate("generated_assumed_subtraction", spec)
 
-        self.assertEqual(generated.inner_tree.name, "uq_sub")
-        self.assertEqual(generated.dtype, UQ(4, 0))
+        self.assertEqual(generated.dtype, UQ(3, 0))
+        for x in range(8):
+            for y in range(2):
+                if x >= y:
+                    generated.inner_args[0].load_value(UQ(3, 0).from_bits(x))
+                    generated.inner_args[1].load_value(UQ(1, 0).from_bits(y))
+                    self.assertEqual(generated.inner_tree.evaluate().to_python(), x - y)
 
     def test_autogenerate_rejects_unsigned_intermediate_with_negative_range(self):
         def result_spec(x: UQ(4, 0), ctx) -> Q:
@@ -13147,7 +13018,10 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
             assumption_spec,
         )
 
-        self.assertEqual(generated_result.inner_tree.name, "q_sub")
+        self.assertIsInstance(generated_result.dtype, Q)
+        for x in range(16):
+            generated_result.inner_args[0].load_value(UQ(4, 0).from_bits(x))
+            self.assertEqual(generated_result.inner_tree.evaluate().to_python(), x - 1)
         lowered_assumption = generated_assumption.inner_assumes[-1]
         self.assertEqual(lowered_assumption.name, "q_le")
         self.assertEqual(lowered_assumption.args[0].name, "q_sub")
@@ -14422,7 +14296,7 @@ class TestReciprocalDomainScenarios(unittest.TestCase):
         source = Var("x", self.input_dtype)
         node = _build_missing_primitive(
             self.ctx.rne(expression, frac_bits=2), self.x, source,
-            self.ctx.copy(assumes=list(assumptions)), output_dtype=self.output_dtype,
+            self.ctx.copy(assumes=list(assumptions)), output_dtype=self.output_dtype, input_dtypes={self.x: source.dtype},
         )
         return source, node
 
@@ -14456,11 +14330,11 @@ class TestReciprocalDomainScenarios(unittest.TestCase):
                         source.load_value(self.input_dtype.from_bits(point))
                         self.assertEqual(node.evaluate().raw, round(Fraction(4, point)))
                     generated = get_spec(node.name, node.spec)
-                    excluded_zero = generated.spec_inputs[0].ne(self.ctx.zero())
-                    self.assertTrue(any(
-                        assumption.identical(excluded_zero)
-                        for assumption in generated.spec_ctx.assumes
-                    ))
+                    env = {}
+                    solver = z3.Solver()
+                    solver.add(*(assumption.to_z3(env) for assumption in generated.spec_ctx.assumes))
+                    solver.add(generated.spec_inputs[0].to_z3(env) == 0)
+                    self.assertEqual(solver.check(), z3.unsat)
 
     def test_scenario_2_unguarded_output_has_domain_error(self):
         """return 1/x: zero is reachable, but its output is undefined."""
@@ -14491,7 +14365,7 @@ class TestReciprocalDomainScenarios(unittest.TestCase):
                         self.assertFalse(result.precondition)
                         self.assertFalse(result.precondition_error)
                         self.assertEqual(result.output_error, point == 0)
-                with self.assertRaisesRegex(InfeasibleError, "no reachable input codes"):
+                with self.assertRaisesRegex(InfeasibleError, "unreachable|no reachable input codes"):
                     self.primitive(self.reciprocal, assumptions)
 
     def test_scenario_4_assumption_has_domain_error(self):
@@ -14508,7 +14382,7 @@ class TestReciprocalDomainScenarios(unittest.TestCase):
                 if point != 0:
                     self.assertEqual(result.precondition, point > 0)
         with self.assertRaisesRegex(
-            ZolotoneError, "input code 0: domain error in assumptions"
+            ZolotoneError, r"Domain error in assumptions.*x=0"
         ):
             self.primitive(self.x, assumptions)
 
@@ -14543,14 +14417,17 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         with patch.object(z3, "Solver", side_effect=AssertionError("unexpected Z3")):
             primitive = missing._build_missing_primitive(
                 ctx.rne(x ** ctx.two(), frac_bits=2),
-                x, source, ctx, output_dtype=UQ(4, 2),
+                x, source, ctx, output_dtype=UQ(4, 2), input_dtypes={x: source.dtype},
             )
         for point, expected in ((1, 1), (2, 4), (3, 9)):
             source.load_value(UQ(2, 0).from_bits(point))
             self.assertEqual(primitive.evaluate().to_python(), expected)
         spec = get_spec(primitive.name, primitive.spec)
-        excluded_zero = spec.spec_inputs[0].ne(ctx.zero())
-        self.assertTrue(any(assume.identical(excluded_zero) for assume in spec.spec_ctx.assumes))
+        env = {}
+        solver = z3.Solver()
+        solver.add(*(assume.to_z3(env) for assume in spec.spec_ctx.assumes))
+        solver.add(spec.spec_inputs[0].to_z3(env) == 0)
+        self.assertEqual(solver.check(), z3.unsat)
 
     def test_compound_input_conservatively_evaluates_without_z3(self):
         from zolotone.autogen import missing
@@ -14566,6 +14443,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             primitive = missing._build_missing_primitive(
                 ctx.rne((x + y) ** ctx.two(), frac_bits=0),
                 x + y, uq_add(lhs, rhs), ctx, output_dtype=UQ(3, 0),
+                input_dtypes={x: UQ(1, 0), y: UQ(1, 0)},
             )
         lhs.load_value(UQ(1, 0).from_bits(0))
         rhs.load_value(UQ(1, 0).from_bits(1))
@@ -14604,9 +14482,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(1, 2), ctx)
             result = search.run()
 
-        self.assertEqual(search.result.cost, 100)
+        self.assertEqual(search.result.cost, 104)
         self.assertIs(result.args[0], source)
-        build.assert_called_once_with(expression, x, source, search.ctx, output_dtype=UQ(1, 2))
+        build.assert_called_once_with(expression, x, source, search.ctx, output_dtype=UQ(1, 2), input_dtypes={x: UQ(2, 0)})
         for value, expected in ((1, 1), (2, 0.75), (3, 0.5)):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(result.evaluate().to_python(), expected)
@@ -14633,7 +14511,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(1, 2), ctx)
             result = search.run()
 
-        self.assertEqual(search.result.cost, 200)
+        self.assertEqual(search.result.cost, 208)
         self.assertTrue(result.args[0].name.startswith("LUT_rne_"))
         for value, expected in ((1, 1), (2, 1), (3, 0.5)):
             source.load_value(UQ(2, 0).from_bits(value))
@@ -14649,7 +14527,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(2, 3), ctx)
         result = search.run()
 
-        self.assertEqual(search.result.cost, 100)
+        self.assertEqual(search.result.cost, 104)
         self.assertTrue(result.name.startswith("LUT_rne_"))
         self.assertIs(result.args[0], source)
         for value, expected in ((0, 2), (1, 1), (2, 0.625), (3, 0.5)):
@@ -14674,7 +14552,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         # another search iteration after the whole-expression LUT is available.
         with patch("zolotone.components.LOSSLESS_COMPONENTS", (rounded_add, uq_mul)):
             search = spec_lowering._LoweringSearch(
-                ctx.rne(x + x * x, frac_bits=0), {x: source}, UQ, ctx
+                ctx.rne(x + x * x, frac_bits=0), {x: source}, UQ(5, 0), ctx
             )
             result = search.run()
 
@@ -14685,7 +14563,28 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             source.load_value(UQ(2, 0).from_bits(value))
             self.assertEqual(result.evaluate().to_python(), value + value * value)
 
-    def test_lut_uses_narrow_materialized_input_when_direct_table_is_too_large(self):
+    def test_lut_cost_rewards_truncating_input(self):
+        from zolotone.autogen import spec_lowering
+        from zolotone.components import uq_truncate_msb
+
+        ctx = SpecContext("truncate-before-lut")
+        x = ctx.real("x")
+        ctx.assume(x <= ctx.real_val(3))
+        source = Var("x", UQ(4, 0))
+        expression = ctx.rne(x ** ctx.two(), frac_bits=0)
+        with patch("zolotone.components.LOSSLESS_COMPONENTS", (uq_truncate_msb,)):
+            search = spec_lowering._LoweringSearch(expression, {x: source}, UQ(4, 0), ctx)
+            result = search.run()
+
+        self.assertTrue(result.name.startswith("LUT_"))
+        self.assertEqual(result.args[0].dtype, UQ(2, 0))
+        self.assertEqual(result.args[0].name, "uq_truncate_msb")
+        self.assertEqual(search.result.cost, 104)
+        for value in range(4):
+            source.load_value(source.dtype.from_bits(value))
+            self.assertEqual(result.evaluate().to_python(), value * value)
+
+    def test_lut_prefers_smaller_materialized_input(self):
         from zolotone.autogen import spec_lowering
 
         ctx = SpecContext("narrow-lut-boundary")
@@ -14701,7 +14600,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             )
             result = search.run()
 
-        self.assertEqual(search.result.cost, 100)
+        self.assertEqual(search.result.cost, 104)
         self.assertIs(result.args[0], materialized)
         for value, expected in ((1, 1), (2, 0.5), (3, 0.25)):
             materialized.load_value(UQ(2, 0).from_bits(value))
@@ -14723,7 +14622,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
 
         with patch.object(missing, "build_integer_evaluator", side_effect=track_machine) as compile_machine:
             primitive = missing._build_missing_primitive(
-                ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=UQ(4, 0)
+                ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=UQ(4, 0), input_dtypes={x: source.dtype}
             )
         compile_machine.assert_called_once()
         self.assertEqual(evaluator.apply_point.call_args_list, [call([1]), call([2]), call([3])])
@@ -14742,7 +14641,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             with self.assertRaisesRegex(ZolotoneError, "Could not evaluate generated component"):
                 missing._build_missing_primitive(
                     ctx.rne(x ** ctx.two(), frac_bits=0), x, Var("x", UQ(2, 0)), ctx,
-                    output_dtype=UQ(4, 0),
+                    output_dtype=UQ(4, 0), input_dtypes={x: UQ(2, 0)},
                 )
         evaluator.apply_point.assert_called_once_with([0])
 
@@ -14753,9 +14652,9 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
         with self.assertRaises(TypeError):
-            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx)
+            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, input_dtypes={x: source.dtype})
         with self.assertRaisesRegex(MissingError, "output requires a Q or UQ"):
-            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=None)
+            _build_missing_primitive(ctx.rne(x ** ctx.two(), frac_bits=0), x, source, ctx, output_dtype=None, input_dtypes={x: source.dtype})
 
     def test_missing_lookup_rejects_output_overflow(self):
         from zolotone.autogen.missing import _build_missing_primitive
@@ -14772,7 +14671,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             with self.subTest(expression=expression, output_dtype=output_dtype):
                 with self.assertRaisesRegex(ZolotoneError, "does not fit"):
                     _build_missing_primitive(
-                        ctx.rne(expression, frac_bits=0), x, source, ctx, output_dtype=output_dtype
+                        ctx.rne(expression, frac_bits=0), x, source, ctx, output_dtype=output_dtype, input_dtypes={x: source.dtype}
                     )
 
     def test_lossy_lookup_rounds_to_even(self):
@@ -14783,7 +14682,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         x = ctx.real("x")
         source = Var("x", UQ(2, 0))
         rounded = _build_missing_primitive(
-            ctx.rne(x * ctx.real_val(0.5), frac_bits=0), x, source, ctx, output_dtype=UQ(2, 0)
+            ctx.rne(x * ctx.real_val(0.5), frac_bits=0), x, source, ctx, output_dtype=UQ(2, 0), input_dtypes={x: source.dtype}
         )
         generated_spec = get_spec(rounded.name, rounded.spec)
         self.assertTrue(generated_spec.spec_ast.identical(
@@ -14809,7 +14708,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
             x + y,
             uq_add(lhs, rhs),
             ctx,
-            output_dtype=UQ(6, 0),
+            output_dtype=UQ(6, 0), input_dtypes={x: UQ(2, 0), y: UQ(2, 0)},
         )
 
         self.assertEqual(primitive.inner_tree.name, "Tuple_get_item")
@@ -14831,7 +14730,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x.eq(ctx.real_val(-0.5)) | x.eq(ctx.real_val(0.5)))
         source = Var("x", Q(2, 1))
         primitive = _build_missing_primitive(
-            ctx.rne(x * ctx.two(), frac_bits=0), x, source, ctx, output_dtype=Q(3, 0)
+            ctx.rne(x * ctx.two(), frac_bits=0), x, source, ctx, output_dtype=Q(3, 0), input_dtypes={x: source.dtype}
         )
         for value in (-0.5, 0.5):
             with self.subTest(value=value):
@@ -14848,7 +14747,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         ctx.assume(x.ne(ctx.one()))
         primitive = _build_missing_primitive(
             ctx.rne(x ** ctx.two(), frac_bits=2), x, Var("x", UQ(2, 2)), ctx,
-            output_dtype=UQ(4, 2),
+            output_dtype=UQ(4, 2), input_dtypes={x: UQ(2, 2)},
         )
         generated_spec = get_spec(primitive.name, primitive.spec)
         env = {}
@@ -14873,14 +14772,17 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         source = Var("x", Q(2, 1))
         primitive = _build_missing_primitive(
             ctx.rne(x ** ctx.real_val(-1), frac_bits=1),
-            x, source, ctx, output_dtype=Q(3, 1),
+            x, source, ctx, output_dtype=Q(3, 1), input_dtypes={x: source.dtype},
         )
         for value in (-0.5, 0.5):
             source.load_value(Q(2, 1).from_float(value))
             self.assertEqual(primitive.evaluate().to_python(), 1 / value)
         spec = get_spec(primitive.name, primitive.spec)
-        excluded_zero = spec.spec_inputs[0].ne(ctx.zero())
-        self.assertTrue(any(assume.identical(excluded_zero) for assume in spec.spec_ctx.assumes))
+        env = {}
+        solver = z3.Solver()
+        solver.add(*(assume.to_z3(env) for assume in spec.spec_ctx.assumes))
+        solver.add(spec.spec_inputs[0].to_z3(env) == 0)
+        self.assertEqual(solver.check(), z3.unsat)
 
     def test_missing_reciprocal_creates_typed_runtime_primitive(self):
         from zolotone.autogen.autogen import get_spec
@@ -15055,7 +14957,7 @@ class TestMissingPrimitiveRuntime(unittest.TestCase):
         def reciprocal(x: UQ(3, 2), ctx) -> UQ:
             return ctx.rne(x ** ctx.real_val(-1), frac_bits=2)
 
-        with self.assertRaisesRegex(ZolotoneError, "output range"):
+        with self.assertRaisesRegex(ZolotoneError, "Domain error in output"):
             Autogenerate("unbounded", reciprocal)
 
     def test_runtime_component_is_created_only_on_lowering_failure(self):
