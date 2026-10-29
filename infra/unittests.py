@@ -8657,9 +8657,9 @@ class TestRivalEvaluator(unittest.TestCase):
 
         evaluator = build_integer_evaluator(RealVar("x") + RealVar("y"), free_vars=["x", "y"], input_total_bits=4, output_total_bits=8)
         raw = evaluator._raw_machine
-        self.assertEqual(raw.apply_point(["3", "4"]), (True, "7", False, False))
+        self.assertEqual(raw.apply_point(["3", "4"]), (True, "7", False, False, False, False))
         self.assertEqual(raw.apply_range([("1", "2"), ("3", "4")]),
-                         ((True, True), ("4", "6"), False, False))
+                         ((True, True), ("4", "6"), False, False, False, False))
         with self.assertRaisesRegex(ValueError, "expected 2 inputs"):
             raw.apply_point(["1"])
         with self.assertRaisesRegex(ValueError, "expected 2 inputs"):
@@ -8745,7 +8745,9 @@ class TestRivalEvaluator(unittest.TestCase):
         self.assertFalse(result.precondition)
         self.assertFalse(result.precondition_error)
         self.assertTrue(result.output_error)
-        self.assertEqual(machine._raw_machine.apply_point(["0"])[2:], (False, True))
+        self.assertFalse(result.precondition_total_error)
+        self.assertTrue(result.output_total_error)
+        self.assertEqual(machine._raw_machine.apply_point(["0"])[2:], (False, True, False, True))
 
     def test_false_precondition_returns_actual_expression_output(self):
         from zolotone.rival import build_integer_evaluator
@@ -9014,7 +9016,7 @@ class TestRivalResultFits(unittest.TestCase):
         from zolotone.autogen import spec_validation
 
         self.ctx.assume(self.x >= self.y)
-        with patch.object(spec_validation, "check_equivalence", side_effect=AssertionError("solver called")):
+        with patch.object(solver_engine, "check_equivalence", side_effect=AssertionError("solver called")):
             self.assertTrue(spec_validation._prove_result_fits(
                 self.x - self.y, UQ(2, 0), self.ctx, {self.x: UQ(2, 0), self.y: UQ(2, 0)},
             ))
