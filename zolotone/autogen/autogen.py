@@ -245,7 +245,7 @@ def get_spec(
 
 
 def _expand_faithful_roundings(spec: Spec) -> Spec:
-    """Expand FR into explicit choices without adding ordinary function inputs."""
+    """Expand FR choices and correct assumptions for a single choice."""
     # Check the original root before an If could hide narrowing or missing precision.
     _validate_rounding_precision(spec)
     ctx = spec.spec_ctx.copy()
@@ -308,6 +308,45 @@ def _expand_faithful_roundings(spec: Spec) -> Spec:
     ]
     if not expanded:
         return spec
+    choice_vars = tuple(choices.values())
+    if set(choice_vars) & _spec_value_variables(tuple(ctx.assumes)):
+        if len(choices) > 1:
+            raise MissingError(
+                "Assumption-based faithful rounding correction supports only one "
+                f"choice; found {len(choices)} choices"
+            )
+        allowed = ctx.true()
+        for assumption in ctx.assumes:
+            allowed = allowed & assumption
+
+        choice, = choice_vars
+        raz_allowed = substitute_spec_node(allowed, choice, ctx.true())._constant_fold()
+        rtz_allowed = substitute_spec_node(allowed, choice, ctx.false())._constant_fold()
+        rounded, = choices
+        original = rewritten[rounded]
+        raz, rtz = original.on_true, original.on_false
+        # Keep the correction inside each branch so a univariate LUT can absorb it.
+        resolved = If(choice, If(raz_allowed, raz, rtz), If(rtz_allowed, rtz, raz))
+
+        def rewrite(node):
+            return substitute_spec_node(node, original, resolved)
+
+        for location in ("assumes", "checks", "requirements"):
+            conditions = getattr(ctx, location)
+            conditions[:] = [rewrite(condition) for condition in conditions]
+        ctx.case_partitions = [
+            replace(
+                partition,
+                entries=tuple(
+                    replace(entry, condition=rewrite(entry.condition), value=rewrite(entry.value))
+                    for entry in partition.entries
+                ),
+                value=rewrite(partition.value),
+            )
+            for partition in ctx.case_partitions
+        ]
+        spec_ast = rewrite(spec_ast)
+
     new_choices = tuple(choice for choice in choices.values() if choice not in spec.spec_inputs)
     parameters = tuple(spec.signature.parameters.values())
     choice_parameters = tuple(
@@ -351,6 +390,7 @@ def Autogenerate(
     if only_LUT:
         _validate_only_lut_spec(current_spec)
     current_spec = _expand_faithful_roundings(current_spec)
+    print(current_spec)
     # Step 3: simplify before making conditions type-precise.
     current_spec = _simplify_spec_ast(current_spec)
 
