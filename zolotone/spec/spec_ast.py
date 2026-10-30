@@ -645,6 +645,26 @@ class Abs(RealExpr):
 
 
 @dataclass(frozen=True)
+class Pi(RealExpr):
+    """The exact mathematical constant pi, preserved as a symbolic node."""
+
+    def to_egglog(self):
+        raise NotImplementedError("egglog lowering of Pi is not implemented")
+
+    def to_z3(self, env):
+        raise NotImplementedError("Z3 lowering of Pi is not implemented")
+
+    def to_dreal(self, env):
+        raise NotImplementedError("dReal lowering of Pi is not implemented")
+
+    def fold(self):
+        return lambda: None
+
+    def __str__(self):
+        return "pi()"
+
+
+@dataclass(frozen=True)
 class _UnaryRealFunction(RealExpr):
     """A mathematical unary function, preserved exactly as a symbolic node."""
 
@@ -845,6 +865,9 @@ def erf(value: RealExpr) -> Erf:
 
 def erfc(value: RealExpr) -> Erfc:
     return Erfc(value)
+
+def pi() -> Pi:
+    return Pi()
 
 def sin(value: RealExpr) -> Sin:
     return Sin(value)

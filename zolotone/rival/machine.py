@@ -287,6 +287,8 @@ _RIVAL_UNARY_OPS = {
 
 
 def to_rival_ir(node: SpecNode) -> RivalIR:
+    if isinstance(node, Pi):
+        return {"op": "pi"}
     unary_op = _RIVAL_UNARY_OPS.get(type(node))
     if unary_op is not None:
         return _unary(unary_op, node.value)

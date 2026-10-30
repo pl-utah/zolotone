@@ -26,7 +26,7 @@ from .spec_validation import (
 )
 
 
-MAX_GENERATED_TABLE_ENTRIES = 1 << 20
+MAX_GENERATED_TABLE_ENTRIES = 1 << 24
 
 
 def _lut_frac_bits(expression: RealExpr) -> int | None:
