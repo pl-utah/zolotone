@@ -461,6 +461,7 @@ fn parse_expr(obj: &PyAny) -> PyResult<Expr> {
     match op {
         "var" => Ok(Expr::Var(dict_get(dict, "name")?.extract()?)),
         "real_lit" => parse_real_lit(dict),
+        "pi" => Ok(Expr::Pi),
         "bool_lit" => {
             let value: bool = dict_get(dict, "value")?.extract()?;
             Ok(Expr::Literal(Float::with_val(2, if value { 1 } else { 0 })))

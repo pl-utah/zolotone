@@ -21,6 +21,7 @@ from ..spec.spec_ast import (
     Le,
     Lt,
     NotEq,
+    Pi,
     RealExpr,
     RealLit,
     RealVar,
@@ -558,7 +559,7 @@ def lut_inputs(expression):
     cuts = {}
 
     def visit(node):
-        if isinstance(node, (RealLit, BoolLit)):
+        if isinstance(node, (RealLit, BoolLit, Pi)):
             return None
         if node not in cuts:
             node_children = children(node)
