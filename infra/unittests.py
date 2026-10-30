@@ -3236,7 +3236,7 @@ class TestFaithfulRoundingSpecNode(unittest.TestCase):
         node = ctx.fr(ctx.real("x"), 6)
         with patch.object(rival, "_load_native_module") as native:
             with self.assertRaisesRegex(NotImplementedError, "faithful rounding"):
-                rival.build_integer_evaluator(node, input_total_bits=3, output_total_bits=8)
+                rival.build_integer_evaluator(node)
         native.assert_not_called()
 
     def test_faithful_precision_uses_shared_inference_and_validation(self):
@@ -8461,7 +8461,7 @@ class TestBFloat16ReLU(unittest.TestCase):
 
 
 class TestRivalIntegerCodes(unittest.TestCase):
-    def machine(self, expr, input_frac=0, output_frac=0, input_bits=64, output_bits=64):
+    def machine(self, expr, input_frac=0, output_frac=0):
         from zolotone.rival import build_integer_evaluator
 
         x = RealVar("x")
@@ -8470,8 +8470,6 @@ class TestRivalIntegerCodes(unittest.TestCase):
         )
         return build_integer_evaluator(
             Round(integer_expr, RoundingMode.RNE, output_frac),
-            input_total_bits=input_bits,
-            output_total_bits=output_bits,
         )
 
     def test_positive_and_negative_nearest_even_ties(self):
@@ -8485,7 +8483,7 @@ class TestRivalIntegerCodes(unittest.TestCase):
         for exponent in (30, 100, 1000):
             for sign in (-1, 1):
                 expr = RealVar("x") * RealLit(0.5) + RealLit(sign * 2.0**-exponent)
-                machine = self.machine(expr, input_bits=2, output_bits=4)
+                machine = self.machine(expr)
                 with self.subTest(exponent=exponent, sign=sign):
                     self.assertEqual(machine.apply_point([1]), RivalEvaluation(True, int(sign > 0)))
                     self.assertEqual(machine.apply_point([-1]), RivalEvaluation(True, -int(sign < 0)))
@@ -8509,7 +8507,7 @@ class TestRivalIntegerCodes(unittest.TestCase):
 
     def test_scaling_beyond_binary64_exponent_range(self):
         expr = RealVar("x") * (RealLit(2) ** RealLit(1200))
-        machine = self.machine(expr, input_frac=1200, input_bits=1201)
+        machine = self.machine(expr, input_frac=1200)
         self.assertEqual(machine.apply_point([3]), RivalEvaluation(True, 3))
         self.assertEqual(machine.apply_point([-3]), RivalEvaluation(True, -3))
 
@@ -8552,7 +8550,7 @@ class TestRivalEvaluator(unittest.TestCase):
     def test_exact_point_rejects_fractional_outputs(self):
         from zolotone.rival import build_integer_evaluator
 
-        evaluator = build_integer_evaluator(RealVar("x") * RealLit(0.5), input_total_bits=4, output_total_bits=4)
+        evaluator = build_integer_evaluator(RealVar("x") * RealLit(0.5))
         for code in (-3, -1, 1, 3):
             with self.subTest(code=code), self.assertRaisesRegex(ValueError, "non-integer output"):
                 evaluator.apply_point([code])
@@ -8562,7 +8560,7 @@ class TestRivalEvaluator(unittest.TestCase):
     def test_exact_ranges_preserve_fractional_bounds(self):
         from zolotone.rival import build_integer_evaluator
 
-        evaluator = build_integer_evaluator(RealVar("x") * RealLit(0.5), input_total_bits=4, output_total_bits=4)
+        evaluator = build_integer_evaluator(RealVar("x") * RealLit(0.5))
         self.assertEqual(evaluator.apply_range([(1, 3)]),
                          RivalEvaluation((True, True), (Fraction(1, 2), Fraction(3, 2))))
         with self.assertRaisesRegex(ValueError, "non-integer output"):
@@ -8574,8 +8572,7 @@ class TestRivalEvaluator(unittest.TestCase):
 
         for precondition in (BoolLit(True), BoolLit(False)):
             with self.subTest(precondition=precondition):
-                evaluator = build_integer_evaluator(RealVar("x") ** RealLit(-1), precondition,
-                                                    input_total_bits=4, output_total_bits=4)
+                evaluator = build_integer_evaluator(RealVar("x") ** RealLit(-1), precondition)
                 result = evaluator.apply_point([0])
                 self.assertEqual(result.precondition, precondition.value)
                 self.assertTrue(result.output_error)
@@ -8588,7 +8585,7 @@ class TestRivalEvaluator(unittest.TestCase):
         evaluator = build_integer_evaluator(
             x + RealLit(10) * y + RealLit(100) * z,
             (x >= y) & (z > RealLit(0)),
-            free_vars=["y", "x", "z"], input_total_bits=8, output_total_bits=16,
+            free_vars=["y", "x", "z"],
         )
         self.assertEqual(evaluator.apply_point([2, 5, 1]), RivalEvaluation(True, 125))
         self.assertEqual(evaluator.apply_point([5, 2, 1]), RivalEvaluation(False, 152))
@@ -8599,7 +8596,7 @@ class TestRivalEvaluator(unittest.TestCase):
         from zolotone.rival import build_integer_evaluator
 
         x, y = RealVar("x"), RealVar("y")
-        evaluator = build_integer_evaluator(x + y, free_vars=["x", "y"], input_total_bits=128, output_total_bits=128)
+        evaluator = build_integer_evaluator(x + y, free_vars=["x", "y"])
         large = 1 << 100
         self.assertEqual(evaluator.apply_point([large + 1, -large]), RivalEvaluation(True, 1))
         self.assertEqual(evaluator.apply_range([(large + 1, large + 2), (-large, -large + 1)]),
@@ -8612,7 +8609,7 @@ class TestRivalEvaluator(unittest.TestCase):
         x, y = RealVar("x"), RealVar("y")
         evaluator = build_integer_evaluator(
             ctx.rne(x * y ** RealLit(-1), frac_bits=0), y > RealLit(0),
-            free_vars=["x", "y"], input_total_bits=4, output_total_bits=4,
+            free_vars=["x", "y"],
         )
         self.assertEqual(evaluator.apply_point([3, 2]), RivalEvaluation(True, 2))
         self.assertEqual(evaluator.apply_point([1, 2]), RivalEvaluation(True, 0))
@@ -8627,7 +8624,7 @@ class TestRivalEvaluator(unittest.TestCase):
         from zolotone.rival import build_integer_evaluator
 
         x, y = RealVar("x"), RealVar("y")
-        evaluator = build_integer_evaluator(x + y, free_vars=["x", "y"], input_total_bits=4, output_total_bits=8)
+        evaluator = build_integer_evaluator(x + y, free_vars=["x", "y"])
         for point in ([], [1], [1, 2, 3]):
             with self.subTest(point=point), self.assertRaisesRegex(ValueError, "expected 2 inputs"):
                 evaluator.apply_point(point)
@@ -8645,17 +8642,17 @@ class TestRivalEvaluator(unittest.TestCase):
         with patch.object(rival, "_load_native_module") as native:
             for names in (["x"], ["x", "x"]):
                 with self.subTest(names=names), self.assertRaises(ValueError):
-                    rival.build_integer_evaluator(x + y, free_vars=names, input_total_bits=4, output_total_bits=8)
+                    rival.build_integer_evaluator(x + y, free_vars=names)
             with self.assertRaises(TypeError):
-                rival.build_integer_evaluator(x, free_vars=[1], input_total_bits=4, output_total_bits=8)
+                rival.build_integer_evaluator(x, free_vars=[1])
             with self.assertRaisesRegex(ValueError, "missing referenced variables"):
-                rival.build_integer_evaluator(x, y > RealLit(0), free_vars=["x"], input_total_bits=4, output_total_bits=8)
+                rival.build_integer_evaluator(x, y > RealLit(0), free_vars=["x"])
         native.assert_not_called()
 
     def test_multivariate_native_api(self):
         from zolotone.rival import build_integer_evaluator
 
-        evaluator = build_integer_evaluator(RealVar("x") + RealVar("y"), free_vars=["x", "y"], input_total_bits=4, output_total_bits=8)
+        evaluator = build_integer_evaluator(RealVar("x") + RealVar("y"), free_vars=["x", "y"])
         raw = evaluator._raw_machine
         self.assertEqual(raw.apply_point(["3", "4"]), (True, "7", False, False, False, False))
         self.assertEqual(raw.apply_range([("1", "2"), ("3", "4")]),
@@ -8668,7 +8665,7 @@ class TestRivalEvaluator(unittest.TestCase):
     def test_sequence_and_zero_input_calls(self):
         from zolotone.rival import build_integer_evaluator
 
-        evaluator = build_integer_evaluator(RealVar("x"), input_total_bits=4, output_total_bits=4)
+        evaluator = build_integer_evaluator(RealVar("x"))
         self.assertEqual(evaluator.apply_point([3]), evaluator.apply_point((3,)))
         self.assertEqual(evaluator.apply_range([(1, 3)]), evaluator.apply_range(((1, 3),)))
         with self.assertRaises(TypeError):
@@ -8679,7 +8676,7 @@ class TestRivalEvaluator(unittest.TestCase):
             evaluator._raw_machine.apply_point("3")
         with self.assertRaises(TypeError):
             evaluator._raw_machine.apply_range("1", "3")
-        constant = build_integer_evaluator(RealLit(7), free_vars=[], input_total_bits=1, output_total_bits=4)
+        constant = build_integer_evaluator(RealLit(7), free_vars=[])
         self.assertEqual(constant.apply_point([]), RivalEvaluation(True, 7))
         self.assertEqual(constant.apply_range([]), RivalEvaluation((True, True), (7, 7)))
 
@@ -8692,7 +8689,6 @@ class TestRivalEvaluator(unittest.TestCase):
         with patch.object(native, "build_integer_evaluator", wraps=native.build_integer_evaluator) as compile_machine:
             evaluator = rival.build_integer_evaluator(
                 ctx.rne(x * ctx.real_val(0.5), frac_bits=0),
-                input_total_bits=4, output_total_bits=4,
             )
             self.assertEqual(evaluator.apply_range([(-3, 5)]), RivalEvaluation((True, True), (-2, 2)))
             self.assertEqual(evaluator.apply_point([1]), RivalEvaluation(True, 0))
@@ -8704,7 +8700,7 @@ class TestRivalEvaluator(unittest.TestCase):
         from zolotone.rival import build_integer_evaluator
 
         x = RealVar("x")
-        evaluator = build_integer_evaluator(x * RealLit(2), x >= RealLit(0), input_total_bits=64, output_total_bits=65)
+        evaluator = build_integer_evaluator(x * RealLit(2), x >= RealLit(0))
         result = evaluator.apply_range([(-2, 2)])
         self.assertEqual(result, RivalEvaluation((False, True), (Fraction(-4), Fraction(4))))
         large = (1 << 60) + 1
@@ -8717,7 +8713,7 @@ class TestRivalEvaluator(unittest.TestCase):
         ctx = SpecContext("range-then-refine")
         x = ctx.real("x")
         expression = ctx.rne(x * ctx.real_val(0.5) + ctx.two() ** ctx.real_val(-1000), frac_bits=0)
-        evaluator = build_integer_evaluator(expression, input_total_bits=2, output_total_bits=2)
+        evaluator = build_integer_evaluator(expression)
         self.assertEqual(evaluator.apply_range([(0, 1)]).output, (0, 1))
         self.assertEqual(evaluator.apply_point([1]), RivalEvaluation(True, 1))
 
@@ -8726,7 +8722,7 @@ class TestRivalEvaluator(unittest.TestCase):
 
         ctx = SpecContext("range-errors")
         x = ctx.real("x")
-        evaluator = build_integer_evaluator(ctx.rne(x ** ctx.real_val(-1), frac_bits=0), input_total_bits=2, output_total_bits=2)
+        evaluator = build_integer_evaluator(ctx.rne(x ** ctx.real_val(-1), frac_bits=0))
         self.assertTrue(evaluator.apply_range([(0, 0)]).output_error)
         self.assertIsNone(evaluator.apply_range([(0, 1)]).output)
         with self.assertRaisesRegex(ValueError, "reversed"):
@@ -8739,7 +8735,7 @@ class TestRivalEvaluator(unittest.TestCase):
         ctx = SpecContext("false-precondition")
         machine = build_integer_evaluator(
             ctx.rne(ctx.zero() ** ctx.real_val(-1), frac_bits=0),
-            ctx.false(), input_total_bits=4, output_total_bits=8,
+            ctx.false(),
         )
         result = machine.apply_point([0])
         self.assertFalse(result.precondition)
@@ -8756,7 +8752,6 @@ class TestRivalEvaluator(unittest.TestCase):
         x = ctx.real("x")
         machine = build_integer_evaluator(
             x * ctx.real_val(3), ctx.false(),
-            input_total_bits=4, output_total_bits=8,
         )
         self.assertEqual(machine.apply_point([2]), RivalEvaluation(False, 6))
         self.assertEqual(machine.apply_point([-2]), RivalEvaluation(False, -6))
@@ -8770,11 +8765,11 @@ class TestRivalEvaluator(unittest.TestCase):
             for precondition in (True, x):
                 with self.subTest(precondition=precondition), self.assertRaises(TypeError):
                     rival.build_integer_evaluator(
-                        x, precondition, input_total_bits=4, output_total_bits=8,
+                        x, precondition,
                     )
             with self.assertRaisesRegex(ValueError, "missing referenced variables"):
                 rival.build_integer_evaluator(
-                    x, y > ctx.zero(), input_total_bits=4, output_total_bits=8,
+                    x, y > ctx.zero(),
                 )
         native.assert_not_called()
 
@@ -8785,7 +8780,7 @@ class TestRivalEvaluator(unittest.TestCase):
         x = ctx.real("x")
         machine = build_integer_evaluator(
             ctx.rne(x ** ctx.real_val(-1), frac_bits=2),
-            x.ne(ctx.zero()), input_total_bits=4, output_total_bits=8,
+            x.ne(ctx.zero()),
         )
         for code, expected in ((1, (True, 4)), (2, (True, 2)), (-2, (True, -2))):
             with self.subTest(code=code):
@@ -8805,7 +8800,7 @@ class TestRivalEvaluator(unittest.TestCase):
         for mode in (ctx.rne, ctx.rtz, ctx.raz):
             machine = build_integer_evaluator(
                 mode(x * ctx.real_val(Fraction(1, 2)), frac_bits=0),
-                Sin(x + tiny) > ctx.zero(), input_total_bits=4, output_total_bits=8,
+                Sin(x + tiny) > ctx.zero(),
             )
             with self.subTest(mode=mode):
                 self.assertEqual(machine.apply_point([0]), RivalEvaluation(True, 0))
@@ -8818,9 +8813,9 @@ class TestRivalEvaluator(unittest.TestCase):
         ctx = SpecContext("checked-large-input")
         x = ctx.real("x")
         point = (1 << 60) + 1
-        machine = build_integer_evaluator(x, input_total_bits=64, output_total_bits=64)
+        machine = build_integer_evaluator(x)
         self.assertEqual(machine.apply_point([point]), RivalEvaluation(True, point))
-        machine = build_integer_evaluator(x, x.eq(ctx.real_val(point)), input_total_bits=64, output_total_bits=64)
+        machine = build_integer_evaluator(x, x.eq(ctx.real_val(point)))
         self.assertEqual(machine.apply_point([point]), RivalEvaluation(True, point))
         self.assertEqual(machine.apply_point([point - 1]), RivalEvaluation(False, point - 1))
 
@@ -8835,7 +8830,7 @@ class TestRivalEvaluator(unittest.TestCase):
             (x, reciprocal > ctx.zero(), (True, False)),
             (reciprocal, reciprocal < ctx.zero(), (True, True)),
         ):
-            machine = build_integer_evaluator(ctx.rne(expr, frac_bits=0), precondition, input_total_bits=4, output_total_bits=8)
+            machine = build_integer_evaluator(ctx.rne(expr, frac_bits=0), precondition)
             with self.subTest(expr=expr, precondition=precondition):
                 result = machine.apply_point([0])
                 self.assertEqual((result.precondition_error, result.output_error), expected)
@@ -8876,7 +8871,7 @@ class TestRivalResultFits(unittest.TestCase):
         from zolotone.rival import analysis
 
         machine = Mock(wraps=analysis.build_integer_evaluator(
-            self.x, free_vars=["x"], input_total_bits=128, output_total_bits=128,
+            self.x, free_vars=["x"],
         ))
         with patch.object(analysis, "build_integer_evaluator", return_value=machine):
             self.assertTrue(self.prove(self.x, UQ(128, 0), {self.x: UQ(128, 0)}))
@@ -14288,8 +14283,6 @@ class TestReciprocalDomainScenarios(unittest.TestCase):
             precondition = precondition & assumption
         return build_integer_evaluator(
             self.ctx.rne(expression, frac_bits=2), precondition,
-            input_total_bits=self.input_dtype.total_bits(),
-            output_total_bits=self.output_dtype.total_bits(),
         )
 
     def primitive(self, expression, assumptions):
@@ -14398,7 +14391,7 @@ class TestRivalEvaluatorPreconditions(unittest.TestCase):
         condition = (x ** ctx.real_val(-1)) < ctx.zero()
         for precondition in (condition, ctx.true() & condition, ctx.false() | condition):
             machine = build_integer_evaluator(
-                x, precondition, input_total_bits=4, output_total_bits=8,
+                x, precondition,
             )
             with self.subTest(precondition=precondition):
                 result = machine.apply_point([0])
