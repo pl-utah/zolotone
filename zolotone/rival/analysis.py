@@ -14,7 +14,7 @@ from ..errors import InfeasibleError, ZolotoneError
 from ..spec.spec_ast import *
 from ..types import Bool, DataType, Q, UQ
 from .machine import (
-    RivalMachine, build_boolean_evaluator, build_integer_evaluator, build_machine, collect_free_vars, to_rival_ir,
+    RivalMachine, build_boolean_evaluator, build_float_evaluator, build_integer_evaluator, build_machine, collect_free_vars, to_rival_ir,
     _and_exprs, _real_literal_ratio,
 )
 
@@ -163,9 +163,9 @@ def analyze_typed_domain(
 ) -> tuple[Fraction, Fraction]:
     """Validate a finite typed domain and enclose its output.
 
-    Inputs are decoded from integer codes. Generic Q/UQ outputs use the
-    existing 30-fractional-bit grid, without implicit rounding. Unresolved
-    points and domain errors raise rather than supplying unproven bounds.
+    Inputs are decoded from integer codes. Generic Q/UQ outputs use outward
+    floating-point enclosures, without imposing a fixed-point output grid.
+    Unresolved points and domain errors raise rather than supplying unproven bounds.
     """
     if output_dtype is Bool:
         output_dtype = Bool()
@@ -222,17 +222,13 @@ def analyze_typed_domain(
         RealLit(0), precondition=assumes, **kwargs,
     )
     checks_machine = build_boolean_evaluator(checks, **kwargs)
-    generic_frac_bits = (
-        output.frac_bits
-        if isinstance(output, Round) and output.frac_bits is not None else 30
-    )
-    output_frac_bits = generic_frac_bits if generic_output else (
-        0 if isinstance(output_dtype, Bool) else output_dtype.frac_bits
-    )
-    output_scale = Fraction(2) ** output_frac_bits
-    if isinstance(output_dtype, Bool):
+    output_scale = Fraction(1)
+    if generic_output:
+        output_machine = build_float_evaluator(output, **kwargs)
+    elif isinstance(output_dtype, Bool):
         output_machine = build_boolean_evaluator(output, **kwargs)
     else:
+        output_scale = Fraction(2) ** output_dtype.frac_bits
         output_machine = build_integer_evaluator(
             output * RealLit(output_scale),
             **kwargs,
@@ -323,7 +319,8 @@ def analyze_typed_domain(
         if checks.output in (0, (0, 0)):
             raise InfeasibleError(f"Specification has a check that does not hold at {format_box(box)}")
 
-        output = evaluate_box(output_machine, box, is_point, "output")
+        # A rounded point float alone is not a sound enclosure - evaluate using ranges
+        output = evaluate_box(output_machine, box, is_point and not generic_output, "output")
         if output.output_total_error:
             raise ZolotoneError(f"Domain error in output at {format_box(box)}")
         if output.output_error or output.output is None:
@@ -332,8 +329,10 @@ def analyze_typed_domain(
             pending.extend(split_box(box))
             continue
 
-        lower, upper = (output.output, output.output) if is_point else output.output
-        lower, upper = lower / output_scale, upper / output_scale
+        lower, upper = (output.output, output.output) if is_point and not generic_output else output.output
+        if generic_output and not (math.isfinite(lower) and math.isfinite(upper)):
+            raise ZolotoneError(f"Non-finite output bounds at {format_box(box)}")
+        lower, upper = Fraction(lower) / output_scale, Fraction(upper) / output_scale
         output_bounds = (
             (lower, upper) if output_bounds is None else
             (min(output_bounds[0], lower), max(output_bounds[1], upper))
