@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class VerificationResult:
-    """Counts refer to input/rounding-choice assignments."""
+    """Counts refer to assignments; skipped means C++ asserted as expected."""
 
     checked: int
     skipped: int
@@ -60,16 +60,31 @@ def _evaluate_point(machine, pt, label, stage):
     return result
 
 
+def strip_root_rounding(root: RealExpr) -> RealExpr:
+    """Extract the unrounded reference from a faithfully expanded root.
+
+    Root faithful rounding expands into If guards whose Round branches share
+    the same value. Discard those guards and the outer Round, preserving all
+    expanded intermediate roundings in its value.
+    """
+    while isinstance(root, If):
+        root = root.on_true
+    if not isinstance(root, Round):
+        raise ValueError("Faithful expansion did not preserve the root rounding")
+    return root.value
+
+
 def zfv(spec: Spec, component: Composite) -> VerificationResult:
     """Check each reachable input/choice against the original root error budget.
 
     Faithful rounding is expanded in assumptions and intermediate reference
     expressions, sharing synthesis's choice redirection. Only proven-false
-    assumptions exclude an assignment; evaluation errors never count as skips.
+    assumptions require a C++ assertion; true assumptions require a result.
+    Evaluation errors never count as skips.
     """
     from .autogen import _expand_faithful_roundings
     from .spec_validation import _spec_input_dtypes
-    from infra.compile_cpp import jit_compile
+    from infra.compile_cpp import CppAssertionError, jit_compile
 
     output_dtype = component.dtype
     if not isinstance(output_dtype, (Q, UQ)):
@@ -119,19 +134,9 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
         if dtype.total_bits() > 64:
             raise NotImplementedError("zfv C++ inputs must have at most 64 bits")
 
-    # Expand a copy, preserving the original root's mode, precision and
-    # unrounded numerical reference rather than using the expanded output.
+    # Expand faithful rounding in both the reference and assumptions.
     expanded_spec = _expand_faithful_roundings(spec)
-    # Root FR becomes an If selecting RTZ/RAZ, possibly through another If
-    # redirecting a disallowed choice. All those outer Round nodes share the
-    # same pre-round argument. Take that argument, retaining expanded inner
-    # roundings while discarding only the root's choice and correction guards.
-    expanded_root = expanded_spec.spec_ast
-    while isinstance(expanded_root, If):
-        expanded_root = expanded_root.on_true
-    if not isinstance(expanded_root, Round):
-        raise ValueError("Faithful expansion did not preserve the root rounding")
-    reference = expanded_root.value
+    reference = strip_root_rounding(expanded_spec.spec_ast)
     precondition = BoolLit(True)
     for assumption in expanded_spec.spec_ctx.assumes:
         precondition = precondition & assumption
@@ -167,7 +172,7 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
             reference = substitute_spec_node(reference, expanded_choices[index], decoded)
             precondition = substitute_spec_node(precondition, expanded_choices[index], decoded)
 
-    # Keep reachability separate so unreachable inputs never execute C++.
+    # Decide whether each C++ execution must assert or return a result.
     assumptions_machine = build_integer_evaluator(
         RealLit(0), precondition, free_vars=free_vars,
     )
@@ -182,25 +187,39 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
 
     checked = skipped = 0
     # Compile C++
-    tempdir, evaluate_cpp = jit_compile(component)
+    tempdir, evaluate_cpp = jit_compile(component, catch_assertions=True)
     try:
         # Exhaustively iterate over every input
         for raw_inputs in product(*(range(1 << dtype.total_bits()) for _, dtype in inputs)):
             signed_pt = [_signed_pt(raw, dtype) for raw, (_, dtype) in zip(raw_inputs, inputs)]
             label = {source.name: code for (source, _), code in zip(inputs, signed_pt)}
             for choice in choices:
+                # Assumes evaluation
                 point = signed_pt + list(choice)
                 assignment_label = {"inputs": label, "choices": choice}
                 assumptions = _evaluate_point(
                     assumptions_machine, point, assignment_label, "assumption evaluation",
                 )
-                if assumptions.precondition is False:
-                    skipped += 1
-                    continue
-                if assumptions.precondition is not True:
+                if assumptions.precondition is not True and assumptions.precondition is not False:
                     raise VerificationInconclusive(f"ZFV: assumptions unresolved at {assignment_label}")
 
-                raw_output = int(evaluate_cpp(*raw_inputs, *choice))
+                # C++ evaluation
+                try:
+                    raw_output = int(evaluate_cpp(*raw_inputs, *choice))
+                except CppAssertionError as exc:
+                    if assumptions.precondition is False:
+                        skipped += 1
+                        continue
+                    raise ZolotoneError(
+                        f"ZFV: C++ asserted despite true assumptions at {assignment_label}: {exc}"
+                    ) from exc
+                if assumptions.precondition is False:
+                    raise ZolotoneError(
+                        f"ZFV: C++ returned despite false assumptions at {assignment_label}: {raw_output}"
+                    )
+
+                # At this point C++ and assumes should agree that the point belongs to domain
+
                 output_dtype.validate_raw(raw_output)
                 cpp_code = _signed_pt(raw_output, output_dtype)
                 result = _evaluate_point(
