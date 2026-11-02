@@ -8,6 +8,8 @@ use std::sync::{
     Arc,
 };
 
+mod generic;
+
 #[derive(Clone)]
 struct F64Discretization;
 
@@ -567,6 +569,8 @@ fn parse_ternary(
 
 #[pymodule]
 fn _rival3(_py: Python<'_>, module: &PyModule) -> PyResult<()> {
+    module.add_class::<generic::RawCompiledMachine>()?;
+    module.add_function(wrap_pyfunction!(generic::rival_compile, module)?)?;
     module.add_class::<RawRivalMachine>()?;
     module.add_class::<RawEvaluator>()?;
     module.add_class::<RawFloatEvaluator>()?;
