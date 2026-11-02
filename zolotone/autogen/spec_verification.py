@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import product
 from typing import TYPE_CHECKING
@@ -61,12 +61,7 @@ def _evaluate_point(machine, pt, label, stage):
 
 
 def strip_root_rounding(root: RealExpr) -> RealExpr:
-    """Extract the unrounded reference from a faithfully expanded root.
-
-    Root faithful rounding expands into If guards whose Round branches share
-    the same value. Discard those guards and the outer Round, preserving all
-    expanded intermediate roundings in its value.
-    """
+    """Extract the unrounded reference from a faithfully expanded root."""
     while isinstance(root, If):
         root = root.on_true
     if not isinstance(root, Round):
@@ -75,7 +70,7 @@ def strip_root_rounding(root: RealExpr) -> RealExpr:
 
 
 def zfv(spec: Spec, component: Composite) -> VerificationResult:
-    """Check each reachable input/choice against the original root error budget.
+    """Check each reachable input/choice against rounding and the error budget.
 
     Faithful rounding is expanded in assumptions and intermediate reference
     expressions, sharing synthesis's choice redirection. Only proven-false
@@ -134,13 +129,16 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
         if dtype.total_bits() > 64:
             raise NotImplementedError("zfv C++ inputs must have at most 64 bits")
 
-    # Expand faithful rounding in both the reference and assumptions.
+    # Expand faithful rounding in both the reference (due to nested roundings) and assumptions.
     expanded_spec = _expand_faithful_roundings(spec)
-    reference = strip_root_rounding(expanded_spec.spec_ast)
+    rounded_reference = expanded_spec.spec_ast
+    if isinstance(rounded_reference, Round) and rounded_reference.frac_bits is None:
+        rounded_reference = replace(rounded_reference, frac_bits=precision)
+    unrounded_reference = strip_root_rounding(rounded_reference)
     precondition = BoolLit(True)
     for assumption in expanded_spec.spec_ctx.assumes:
         precondition = precondition & assumption
-    occupied = set(collect_free_vars([reference, precondition]))
+    occupied = set(collect_free_vars([unrounded_reference, rounded_reference, precondition]))
     expanded_choices = tuple(expanded_spec.rounding_choices.values())
     referenced_choices = occupied & {choice.name for choice in expanded_choices}
     if referenced_choices and len(expanded_choices) != rounding_choices:
@@ -161,7 +159,8 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
         decoded = code.ne(RealLit(0)) if isinstance(dtype, Bool) else (
             code * RealLit(Fraction(2) ** -dtype.frac_bits)
         )
-        reference = substitute_spec_node(reference, source, decoded)
+        unrounded_reference = substitute_spec_node(unrounded_reference, source, decoded)
+        rounded_reference = substitute_spec_node(rounded_reference, source, decoded)
         precondition = substitute_spec_node(precondition, source, decoded)
 
     for index in range(rounding_choices):
@@ -169,7 +168,8 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
         free_vars.append(code.name)
         if len(expanded_choices) == rounding_choices:
             decoded = code.ne(RealLit(0))
-            reference = substitute_spec_node(reference, expanded_choices[index], decoded)
+            unrounded_reference = substitute_spec_node(unrounded_reference, expanded_choices[index], decoded)
+            rounded_reference = substitute_spec_node(rounded_reference, expanded_choices[index], decoded)
             precondition = substitute_spec_node(precondition, expanded_choices[index], decoded)
 
     # Decide whether each C++ execution must assert or return a result.
@@ -181,8 +181,9 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
     choices = tuple(product((0, 1), repeat=rounding_choices))
     cpp_result = fresh_name("__zfv_output")
     actual = cpp_result * RealLit(Fraction(2) ** -output_dtype.frac_bits)
-    error = abs(actual - reference)
+    error = abs(actual - unrounded_reference)
     predicate = error <= RealLit(error_bound) if inclusive else error < RealLit(error_bound)
+    predicate = predicate & actual.eq(rounded_reference)
     machine = build_boolean_evaluator(predicate, free_vars=free_vars + [cpp_result.name])
 
     checked = skipped = 0
@@ -231,7 +232,8 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
                     raise ZolotoneError(
                         f"zfv mismatch at input point {label} (raw={raw_inputs}): "
                         f"C++ result (choices, value)={(choice, value)}; "
-                        f"required abs(C++ - reference) {relation} {error_bound} "
+                        f"required abs(C++ - unrounded_reference) {relation} {error_bound} "
+                        "and C++ == rounded_reference for the selected rounding choices"
                     )
                 if result.output != 1:
                     raise VerificationInconclusive(f"ZFV: spec comparison unresolved at {assignment_label}")
