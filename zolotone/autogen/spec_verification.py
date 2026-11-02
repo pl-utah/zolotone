@@ -8,7 +8,7 @@ from itertools import product
 from typing import TYPE_CHECKING
 
 from ..errors import MissingError, ZolotoneError
-from ..rival import build_integer_evaluator, collect_free_vars, rival_compile
+from ..rival import collect_free_vars, rival_compile, wrap_precondition
 from ..spec.spec_ast import (
     BoolLit, BoolVar, If, RealExpr, RealLit, RealVar, Round, RoundingMode,
     substitute_spec_node,
@@ -38,6 +38,10 @@ class VerificationInconclusive(ZolotoneError):
     """Rival could not resolve a verification predicate within its limits."""
 
 
+class _RivalDomainError(ZolotoneError):
+    """Rival established that an expression is undefined at this point."""
+
+
 def _signed_pt(raw: int, dtype: Q | UQ | Bool) -> int:
     if isinstance(dtype, Q) and raw & (1 << (dtype.total_bits() - 1)):
         return raw - (1 << dtype.total_bits())
@@ -53,17 +57,8 @@ def _apply_point(machine, pt, label, stage):
                 f"ZFV: {stage} inconclusive at {label}: {exc}"
             ) from exc
         if "Invalid input" in str(exc):
-            raise ZolotoneError(f"ZFV: {stage} reported a domain error at {label}") from exc
+            raise _RivalDomainError(f"ZFV: {stage} reported a domain error at {label}") from exc
         raise ZolotoneError(f"ZFV: {stage} failed at {label}: {exc}") from exc
-
-
-def _evaluate_point(machine, pt, label, stage):
-    result = _apply_point(machine, pt, label, stage)
-    if result.precondition_total_error or result.output_total_error:
-        raise ZolotoneError(f"ZFV: {stage} reported a domain error at {label}")
-    if result.precondition_error or result.output_error:
-        raise VerificationInconclusive(f"ZFV: {stage} unresolved at {label}")
-    return result
 
 
 def strip_root_rounding(root: RealExpr) -> RealExpr:
@@ -79,9 +74,9 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
     """Check each reachable input/choice against rounding and the error budget.
 
     Faithful rounding is expanded in assumptions and intermediate reference
-    expressions, sharing synthesis's choice redirection. Only proven-false
+    expressions, sharing synthesis's choice redirection. False or undefined
     assumptions require a C++ assertion; true assumptions require a result.
-    Evaluation errors never count as skips.
+    Unresolved assumptions and output evaluation errors fail verification.
     """
     from .autogen import _expand_faithful_roundings
     from .spec_validation import _spec_input_dtypes
@@ -158,6 +153,7 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
         occupied.add(name)
         return RealVar(name)
 
+    # Scale inputs
     free_vars = []
     for index, (source, dtype) in enumerate(inputs):
         code = fresh_name(f"__zfv_code_{index}")
@@ -169,6 +165,7 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
         rounded_reference = substitute_spec_node(rounded_reference, source, decoded)
         precondition = substitute_spec_node(precondition, source, decoded)
 
+    # Rounding choices
     for index in range(rounding_choices):
         code = fresh_name(f"__zfv_choice_{index}")
         free_vars.append(code.name)
@@ -178,12 +175,12 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
             rounded_reference = substitute_spec_node(rounded_reference, expanded_choices[index], decoded)
             precondition = substitute_spec_node(precondition, expanded_choices[index], decoded)
 
-    # Decide whether each C++ execution must assert or return a result.
-    assumptions_machine = build_integer_evaluator(
-        RealLit(0), precondition, free_vars=free_vars,
+    # Specs assumptions
+    assumptions_machine = rival_compile(
+        [wrap_precondition(precondition)], ["boolean"], free_vars=free_vars,
     )
 
-    # Separate outputs identify which requirement failed for each assignment.
+    # CPP results inside a machine variable
     choices = tuple(product((0, 1), repeat=rounding_choices))
     cpp_result = fresh_name("__zfv_output")
     actual = cpp_result * RealLit(Fraction(2) ** -output_dtype.frac_bits)
@@ -206,25 +203,36 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
                 # Assumes evaluation
                 point = signed_pt + list(choice)
                 assignment_label = {"inputs": label, "choices": choice}
-                assumptions = _evaluate_point(
-                    assumptions_machine, point, assignment_label, "assumption evaluation",
-                )
-                if assumptions.precondition is not True and assumptions.precondition is not False:
-                    raise VerificationInconclusive(f"ZFV: assumptions unresolved at {assignment_label}")
+                assumption_failure = "undefined assumptions"
+                try:
+                    assumptions, = _apply_point(
+                        assumptions_machine, point, assignment_label, "assumption evaluation",
+                    )
+                except _RivalDomainError:
+                    pass
+                else:
+                    if not assumptions.total_error:
+                        if assumptions.error or not assumptions.resolved:
+                            raise VerificationInconclusive(
+                                f"ZFV: assumption evaluation unresolved at {assignment_label}"
+                            )
+                        if assumptions.value is not True and assumptions.value is not False:
+                            raise VerificationInconclusive(f"ZFV: assumptions unresolved at {assignment_label}")
+                        assumption_failure = None if assumptions.value else "false assumptions"
 
                 # C++ evaluation
                 try:
                     raw_output = int(evaluate_cpp(*raw_inputs, *choice))
                 except CppAssertionError as exc:
-                    if assumptions.precondition is False:
+                    if assumption_failure is not None:
                         skipped += 1
                         continue
                     raise ZolotoneError(
                         f"ZFV: C++ asserted despite true assumptions at {assignment_label}: {exc}"
                     ) from exc
-                if assumptions.precondition is False:
+                if assumption_failure is not None:
                     raise ZolotoneError(
-                        f"ZFV: C++ returned despite false assumptions at {assignment_label}: {raw_output}"
+                        f"ZFV: C++ returned despite {assumption_failure} at {assignment_label}: {raw_output}"
                     )
 
                 # At this point C++ and assumes should agree that the point belongs to domain

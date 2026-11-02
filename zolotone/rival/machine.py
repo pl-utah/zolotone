@@ -10,7 +10,7 @@ from ..spec.spec_ast import *
 RivalIR = dict[str, Any]
 
 __all__ = [
-    "CompiledRivalMachine", "RivalResult", "rival_compile",
+    "CompiledRivalMachine", "RivalResult", "rival_compile", "wrap_precondition",
     "build_boolean_evaluator",
     "RivalMachine", "RivalIntegerMachine", "RivalAnalysis", "RivalEvaluation",
     "build_machine", "build_integer_evaluator", "collect_free_vars", "to_rival_ir",
@@ -79,11 +79,12 @@ class CompiledRivalMachine:
 
 
 def rival_compile(
-    expressions: Sequence[RealExpr | BoolExpr],
+    expressions: Sequence[RealExpr | BoolExpr | RivalIR],
     discretizations: Sequence[Discretization],
     *,
     free_vars: Sequence[str]
 ) -> CompiledRivalMachine:
+    """Compile spec expressions or explicit Rival IR with output discretizations."""
     expressions, discs = list(expressions), list(discretizations)
     # Some checks
     if not expressions or len(expressions) != len(discs):
@@ -92,13 +93,14 @@ def rival_compile(
         if disc not in ("boolean", "integer", "float"):
             raise ValueError(f"unknown discretization: {disc!r}")
         expected = BoolExpr if disc == "boolean" else RealExpr
-        if not isinstance(expr, expected):
+        if not isinstance(expr, (expected, dict)):
             raise TypeError(f"{disc} discretization requires a {expected.__name__}")
     # Validation
     variables = _validate_free_vars(free_vars)
     _validate_referenced_vars(expressions, variables)
     raw = _load_native_module().rival_compile(
-        [to_rival_ir(expr) for expr in expressions], discs, variables, max_precision=10000,
+        [expr if isinstance(expr, dict) else to_rival_ir(expr) for expr in expressions],
+        discs, variables, max_precision=10000,
     )
     return CompiledRivalMachine(raw, discs)
 
@@ -227,8 +229,10 @@ def build_machine(
     return RivalMachine(raw_machine)
 
 
-def _evaluator_precondition(precondition: BoolExpr) -> RivalIR:
-    """Let an error-free false conjunct reject an input despite other errors."""
+def wrap_precondition(precondition: BoolExpr) -> RivalIR:
+    """Build Boolean Rival IR where an error-free false conjunct rejects input."""
+    if not isinstance(precondition, BoolExpr):
+        raise TypeError("precondition must be a Boolean expression")
     pending = [precondition]
     predicates = []
     while pending:
@@ -276,7 +280,7 @@ def build_float_evaluator(
     _validate_referenced_vars([expr, precondition], var_list)
     native = _load_native_module()
     return RivalFloatMachine(native.build_float_evaluator(
-        to_rival_ir(expr), _evaluator_precondition(precondition), var_list,
+        to_rival_ir(expr), wrap_precondition(precondition), var_list,
     ))
 
 
@@ -314,7 +318,7 @@ def build_integer_evaluator(
         native.build_integer_evaluator(
             to_rival_ir(expr),
             rounding_mode,
-            _evaluator_precondition(precondition),
+            wrap_precondition(precondition),
             var_list,
         )
     )
