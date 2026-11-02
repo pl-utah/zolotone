@@ -376,15 +376,15 @@ def Autogenerate(
 ):
     """Lower a specification; only_LUT adds LUT eligibility validation."""
     # Step 1: Obtain spec AST
-    current_spec = get_spec(name, spec)
+    original_spec = get_spec(name, spec)
 
     # print(current_spec)
 
     # Step 2: establish the abstract input domain and validate its shape.
     # Error on undeclared variables, warn about unused variables.
-    reject_undeclared_variables(current_spec)
+    reject_undeclared_variables(original_spec)
     # Add exact input ranges implied by their types.
-    current_spec = add_input_ranges(current_spec)
+    current_spec = add_input_ranges(original_spec)
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
     if only_LUT:
@@ -425,6 +425,9 @@ def Autogenerate(
     # Step 8: lower and attach assumptions, user checks, and output guards.
     attach_lowered_conditions(lowered_composite, current_spec)
 
-    # Step 9: lower composite to C++
-    cpp = lowered_composite.to_cpp()
+    if only_LUT:
+        from .spec_verification import zfv
+
+        cert = zfv(original_spec, lowered_composite)
+
     return lowered_composite
