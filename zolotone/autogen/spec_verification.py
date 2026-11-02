@@ -8,7 +8,7 @@ from itertools import product
 from typing import TYPE_CHECKING
 
 from ..errors import MissingError, ZolotoneError
-from ..rival import build_boolean_evaluator, build_integer_evaluator, collect_free_vars
+from ..rival import build_integer_evaluator, collect_free_vars, rival_compile
 from ..spec.spec_ast import (
     BoolLit, BoolVar, If, RealExpr, RealLit, RealVar, Round, RoundingMode,
     substitute_spec_node,
@@ -44,15 +44,21 @@ def _signed_pt(raw: int, dtype: Q | UQ | Bool) -> int:
     return raw
 
 
-def _evaluate_point(machine, pt, label, stage):
+def _apply_point(machine, pt, label, stage):
     try:
-        result = machine.apply_point(pt)
+        return machine.apply_point(pt)
     except ValueError as exc:
         if "Unsamplable" in str(exc):
             raise VerificationInconclusive(
                 f"ZFV: {stage} inconclusive at {label}: {exc}"
             ) from exc
+        if "Invalid input" in str(exc):
+            raise ZolotoneError(f"ZFV: {stage} reported a domain error at {label}") from exc
         raise ZolotoneError(f"ZFV: {stage} failed at {label}: {exc}") from exc
+
+
+def _evaluate_point(machine, pt, label, stage):
+    result = _apply_point(machine, pt, label, stage)
     if result.precondition_total_error or result.output_total_error:
         raise ZolotoneError(f"ZFV: {stage} reported a domain error at {label}")
     if result.precondition_error or result.output_error:
@@ -177,14 +183,16 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
         RealLit(0), precondition, free_vars=free_vars,
     )
 
-    # One predicate serves every assignment, including nested faithful choices.
+    # Separate outputs identify which requirement failed for each assignment.
     choices = tuple(product((0, 1), repeat=rounding_choices))
     cpp_result = fresh_name("__zfv_output")
     actual = cpp_result * RealLit(Fraction(2) ** -output_dtype.frac_bits)
     error = abs(actual - unrounded_reference)
     predicate = error <= RealLit(error_bound) if inclusive else error < RealLit(error_bound)
-    predicate = predicate & actual.eq(rounded_reference)
-    machine = build_boolean_evaluator(predicate, free_vars=free_vars + [cpp_result.name])
+    machine = rival_compile(
+        [predicate, actual.eq(rounded_reference)], ["boolean", "boolean"],
+        free_vars=free_vars + [cpp_result.name],
+    )
 
     checked = skipped = 0
     # Compile C++
@@ -223,20 +231,32 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
 
                 output_dtype.validate_raw(raw_output)
                 cpp_code = _signed_pt(raw_output, output_dtype)
-                result = _evaluate_point(
-                    machine, point + [cpp_code], assignment_label, "spec comparison",
-                )
-                if result.output == 0:
+                results = _apply_point(machine, point + [cpp_code], assignment_label, "spec comparison")
+                names = ("error budget", "rounded reference")
+                for name, result in zip(names, results, strict=True):
+                    if result.total_error:
+                        raise ZolotoneError(
+                            f"ZFV: spec comparison ({name}) reported a domain error at {assignment_label}"
+                        )
+                failures = [
+                    name for name, result in zip(names, results, strict=True)
+                    if result.resolved and not result.error and result.value is False
+                ]
+                if failures:
                     value = Fraction(cpp_code, 1 << output_dtype.frac_bits)
                     relation = "<=" if inclusive else "<"
                     raise ZolotoneError(
                         f"zfv mismatch at input point {label} (raw={raw_inputs}): "
                         f"C++ result (choices, value)={(choice, value)}; "
+                        f"failed checks: {', '.join(failures)}; "
                         f"required abs(C++ - unrounded_reference) {relation} {error_bound} "
                         "and C++ == rounded_reference for the selected rounding choices"
                     )
-                if result.output != 1:
-                    raise VerificationInconclusive(f"ZFV: spec comparison unresolved at {assignment_label}")
+                for name, result in zip(names, results, strict=True):
+                    if result.error or not result.resolved:
+                        raise VerificationInconclusive(
+                            f"ZFV: spec comparison ({name}) unresolved at {assignment_label}"
+                        )
                 checked += 1
     finally:
         tempdir.cleanup()

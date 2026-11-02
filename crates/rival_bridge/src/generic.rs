@@ -130,7 +130,11 @@ impl RawCompiledMachine {
                 if lo > hi {
                     return Err(PyValueError::new_err("reversed input interval"));
                 }
-                let precision = 128;
+                // Dyadic inputs are exact when both numerators fit in the
+                // significand, independently of the computation's budget.
+                let precision = 128
+                    .max(lo.numer().significant_bits())
+                    .max(hi.numer().significant_bits());
                 Ok(Ival::from_lo_hi(
                     Float::with_val(precision, lo),
                     Float::with_val(precision, hi),
