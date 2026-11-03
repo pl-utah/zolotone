@@ -8,6 +8,7 @@ from itertools import product
 from typing import TYPE_CHECKING
 
 from ..errors import MissingError, ZolotoneError
+from ..mpfi import mpfi_compile
 from ..rival import collect_free_vars, rival_compile, wrap_precondition
 from ..spec.spec_ast import (
     BoolLit, BoolVar, If, RealExpr, RealLit, RealVar, Round, RoundingMode,
@@ -190,6 +191,11 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
         [predicate, actual.eq(rounded_reference)], ["boolean", "boolean"],
         free_vars=free_vars + [cpp_result.name],
     )
+    # Independently evaluate only the numeric error-budget LHS with MPFI.
+    # Unsupported nodes such as nested Round fail explicitly in the translator.
+    mpfi_error = mpfi_compile(
+        [error], free_vars=free_vars + [cpp_result.name],
+    )
 
     checked = skipped = 0
     # Compile C++
@@ -265,6 +271,31 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
                         raise VerificationInconclusive(
                             f"ZFV: spec comparison ({name}) unresolved at {assignment_label}"
                         )
+                precision = 128
+                try:
+                    mpfi_value, = mpfi_error.apply_point(point + [cpp_code], precision=precision)
+                except NotImplementedError as exc:
+                    raise VerificationInconclusive(
+                        f"ZFV: MPFI error-budget evaluation unsupported at {assignment_label}: {exc}"
+                    ) from exc
+                mpfi_lower, mpfi_upper = mpfi_value.lower(), mpfi_value.upper()
+                rival_error_budget = results[0]
+                if inclusive:
+                    mpfi_proved = mpfi_upper <= error_bound
+                    mpfi_disproved = mpfi_lower > error_bound
+                else:
+                    mpfi_proved = mpfi_upper < error_bound
+                    mpfi_disproved = mpfi_lower >= error_bound
+                if not mpfi_proved and not mpfi_disproved:
+                    raise VerificationInconclusive(
+                        f"ZFV: MPFI error-budget interval straddles {error_bound} "
+                        f"at {assignment_label}: [{mpfi_lower}, {mpfi_upper}]"
+                    )
+                if mpfi_proved != rival_error_budget.value:
+                    raise ZolotoneError(
+                        f"ZFV: Rival/MPFI error-budget disagreement at {assignment_label}: "
+                        f"precision={precision} could not resolve error bound {error_bound}, MPFI=[{mpfi_lower}, {mpfi_upper}]"
+                    )
                 checked += 1
     finally:
         tempdir.cleanup()
