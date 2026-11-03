@@ -20,6 +20,22 @@ CARGO_HOME ?= $(HOME)/.cargo
 RUSTUP_HOME ?= $(HOME)/.rustup
 RUST_PATH := $(CARGO_HOME)/bin:$(PATH)
 RUST_MIN_VERSION ?= 1.85.0
+# Preserve the original bare `make` behavior.
+.DEFAULT_GOAL := _check-python
+
+.PHONY: install-mpfi install-mpfi-prereqs test-mpfi
+
+# Ubuntu/Debian prerequisites for the small native MPFI extension.
+# Run explicitly with sudo, like install-prereqs; never run install-mpfi as root.
+install-mpfi-prereqs:
+	apt-get update
+	apt-get install -y build-essential python3.11-dev libmpfi-dev libmpfr-dev libgmp-dev
+
+install-mpfi: _venv
+	@echo "Installing native MPFI extension into $(VENV_DIR)"
+	@$(VENV_PIP) install ./native/mpfi
+	@$(VENV_PYTHON) -c 'from fractions import Fraction; from zolotone.mpfi import MPFIInterval; q = Fraction(1, 3); r = MPFIInterval(q); assert r.lower() <= q <= r.upper(); print("Native MPFI enclosure check passed")'
+
 
 .PHONY: nightly install install-prereqs unit-tests clean run-docker
 .PHONY: _check-python _venv _python-deps _install-dreal
