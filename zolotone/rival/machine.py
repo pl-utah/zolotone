@@ -78,6 +78,10 @@ class CompiledRivalMachine:
         ]), range_mode=True)
 
 
+    def highest_precision(self) -> int:
+        return self._raw_machine.highest_precision()
+
+
 def rival_compile(
     expressions: Sequence[RealExpr | BoolExpr | RivalIR],
     discretizations: Sequence[Discretization],

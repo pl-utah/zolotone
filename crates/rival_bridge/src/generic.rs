@@ -33,6 +33,8 @@ impl Discretization for OutputDiscretizations {
 // lower, upper, partial domain error, total domain error, resolved
 type Output = (Option<String>, Option<String>, bool, bool, bool);
 
+const PROFILE_CAPACITY: usize = 1000;
+
 // Rival passes endpoints after conversion: equal integer codes converge,
 // adjacent codes straddle a rounding boundary, and wider gaps need refinement.
 fn integer_distance(lo: &Float, hi: &Float) -> usize {
@@ -64,6 +66,8 @@ fn build_machine(
         target_precision: 128,
     })
     .max_precision(max_precision)
+    .enable_profiling(true)
+    .profile_capacity(PROFILE_CAPACITY)
     .build(expressions, free_vars)
 }
 
@@ -156,6 +160,22 @@ impl RawCompiledMachine {
 
 #[pymethods]
 impl RawCompiledMachine {
+    fn highest_precision(&self) -> PyResult<u32> {
+        let records = self.machine.execution_records();
+        if records.len() == PROFILE_CAPACITY {
+            return Err(PyValueError::new_err(
+                "Rival profiling buffer is full; highest precision may be missing",
+            ));
+        }
+        Ok(records
+            .iter()
+            .filter(|record| record.number >= 0)
+            .map(|record| record.precision)
+            .max()
+            // A machine returning only an argument executes no instructions.
+            .unwrap_or_else(|| self.machine.argument_precision()))
+    }
+
     #[pyo3(signature = (point, max_iterations=10_000))]
     fn apply_point(&mut self, point: Vec<String>, max_iterations: usize) -> PyResult<Vec<Output>> {
         self.evaluate(

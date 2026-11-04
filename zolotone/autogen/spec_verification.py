@@ -245,7 +245,9 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
 
                 output_dtype.validate_raw(raw_output)
                 cpp_code = _signed_pt(raw_output, output_dtype)
-                results = _apply_point(machine, point + [cpp_code], assignment_label, "spec comparison")
+                results = _apply_point(
+                    machine, point + [cpp_code], assignment_label, "spec comparison",
+                )
                 names = ("error budget", "rounded reference")
                 for name, result in zip(names, results, strict=True):
                     if result.total_error:
@@ -271,7 +273,12 @@ def zfv(spec: Spec, component: Composite) -> VerificationResult:
                         raise VerificationInconclusive(
                             f"ZFV: spec comparison ({name}) unresolved at {assignment_label}"
                         )
-                precision = 128
+                try:
+                    precision = machine.highest_precision()
+                except ValueError as exc:
+                    raise VerificationInconclusive(
+                        f"ZFV: Rival precision unavailable at {assignment_label}: {exc}"
+                    ) from exc
                 try:
                     mpfi_value, = mpfi_error.apply_point(point + [cpp_code], precision=precision)
                 except NotImplementedError as exc:

@@ -26,12 +26,12 @@ RUST_MIN_VERSION ?= 1.85.0
 .PHONY: install-mpfi install-mpfi-prereqs test-mpfi
 
 # Ubuntu/Debian prerequisites for the small native MPFI extension.
-# Run explicitly with sudo, like install-prereqs; never run install-mpfi as root.
+# Only system package installation uses sudo; run install-mpfi as a normal user.
 install-mpfi-prereqs:
-	apt-get update
-	apt-get install -y build-essential python3.11-dev libmpfi-dev libmpfr-dev libgmp-dev
+	sudo apt-get update
+	sudo apt-get install -y build-essential python3.11-dev libmpfi-dev libmpfr-dev libgmp-dev
 
-install-mpfi: _venv
+install-mpfi: _venv install-mpfi-prereqs
 	@echo "Installing native MPFI extension into $(VENV_DIR)"
 	@$(VENV_PIP) install ./native/mpfi
 	@$(VENV_PYTHON) -c 'from fractions import Fraction; from zolotone.mpfi import MPFIInterval; q = Fraction(1, 3); r = MPFIInterval(q); assert r.lower() <= q <= r.upper(); print("Native MPFI enclosure check passed")'
@@ -178,7 +178,7 @@ _download_ac_int:
 
 
 # This runs without sudo
-install: _python-deps _install-dreal _install-rival _download_ac_int
+install: _python-deps _install-dreal _install-rival install-mpfi _download_ac_int
 
 unit-tests:
 	@echo "Running infra/unittests.py..."
