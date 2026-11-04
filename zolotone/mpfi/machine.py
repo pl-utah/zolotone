@@ -97,7 +97,16 @@ def mpfi_compile(
             return lambda field, inputs: op(arg(field, inputs))
         if cls in _BINARY:
             op = _BINARY[cls]
-            lhs, rhs = [compile_node(child) for child in ast.children(node)]
+            left, right = ast.children(node)
+            lhs = compile_node(left)
+            # Keep integral literals as integers so power uses squaring and
+            # reciprocals rather than exp(exponent * log(base)).
+            if cls is ast.Pow and type(right) is ast.RealLit:
+                exponent = Fraction(right.value)
+                if exponent.denominator == 1:
+                    power = exponent.numerator
+                    return lambda field, inputs: lhs(field, inputs) ** power
+            rhs = compile_node(right)
             return lambda field, inputs: op(lhs(field, inputs), rhs(field, inputs))
         raise NotImplementedError(f"unsupported MPFI spec node: {cls.__name__}")
 
