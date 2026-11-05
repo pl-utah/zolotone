@@ -338,7 +338,6 @@ def analyze_typed_domain(
             (min(output_bounds[0], lower), max(output_bounds[1], upper))
         )
 
-    print(output_bounds)
     if not reachable:
         raise InfeasibleError(f"Specification {ctx.name!r} is unreachable: no input satisfies its assumptions")
     return output_bounds

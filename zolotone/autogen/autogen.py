@@ -427,7 +427,6 @@ def Autogenerate(
 
     if only_LUT:
         from .spec_verification import zfv
-
-        cert = zfv(original_spec, lowered_composite)
+        lowered_composite.verification_certificate = zfv(original_spec, lowered_composite)
 
     return lowered_composite
