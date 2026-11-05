@@ -408,16 +408,12 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
 
 
 def replay_zfv(
-    certificate: ZFVCertificate, component: Composite, *,
-    require_same_checker: bool = True,
+    certificate: ZFVCertificate, component: Composite,
 ) -> ZFVCertificate:
-    """Reconstruct the saved spec, generate a fresh certificate, and compare claims."""
-    certificate.validate()
+    """Recheck the saved spec and claims, requiring the recorded checker identity."""
     spec = certificate.to_spec()
     fresh = zfv(spec, component)
     for field, expected in fresh.manifest.items():
-        if field == "checker" and not require_same_checker:
-            continue
         recorded = certificate.manifest[field]
         if field == "enumeration":
             # Packing order may differ; positional C++ argument descriptors may not.
