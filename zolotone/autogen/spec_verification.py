@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from fractions import Fraction
+from math import ceil, floor
 from typing import TYPE_CHECKING
 
 from .zfv_certificate import (
@@ -14,7 +15,7 @@ from ..errors import MissingError, ZolotoneError
 from ..mpfi import mpfi_compile
 from ..rival import collect_free_vars, rival_compile, wrap_precondition
 from ..spec.spec_ast import (
-    BoolLit, BoolVar, If, RealExpr, RealLit, RealVar, Round, RoundingMode,
+    BoolLit, BoolVar, If, NotEq, RealExpr, RealLit, RealVar, Round, RoundingMode,
     substitute_spec_node,
 )
 from ..types import Bool, Q, UQ
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
 
 class VerificationInconclusive(ZolotoneError):
-    """Rival could not resolve a verification predicate within its limits."""
+    """A numerical checker could not resolve a verification obligation."""
 
 
 class _RivalDomainError(ZolotoneError):
@@ -67,6 +68,71 @@ def _highest_precision(machine, label, stage):
         raise VerificationInconclusive(
             f"ZFV: Rival precision unavailable for {stage} at {label}: {exc}"
         ) from exc
+
+
+def _selected_rounding_mode(root, values, label):
+    """Follow the expanded root's choice branches without using the C++ result."""
+    while isinstance(root, If):
+        if isinstance(root.cond, BoolLit):
+            selected = root.cond.value
+        elif isinstance(root.cond, BoolVar) and root.cond.name in values:
+            selected = bool(values[root.cond.name])
+        elif (isinstance(root.cond, NotEq) and isinstance(root.cond.lhs, RealVar)
+              and root.cond.lhs.name in values and isinstance(root.cond.rhs, RealLit)
+              and root.cond.rhs.value == 0):
+            # Boolean inputs and rounding choices are lowered to code != 0.
+            selected = values[root.cond.lhs.name] != 0
+        else:
+            raise VerificationInconclusive(
+                f"ZFV: MPFI rounding-mode selection requires an unsupported condition at {label}"
+            )
+        root = root.on_true if selected else root.on_false
+    if not isinstance(root, Round) or root.mode is RoundingMode.FR:
+        raise VerificationInconclusive(f"ZFV: MPFI rounding mode is unresolved at {label}")
+    return root.mode
+
+
+# Used by MPFI to round values
+def _round_endpoint(value: Fraction, mode: RoundingMode, precision: int) -> Fraction:
+    """Round an exact rational to the output grid without floating-point conversion."""
+    scale = 1 << precision
+    scaled = value * scale
+    if mode is RoundingMode.RNE:
+        code = round(scaled)  # Fraction implements exact ties-to-even.
+    elif mode is RoundingMode.RTZ:
+        code = int(scaled)
+    elif mode is RoundingMode.RAZ:
+        code = floor(scaled) if scaled < 0 else ceil(scaled)
+    else:
+        raise VerificationInconclusive(f"ZFV: unsupported MPFI rounding mode {mode}")
+    return Fraction(code, scale)
+
+
+def _check_mpfi_reference(reference, actual, mode, precision, error_bound, inclusive, label):
+    """Check error and round MPFI endpoints to precision fractional bits."""
+    low, high = reference.lower(), reference.upper()
+    if not isinstance(low, Fraction) or not isinstance(high, Fraction) or low > high:
+        raise VerificationInconclusive(f"ZFV: MPFI reference is not a finite enclosure at {label}")
+
+    max_error = max(abs(actual - low), abs(actual - high))
+    proved = max_error <= error_bound if inclusive else max_error < error_bound
+    if not proved:
+        raise VerificationInconclusive(
+            f"ZFV: MPFI error budget not established at {label}: "
+            f"max_error={max_error}, bound={error_bound}, inclusive={inclusive}"
+        )
+
+    rounded_low, rounded_high = (_round_endpoint(endpoint, mode, precision) for endpoint in (low, high))
+    if rounded_low != rounded_high:
+        raise VerificationInconclusive(
+            f"ZFV: MPFI {mode.value} rounding unresolved at {label}: "
+            f"[{low}, {high}] rounds to [{rounded_low}, {rounded_high}]"
+        )
+    if rounded_low != actual:
+        raise ZolotoneError(
+            f"ZFV: MPFI/C++ rounded-reference mismatch at {label}: "
+            f"MPFI=[{low}, {high}], rouded MPFI={rounded_low}, C++={actual}, mode={mode.value}"
+        )
 
 
 def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
@@ -139,7 +205,11 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
     precondition = BoolLit(True)
     for assumption in expanded_spec.spec_ctx.assumes:
         precondition = precondition & assumption
-    occupied = set(collect_free_vars([unrounded_reference, rounded_reference, precondition]))
+    rounding_allowed = expanded_spec.rounding_allowed if root.mode is RoundingMode.FR else {}
+    occupied = set(collect_free_vars([
+        unrounded_reference, rounded_reference, precondition,
+        *(condition for _, condition in rounding_allowed.values()),
+    ]))
     expanded_choices = tuple(expanded_spec.rounding_choices.values())
     referenced_choices = occupied & {choice.name for choice in expanded_choices}
     if referenced_choices and len(expanded_choices) != rounding_choices:
@@ -164,6 +234,10 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
         unrounded_reference = substitute_spec_node(unrounded_reference, source, decoded)
         rounded_reference = substitute_spec_node(rounded_reference, source, decoded)
         precondition = substitute_spec_node(precondition, source, decoded)
+        rounding_allowed = {
+            selected: (mode, substitute_spec_node(condition, source, decoded))
+            for selected, (mode, condition) in rounding_allowed.items()
+        }
 
     # Rounding choices
     for index in range(rounding_choices):
@@ -174,6 +248,10 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
             unrounded_reference = substitute_spec_node(unrounded_reference, expanded_choices[index], decoded)
             rounded_reference = substitute_spec_node(rounded_reference, expanded_choices[index], decoded)
             precondition = substitute_spec_node(precondition, expanded_choices[index], decoded)
+            rounding_allowed = {
+                selected: (mode, substitute_spec_node(condition, expanded_choices[index], decoded))
+                for selected, (mode, condition) in rounding_allowed.items()
+            }
 
     # CPP results inside a machine variable
     cpp_result = fresh_name("__zfv_output")
@@ -184,17 +262,20 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
         spec, component, inputs, expanded_choices, rounding_choices, ulp, error_bound, inclusive,
     )
     assumptions_machine = rival_compile(
-        [wrap_precondition(precondition)], ["boolean"], free_vars=free_vars,
+        [wrap_precondition(precondition), *(condition for _, condition in rounding_allowed.values())],
+        ["boolean"] * (1 + len(rounding_allowed)), free_vars=free_vars,
     )
     machine = rival_compile(
         [predicate, actual.eq(rounded_reference)], ["boolean", "boolean"],
         free_vars=free_vars + [cpp_result.name],
     )
-    # Independently evaluate only the numeric error-budget LHS with MPFI.
-    # Unsupported nodes such as nested Round fail explicitly in the translator.
-    mpfi_error = mpfi_compile(
-        [error], free_vars=free_vars + [cpp_result.name],
-    )
+    # MPFI evaluates only the unrounded reference; all checks use exact Python arithmetic.
+    try:
+        mpfi_reference = mpfi_compile(
+            [unrounded_reference], free_vars=free_vars,
+        )
+    except NotImplementedError as exc:
+        raise VerificationInconclusive(f"ZFV: MPFI does not support this expression: {exc}") from exc
 
     collector = _RunCollector()
 
@@ -213,7 +294,7 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
             assignment_label = {"inputs": label, "choices": choice}
             assumption_failure = "undefined assumptions"
             try:
-                assumptions, = _apply_point(
+                assumptions, *rounding_results = _apply_point(
                     assumptions_machine, point, assignment_label, "assumption evaluation",
                 )
             except _RivalDomainError:
@@ -279,37 +360,100 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
                     raise VerificationInconclusive(
                         f"ZFV: spec comparison ({name}) unresolved at {assignment_label}"
                     )
-            precision = max(assumption_precision, _highest_precision(
+            # Resolve the reference rounding mode after assumption-based shrinking.
+            if rounding_allowed:
+                allowed_modes = []
+                for result, (direction, _) in zip(rounding_results, rounding_allowed.values(), strict=True):
+                    if (result.total_error or result.error or not result.resolved
+                            or (result.value is not True and result.value is not False)):
+                        raise VerificationInconclusive(
+                            f"ZFV: {direction.value} assumption evaluation unresolved at {assignment_label}"
+                        )
+                    if result.value:
+                        allowed_modes.append(direction)
+                if not allowed_modes:
+                    raise VerificationInconclusive(
+                        f"ZFV: neither rounding direction satisfies assumptions at {assignment_label}"
+                    )
+                # Assumption-based correction supports exactly one faithful choice.
+                selected_choice, = choice
+                mode, _ = rounding_allowed[bool(selected_choice)]
+                if mode not in allowed_modes:
+                    mode = allowed_modes[0]
+            else:
+                mode = _selected_rounding_mode(
+                    rounded_reference, dict(zip(free_vars, point, strict=True)), assignment_label,
+                )
+
+            working_precision = max(assumption_precision, _highest_precision(
                 machine, assignment_label, "spec comparison",
             ))
             try:
-                mpfi_value, = mpfi_error.apply_point(point + [cpp_code], precision=precision)
+                mpfi_value, = mpfi_reference.apply_point(point, precision=working_precision)
             except NotImplementedError as exc:
                 raise VerificationInconclusive(
-                    f"ZFV: MPFI error-budget evaluation unsupported at {assignment_label}: {exc}"
+                    f"ZFV: MPFI evaluation inconclusive at {assignment_label}: {exc}"
                 ) from exc
-            mpfi_lower, mpfi_upper = mpfi_value.lower(), mpfi_value.upper()
-            rival_error_budget = results[0]
-            if inclusive:
-                mpfi_proved = mpfi_upper <= error_bound
-                mpfi_disproved = mpfi_lower > error_bound
-            else:
-                mpfi_proved = mpfi_upper < error_bound
-                mpfi_disproved = mpfi_lower >= error_bound
-            if not mpfi_proved and not mpfi_disproved:
-                raise VerificationInconclusive(
-                    f"ZFV: MPFI error-budget interval straddles {error_bound} "
-                    f"at {assignment_label}: [{mpfi_lower}, {mpfi_upper}]"
-                )
-            if mpfi_proved != rival_error_budget.value:
-                raise ZolotoneError(
-                    f"ZFV: Rival/MPFI error-budget disagreement at {assignment_label}: "
-                    f"precision={precision} could not resolve error bound {error_bound}, MPFI=[{mpfi_lower}, {mpfi_upper}]"
-                )
-            collector.append(assignment_index, "valid", precision)
+            _check_mpfi_reference(
+                mpfi_value, Fraction(cpp_code, 1 << output_dtype.frac_bits),
+                mode, precision, error_bound, inclusive, assignment_label,
+            )
+            collector.append(assignment_index, "valid", working_precision)
     finally:
         tempdir.cleanup()
     certificate = ZFVCertificate(manifest, tuple(collector.runs))
     if certificate.checked == 0:
         raise ZolotoneError("zfv found no reachable input points")
     return certificate
+
+
+def replay_zfv(
+    certificate: ZFVCertificate, component: Composite, *,
+    require_same_checker: bool = True,
+) -> ZFVCertificate:
+    """Reconstruct the saved spec, generate a fresh certificate, and compare claims."""
+    certificate.validate()
+    spec = certificate.to_spec()
+    fresh = zfv(spec, component)
+    for field, expected in fresh.manifest.items():
+        if field == "checker" and not require_same_checker:
+            continue
+        recorded = certificate.manifest[field]
+        if field == "enumeration":
+            # Packing order may differ; positional C++ argument descriptors may not.
+            recorded = {**recorded, "inputs_order": expected["inputs_order"]}
+        if recorded != expected:
+            raise ValueError(f"ZFV replay manifest mismatch: {field}")
+
+    recorded_runs = sorted(certificate.runs, key=lambda run: run.start)
+    fresh_runs = sorted(fresh.runs, key=lambda run: run.start)
+
+    def compare(recorded, observed, index):
+        if recorded.outcome != observed.outcome:
+            raise ZolotoneError(
+                f"ZFV replay outcome mismatch at assignment {index}: "
+                f"recorded {recorded.outcome}, observed {observed.outcome}"
+            )
+
+    layout = certificate.manifest["enumeration"]
+    if layout["inputs_order"] == fresh.manifest["enumeration"]["inputs_order"]:
+        # Walk overlapping runs without enumerating their individual assignments.
+        left = right = 0
+        while left < len(recorded_runs) and right < len(fresh_runs):
+            recorded, observed = recorded_runs[left], fresh_runs[right]
+            compare(recorded, observed, max(recorded.start, observed.start))
+            left += recorded.stop <= observed.stop
+            right += observed.stop <= recorded.stop
+    else:
+        from bisect import bisect_right
+
+        # Map saved packed indices into the fresh certificate's argument order.
+        starts = [run.start for run in fresh_runs]
+        widths = [item["total_bits"] for item in fresh.manifest["enumeration"]["inputs"]]
+        for recorded in recorded_runs:
+            for index in range(recorded.start, recorded.stop + 1):
+                packed = 0
+                for value, width in zip(certificate.decode_assignment(index), widths, strict=True):
+                    packed = (packed << width) | value
+                compare(recorded, fresh_runs[bisect_right(starts, packed) - 1], index)
+    return fresh

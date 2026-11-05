@@ -6,15 +6,15 @@ certificate records completed verification, not a formal proof or cached outputs
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass, replace
-from enum import Enum
-from fractions import Fraction
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
 from typing import Any, Literal
+
+from ..spec.serialization import decode_spec_value, encode_spec_value
 
 
 FORMAT = "zolotone-zfv-v1"
@@ -53,24 +53,20 @@ def _checker_identity():
     }
 
 
-def _encode(value):
-    """Canonical, data-only encoding; never execute serialized Python objects."""
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, (float, Fraction)):
-        return {"rational": str(Fraction(value))}
-    if isinstance(value, Enum):
-        return {"enum": type(value).__name__, "value": value.value}
-    if isinstance(value, type):
-        return {"type": f"{value.__module__}.{value.__qualname__}"}
-    if isinstance(value, (tuple, list)):
-        return [_encode(item) for item in value]
-    if is_dataclass(value):
-        return {
-            "node": type(value).__name__,
-            "fields": {field.name: _encode(getattr(value, field.name)) for field in fields(value)},
-        }
-    raise TypeError(f"Cannot serialize certificate value: {type(value).__name__}")
+def _decode_dtype(descriptor):
+    from ..types import Bool, Q, UQ
+
+    if type(descriptor) is not dict:
+        raise ValueError("Invalid certificate dtype")
+    kind = descriptor.get("kind")
+    if kind == "Bool" and descriptor == {"kind": "Bool", "total_bits": 1}:
+        if type(descriptor["total_bits"]) is int:
+            return Bool()
+    if kind in ("Q", "UQ") and set(descriptor) == {"kind", "total_bits", "frac_bits"}:
+        width, fraction = descriptor["total_bits"], descriptor["frac_bits"]
+        if type(width) is int and type(fraction) is int and 1 <= width <= 64 and 0 <= fraction <= width:
+            return {"Q": Q, "UQ": UQ}[kind](width - fraction, fraction)
+    raise ValueError("Invalid certificate dtype")
 
 
 def _dtype(dtype):
@@ -92,13 +88,18 @@ def _decode_assignment(index, input_widths):
 def _manifest(spec, component, inputs, expanded_choices, rounding_choices, ulp, error_bound, inclusive):
     """Bind verification to the original spec, choices, input coding, and C++ source."""
     specification = {
-        "root": _encode(spec.spec_ast),
-        "inputs": [_encode(source) for source, _ in inputs],
-        "return_annotation": _encode(spec.return_annotation),
-        "assumptions": _encode(spec.spec_ctx.assumes),
-        "checks": _encode(spec.spec_ctx.checks),
-        "requirements": _encode(spec.spec_ctx.requirements),
-        "rounding_choices": [[_encode(node), _encode(choice)] for node, choice in spec.rounding_choices.items()],
+        "replay_context": {
+            "parameters": list(spec.signature.parameters),
+            "symbol_counter": spec.spec_ctx._sym_counter,
+            "case_partitions": encode_spec_value(spec.spec_ctx.case_partitions),
+        },
+        "root": spec.spec_ast.to_dict(),
+        "inputs": [encode_spec_value(source) for source, _ in inputs],
+        "return_annotation": encode_spec_value(spec.return_annotation),
+        "assumptions": encode_spec_value(spec.spec_ctx.assumes),
+        "checks": encode_spec_value(spec.spec_ctx.checks),
+        "requirements": encode_spec_value(spec.spec_ctx.requirements),
+        "rounding_choices": [[encode_spec_value(node), encode_spec_value(choice)] for node, choice in spec.rounding_choices.items()],
     }
     source = component.to_cpp("lowered_entry", jittable=True)
     total_input_bits = sum(dtype.total_bits() for _, dtype in inputs) + rounding_choices
@@ -274,6 +275,76 @@ class ZFVCertificate:
 
     def __post_init__(self):
         self.validate()
+
+    def to_spec(self):
+        """Reconstruct the scalar verification spec from allowlisted JSON data."""
+        import inspect
+        from .autogen import Spec
+        from ..spec.spec_ast import BoolExpr, BoolVar, RealVar, Round, SpecNode, _CasePartition
+        from ..spec.spec_context import SpecContext
+        from ..types import Bool, Q, UQ
+
+        self.validate()
+        data = self.manifest["specification"]
+        keys = {"root", "inputs", "return_annotation", "assumptions", "checks",
+                "requirements", "rounding_choices", "replay_context"}
+        if type(data) is not dict or set(data) != keys:
+            raise ValueError("Certificate lacks supported replay specification metadata; regenerate it")
+        context = data["replay_context"]
+        if type(context) is not dict or set(context) != {"parameters", "symbol_counter", "case_partitions"}:
+            raise ValueError("Invalid certificate replay context")
+        parameters, counter = context["parameters"], context["symbol_counter"]
+        if (type(parameters) is not list or any(type(name) is not str for name in parameters)
+                or type(counter) is not int or counter < 0):
+            raise ValueError("Invalid certificate replay parameters or symbol counter")
+        signature = inspect.Signature([
+            inspect.Parameter(name, inspect.Parameter.POSITIONAL_ONLY) for name in parameters
+        ])
+        root, inputs = SpecNode.from_dict(data["root"]), decode_spec_value(data["inputs"])
+        if not isinstance(root, Round) or type(inputs) is not list or len(parameters) != len(inputs) + 1:
+            raise ValueError("Invalid certificate root or inputs")
+        descriptors = self.manifest["enumeration"]["inputs"]
+        if len(inputs) > len(descriptors):
+            raise ValueError("Certificate specification has too many inputs")
+        annotations = {}
+        for source, parameter, descriptor in zip(inputs, parameters, descriptors):
+            if not isinstance(source, (RealVar, BoolVar)) or source.name != descriptor["name"]:
+                raise ValueError("Certificate spec inputs disagree with enumeration")
+            dtype = _decode_dtype({key: value for key, value in descriptor.items() if key != "name"})
+            if isinstance(source, BoolVar) != isinstance(dtype, Bool):
+                raise ValueError("Certificate input variable and dtype disagree")
+            annotations[parameter] = dtype
+        if len({source.name for source in inputs}) != len(inputs):
+            raise ValueError("Certificate spec input names must be unique")
+        annotation = decode_spec_value(data["return_annotation"])
+        if not isinstance(annotation, (Q, UQ)) and annotation is not Q and annotation is not UQ:
+            raise ValueError("Unsupported certificate return annotation")
+        annotations["return"] = annotation
+        ctx = SpecContext("certificate_replay")
+        for source, target in (("assumptions", "assumes"), ("checks", "checks"), ("requirements", "requirements")):
+            conditions = decode_spec_value(data[source])
+            if type(conditions) is not list or any(not isinstance(condition, BoolExpr) for condition in conditions):
+                raise ValueError(f"Invalid certificate {source}")
+            setattr(ctx, target, conditions)
+        partitions = decode_spec_value(context["case_partitions"])
+        if type(partitions) is not list or any(not isinstance(item, _CasePartition) for item in partitions):
+            raise ValueError("Invalid certificate case partitions")
+        ctx.case_partitions = partitions
+        ctx._sym_counter = counter
+        choices = decode_spec_value(data["rounding_choices"])
+        if type(choices) is not list:
+            raise ValueError("Invalid certificate rounding choices")
+        rounding_choices = {}
+        for pair in choices:
+            if (type(pair) is not list or len(pair) != 2 or not isinstance(pair[0], Round)
+                    or not isinstance(pair[1], BoolVar) or pair[0] in rounding_choices):
+                raise ValueError("Invalid or duplicate certificate rounding choice")
+            rounding_choices[pair[0]] = pair[1]
+        return Spec(
+            name=ctx.name, display_name=ctx.name, signature=signature,
+            annotations=annotations, spec_ast=root, spec_inputs=tuple(inputs),
+            spec_ctx=ctx, rounding_choices=rounding_choices,
+        )
 
     def validate(self):
         expected_keys = {
