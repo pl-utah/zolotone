@@ -142,10 +142,12 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
     expressions, sharing synthesis's choice redirection. False or undefined
     assumptions require a C++ assertion; true assumptions require a result.
     Unresolved assumptions and output evaluation errors fail verification.
-    Return a certificate only after checking every assignment.
+    Prove requirements using the existing context validator, and return a
+    certificate only after checking every assignment.
     """
     from .autogen import _expand_faithful_roundings
-    from .spec_validation import _spec_input_dtypes
+    from .spec_validation import _spec_input_dtypes, add_input_ranges
+    from ..ast.nodes import _annotation_matches
     from ..codegen.compile_cpp import CppAssertionError, jit_compile
 
     output_dtype = component.dtype
@@ -153,6 +155,11 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
         raise NotImplementedError("zfv requires a Q or UQ output")
     if output_dtype.total_bits() > 64:
         raise NotImplementedError("zfv C++ outputs must have at most 64 bits")
+    if not _annotation_matches(output_dtype, spec.return_annotation):
+        raise ValueError(
+            f"Spec and C++ output dtypes differ: expected {spec.return_annotation!r}, "
+            f"got {output_dtype!r}"
+        )
 
     # getting precision at output
     root = spec.spec_ast
@@ -198,6 +205,10 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
 
     # Expand faithful rounding in both the reference (due to nested roundings) and assumptions.
     expanded_spec = _expand_faithful_roundings(spec)
+    if expanded_spec.spec_ctx.requirements:
+        # Prove over the declared input ranges without changing the saved spec.
+        add_input_ranges(expanded_spec).spec_ctx.validate_requirements()
+
     rounded_reference = expanded_spec.spec_ast
     if isinstance(rounded_reference, Round) and rounded_reference.frac_bits is None:
         rounded_reference = replace(rounded_reference, frac_bits=precision)
@@ -205,9 +216,12 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
     precondition = BoolLit(True)
     for assumption in expanded_spec.spec_ctx.assumes:
         precondition = precondition & assumption
+    checks = BoolLit(True)
+    for check in expanded_spec.spec_ctx.checks:
+        checks = checks & check
     rounding_allowed = expanded_spec.rounding_allowed if root.mode is RoundingMode.FR else {}
     occupied = set(collect_free_vars([
-        unrounded_reference, rounded_reference, precondition,
+        unrounded_reference, rounded_reference, precondition, checks,
         *(condition for _, condition in rounding_allowed.values()),
     ]))
     expanded_choices = tuple(expanded_spec.rounding_choices.values())
@@ -234,6 +248,7 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
         unrounded_reference = substitute_spec_node(unrounded_reference, source, decoded)
         rounded_reference = substitute_spec_node(rounded_reference, source, decoded)
         precondition = substitute_spec_node(precondition, source, decoded)
+        checks = substitute_spec_node(checks, source, decoded)
         rounding_allowed = {
             selected: (mode, substitute_spec_node(condition, source, decoded))
             for selected, (mode, condition) in rounding_allowed.items()
@@ -248,6 +263,7 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
             unrounded_reference = substitute_spec_node(unrounded_reference, expanded_choices[index], decoded)
             rounded_reference = substitute_spec_node(rounded_reference, expanded_choices[index], decoded)
             precondition = substitute_spec_node(precondition, expanded_choices[index], decoded)
+            checks = substitute_spec_node(checks, expanded_choices[index], decoded)
             rounding_allowed = {
                 selected: (mode, substitute_spec_node(condition, expanded_choices[index], decoded))
                 for selected, (mode, condition) in rounding_allowed.items()
@@ -266,7 +282,7 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
         ["boolean"] * (1 + len(rounding_allowed)), free_vars=free_vars,
     )
     machine = rival_compile(
-        [predicate, actual.eq(rounded_reference)], ["boolean", "boolean"],
+        [predicate, actual.eq(rounded_reference), checks], ["boolean"] * 3,
         free_vars=free_vars + [cpp_result.name],
     )
     # MPFI evaluates only the unrounded reference; all checks use exact Python arithmetic.
@@ -335,7 +351,7 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
             results = _apply_point(
                 machine, point + [cpp_code], assignment_label, "spec comparison",
             )
-            names = ("error budget", "rounded reference")
+            names = ("error budget", "rounded reference", "user checks")
             for name, result in zip(names, results, strict=True):
                 if result.total_error:
                     raise ZolotoneError(
@@ -353,10 +369,11 @@ def zfv(spec: Spec, component: Composite) -> ZFVCertificate:
                     f"C++ result (choices, value)={(choice, value)}; "
                     f"failed checks: {', '.join(failures)}; "
                     f"required abs(C++ - unrounded_reference) {relation} {error_bound} "
-                    "and C++ == rounded_reference for the selected rounding choices"
+                    "and C++ == rounded_reference for the selected rounding choices "
+                    "and all user checks hold"
                 )
             for name, result in zip(names, results, strict=True):
-                if result.error or not result.resolved:
+                if result.error or not result.resolved or result.value is not True:
                     raise VerificationInconclusive(
                         f"ZFV: spec comparison ({name}) unresolved at {assignment_label}"
                     )

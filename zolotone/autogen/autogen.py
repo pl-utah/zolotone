@@ -435,7 +435,7 @@ def Autogenerate(
     attach_lowered_conditions(lowered_composite, current_spec)
 
     if only_LUT:
-        from .spec_verification import zfv
+        from .spec_verification import zfv, replay_zfv
         lowered_composite.verification_certificate = zfv(original_spec, lowered_composite)
-
+        # replay_zfv(lowered_composite.verification_certificate, lowered_composite)
     return lowered_composite
