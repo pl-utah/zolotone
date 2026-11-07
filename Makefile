@@ -27,9 +27,16 @@ RUST_MIN_VERSION ?= 1.85.0
 
 # Ubuntu/Debian prerequisites for the small native MPFI extension.
 # Only system package installation uses sudo; run install-mpfi as a normal user.
-install-mpfi-prereqs:
-	sudo apt-get update
-	sudo apt-get install -y build-essential python3.11-dev libmpfi-dev libmpfr-dev libgmp-dev
+install-mpfi-prereqs: _check-python
+	@set -e; \
+	packages="build-essential libmpfi-dev libmpfr-dev libgmp-dev"; \
+	if $(PYTHON) -c 'import pathlib, sysconfig; raise SystemExit(0 if (pathlib.Path(sysconfig.get_path("include")) / "Python.h").is_file() else 1)'; then \
+		echo "Using Python development headers provided by $(PYTHON)"; \
+	else \
+		packages="$$packages python3.11-dev"; \
+	fi; \
+	sudo apt-get update; \
+	sudo apt-get install -y $$packages
 
 install-mpfi: _venv install-mpfi-prereqs
 	@echo "Installing native MPFI extension into $(VENV_DIR)"

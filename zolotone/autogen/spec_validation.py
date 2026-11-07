@@ -494,6 +494,12 @@ def _validate_only_lut_spec(spec: Spec) -> None:
     root = spec.spec_ast
     if not isinstance(root, Round) or root.frac_bits is None:
         raise MissingError("only_LUT requires root rounding with resolved frac_bits")
+    pending = [root.value]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Round):
+            raise MissingError("only_LUT does not support nested rounding in the result expression")
+        pending.extend(children(node))
     dtype = spec.return_annotation
     if dtype not in (Q, UQ) and not isinstance(dtype, (Q, UQ)):
         raise MissingError("only_LUT requires a Q or UQ output")
