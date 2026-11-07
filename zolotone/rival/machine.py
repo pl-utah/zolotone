@@ -3,18 +3,110 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 import math
-from typing import Any, Iterable, NamedTuple, Sequence
+from typing import Any, Iterable, Literal, NamedTuple, Sequence
 
 from ..spec.spec_ast import *
 
 RivalIR = dict[str, Any]
 
 __all__ = [
+    "CompiledRivalMachine", "RivalResult", "rival_compile", "wrap_precondition",
     "build_boolean_evaluator",
     "RivalMachine", "RivalIntegerMachine", "RivalAnalysis", "RivalEvaluation",
     "build_machine", "build_integer_evaluator", "collect_free_vars", "to_rival_ir",
     "RivalFloatMachine", "build_float_evaluator",
 ]
+
+
+Discretization = Literal["boolean", "float", "integer"]
+Value = bool | float | int
+
+
+@dataclass(frozen=True)
+class RivalResult:
+    """One output. Values are valid only when resolved and error-free.
+
+    Point values are scalars; range values are enclosing (lower, upper) pairs
+    in the selected discretization. Undefined outputs have no value. Error flags
+    are those returned by Rival; failed evaluations raise ValueError.
+    """
+
+    value: Value | tuple[Value, Value] | None = None
+    error: bool = False
+    total_error: bool = False
+    resolved: bool = False
+
+
+class CompiledRivalMachine:
+    """A compiled list of outputs; input positions follow free_vars."""
+
+    def __init__(self, raw_machine, discretizations: Sequence[Discretization]):
+        self._raw_machine = raw_machine
+        self.discretizations = tuple(discretizations)
+
+    def _encode_input(self, value: int | float) -> str:
+        if isinstance(value, int):
+            return str(int(value))
+        if isinstance(value, float) and math.isfinite(value):
+            return str(Fraction(value))
+        raise TypeError("Rival inputs must be integers or finite floats")
+
+
+    def _decode(self, outputs, *, range_mode):
+        results = []
+        for disc, (lo, hi, error, total_error, resolved) in zip(
+            self.discretizations, outputs, strict=True,
+        ):
+            convert = {"boolean": lambda x: bool(int(x)),
+                       "integer": int, "float": float}[disc]
+            value = None
+            if resolved and not error:
+                value = (convert(lo), convert(hi)) if range_mode else convert(lo)
+            results.append(RivalResult(value, error, total_error, resolved))
+        return results
+
+    def apply_point(self, point: Sequence[int | float]) -> list[RivalResult]:
+        """Evaluate the outputs using adaptive precision; propagate failures."""
+        return self._decode(self._raw_machine.apply_point(
+            [self._encode_input(x) for x in point], max_iterations=10,
+        ), range_mode=False)
+
+    def apply_range(self, rect: Sequence[tuple[int | float, int | float]]) -> list[RivalResult]:
+        """Enclose discretized outputs in one interval-evaluation pass."""
+        return self._decode(self._raw_machine.apply_range([
+            (self._encode_input(lo), self._encode_input(hi)) for lo, hi in rect
+        ]), range_mode=True)
+
+
+    def highest_precision(self) -> int:
+        return self._raw_machine.highest_precision()
+
+
+def rival_compile(
+    expressions: Sequence[RealExpr | BoolExpr | RivalIR],
+    discretizations: Sequence[Discretization],
+    *,
+    free_vars: Sequence[str]
+) -> CompiledRivalMachine:
+    """Compile spec expressions or explicit Rival IR with output discretizations."""
+    expressions, discs = list(expressions), list(discretizations)
+    # Some checks
+    if not expressions or len(expressions) != len(discs):
+        raise ValueError("provide one discretization per expression, with at least one expression")
+    for expr, disc in zip(expressions, discs, strict=True):
+        if disc not in ("boolean", "integer", "float"):
+            raise ValueError(f"unknown discretization: {disc!r}")
+        expected = BoolExpr if disc == "boolean" else RealExpr
+        if not isinstance(expr, (expected, dict)):
+            raise TypeError(f"{disc} discretization requires a {expected.__name__}")
+    # Validation
+    variables = _validate_free_vars(free_vars)
+    _validate_referenced_vars(expressions, variables)
+    raw = _load_native_module().rival_compile(
+        [expr if isinstance(expr, dict) else to_rival_ir(expr) for expr in expressions],
+        discs, variables, max_precision=10000,
+    )
+    return CompiledRivalMachine(raw, discs)
 
 
 @dataclass(frozen=True)
@@ -141,8 +233,10 @@ def build_machine(
     return RivalMachine(raw_machine)
 
 
-def _evaluator_precondition(precondition: BoolExpr) -> RivalIR:
-    """Let an error-free false conjunct reject an input despite other errors."""
+def wrap_precondition(precondition: BoolExpr) -> RivalIR:
+    """Build Boolean Rival IR where an error-free false conjunct rejects input."""
+    if not isinstance(precondition, BoolExpr):
+        raise TypeError("precondition must be a Boolean expression")
     pending = [precondition]
     predicates = []
     while pending:
@@ -190,7 +284,7 @@ def build_float_evaluator(
     _validate_referenced_vars([expr, precondition], var_list)
     native = _load_native_module()
     return RivalFloatMachine(native.build_float_evaluator(
-        to_rival_ir(expr), _evaluator_precondition(precondition), var_list,
+        to_rival_ir(expr), wrap_precondition(precondition), var_list,
     ))
 
 
@@ -228,7 +322,7 @@ def build_integer_evaluator(
         native.build_integer_evaluator(
             to_rival_ir(expr),
             rounding_mode,
-            _evaluator_precondition(precondition),
+            wrap_precondition(precondition),
             var_list,
         )
     )
