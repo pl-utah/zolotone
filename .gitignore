@@ -11,5 +11,7 @@ report.json
 ac_types/
 *.hpp
 target/
+native/*/build/
+native/*/*.egg-info/
 crates/*/target/
 examples/c_models/

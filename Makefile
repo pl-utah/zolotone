@@ -20,6 +20,29 @@ CARGO_HOME ?= $(HOME)/.cargo
 RUSTUP_HOME ?= $(HOME)/.rustup
 RUST_PATH := $(CARGO_HOME)/bin:$(PATH)
 RUST_MIN_VERSION ?= 1.85.0
+# Preserve the original bare `make` behavior.
+.DEFAULT_GOAL := _check-python
+
+.PHONY: install-mpfi install-mpfi-prereqs test-mpfi
+
+# Ubuntu/Debian prerequisites for the small native MPFI extension.
+# Only system package installation uses sudo; run install-mpfi as a normal user.
+install-mpfi-prereqs: _check-python
+	@set -e; \
+	packages="build-essential libmpfi-dev libmpfr-dev libgmp-dev"; \
+	if $(PYTHON) -c 'import pathlib, sysconfig; raise SystemExit(0 if (pathlib.Path(sysconfig.get_path("include")) / "Python.h").is_file() else 1)'; then \
+		echo "Using Python development headers provided by $(PYTHON)"; \
+	else \
+		packages="$$packages python3.11-dev"; \
+	fi; \
+	sudo apt-get update; \
+	sudo apt-get install -y $$packages
+
+install-mpfi: _venv install-mpfi-prereqs
+	@echo "Installing native MPFI extension into $(VENV_DIR)"
+	@$(VENV_PIP) install ./native/mpfi
+	@$(VENV_PYTHON) -c 'from fractions import Fraction; from zolotone.mpfi import MPFIInterval; q = Fraction(1, 3); r = MPFIInterval(q); assert r.lower() <= q <= r.upper(); print("Native MPFI enclosure check passed")'
+
 
 .PHONY: nightly install install-prereqs unit-tests clean run-docker
 .PHONY: _check-python _venv _python-deps _install-dreal
@@ -162,7 +185,7 @@ _download_ac_int:
 
 
 # This runs without sudo
-install: _python-deps _install-dreal _install-rival _download_ac_int
+install: _python-deps _install-dreal _install-rival install-mpfi _download_ac_int
 
 unit-tests:
 	@echo "Running infra/unittests.py..."

@@ -3,12 +3,17 @@ import tempfile
 import unittest
 import ctypes
 import subprocess
+import re
 from pathlib import Path
 
-from zolotone import Node, DataType, Tuple
+from ..ast.node import Node
+from ..types import DataType, Tuple
 
-_INFRA_DIR = Path(__file__).resolve().parent
-_AC_TYPES_INCLUDE_DIR = _INFRA_DIR / "ac_types" / "include"
+_AC_TYPES_INCLUDE_DIR = Path(__file__).resolve().parents[2] / "infra" / "ac_types" / "include"
+
+
+class CppAssertionError(AssertionError):
+    """An assertion failed while executing generated C++."""
 
 
 def _find_cpp_compiler() -> str | None:
@@ -60,12 +65,22 @@ def _wrapper_arg_expr(arg, idx: int, *, jittable: bool) -> str:
     return f"static_cast<{lowered_type}>({expr})"
 
 
-def compile_(node: Node, jittable: bool):
+def compile_(node: Node, jittable: bool, *, catch_assertions: bool = False):
     if not hasattr(node, "inner_args"):
         raise TypeError("compile helpers expect a Primitive or Composite node")
 
     function_name = "lowered_entry"
     source = node.to_cpp(function_name, jittable=jittable)
+    if catch_assertions:
+        # Keep assertion expressions and evaluation order, but throw within the
+        # C++ wrapper instead of aborting the Python process. Never let a C++
+        # exception cross the ctypes boundary.
+        source = (
+            "struct ZfvAssertion { const char *expression; };\n"
+            "#define ZFV_ASSERT(condition) "
+            "((condition) ? (void)0 : throw ZfvAssertion{#condition})\n"
+            + re.sub(r"\bassert\s*\(", "ZFV_ASSERT(", source)
+        )
     compiler = _find_cpp_compiler()
 
     tempdir = tempfile.TemporaryDirectory()
@@ -84,6 +99,18 @@ def compile_(node: Node, jittable: bool):
         for idx, arg in enumerate(node.inner_args)
     )
     return_type = _cpp_abi_type(node.dtype)
+    body = [f"return static_cast<{return_type}>(Zolotone::zolotone({call_args}));"]
+    if catch_assertions:
+        arg_decls.append("const char **assertion")
+        body = [
+            "*assertion = nullptr;",
+            "try {",
+            f"    {body[0]}",
+            "} catch (const ZfvAssertion &failure) {",
+            "    *assertion = failure.expression;",
+            "    return 0;",
+            "}",
+        ]
 
     wrapper_path.write_text(
         "\n".join(
@@ -92,7 +119,7 @@ def compile_(node: Node, jittable: bool):
                 '#include "lowered.cpp"',
                 "",
                 f'extern "C" {return_type} {function_name}_entry({", ".join(arg_decls)}) {{',
-                f"    return static_cast<{return_type}>(Zolotone::zolotone({call_args}));",
+                *(f"    {line}" for line in body),
                 "}",
                 "",
             ]
@@ -132,12 +159,23 @@ def compile_(node: Node, jittable: bool):
     func = getattr(library, f"{function_name}_entry")
     func.argtypes = [_ctypes_abi_type(arg.dtype) for arg in node.inner_args]
     func.restype = _ctypes_abi_type(node.dtype)
+    if catch_assertions:
+        func.argtypes = [*func.argtypes, ctypes.POINTER(ctypes.c_char_p)]
+
+        def evaluate(*args):
+            assertion = ctypes.c_char_p()
+            value = func(*args, ctypes.byref(assertion))
+            if assertion.value is not None:
+                raise CppAssertionError(assertion.value.decode("utf-8"))
+            return value
+
+        return tempdir, evaluate
     return tempdir, func
 
 
-def jit_compile(node: Node):
-    return compile_(node, jittable=True)
+def jit_compile(node: Node, *, catch_assertions: bool = False):
+    return compile_(node, jittable=True, catch_assertions=catch_assertions)
 
 
-def nonjit_compile(node: Node):
-    return compile_(node, jittable=False)
+def nonjit_compile(node: Node, *, catch_assertions: bool = False):
+    return compile_(node, jittable=False, catch_assertions=catch_assertions)

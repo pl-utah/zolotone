@@ -4,6 +4,7 @@ import inspect
 import typing as tp
 
 from ..spec.spec_ast import (
+    BoolExpr,
     BoolVar,
     FPExpr,
     If,
@@ -57,6 +58,8 @@ class Spec:
     rounding_choices: dict[Round, BoolVar] = field(default_factory=dict)
     has_user_assumptions: bool = False
     output_bounds: tuple[Fraction, Fraction] | None = None
+    # Each uncorrected FR choice maps to its mode and assumption predicate.
+    rounding_allowed: dict[bool, tuple[RoundingMode, BoolExpr]] = field(default_factory=dict)
 
     def to_function(self) -> tp.Callable[..., tp.Any]:
         """Derive a callable from this AST and contract, without replaying source."""
@@ -309,6 +312,7 @@ def _expand_faithful_roundings(spec: Spec) -> Spec:
     if not expanded:
         return spec
     choice_vars = tuple(choices.values())
+    rounding_allowed = {}
     if set(choice_vars) & _spec_value_variables(tuple(ctx.assumes)):
         if len(choices) > 1:
             raise MissingError(
@@ -325,6 +329,10 @@ def _expand_faithful_roundings(spec: Spec) -> Spec:
         rounded, = choices
         original = rewritten[rounded]
         raz, rtz = original.on_true, original.on_false
+        rounding_allowed = {
+            True: (raz.mode, raz_allowed),
+            False: (rtz.mode, rtz_allowed),
+        }
         # Keep the correction inside each branch so a univariate LUT can absorb it.
         resolved = If(choice, If(raz_allowed, raz, rtz), If(rtz_allowed, rtz, raz))
 
@@ -365,6 +373,7 @@ def _expand_faithful_roundings(spec: Spec) -> Spec:
         },
         signature=spec.signature.replace(parameters=(*parameters[:-1], *choice_parameters, parameters[-1])),
         rounding_choices=choices,
+        rounding_allowed=rounding_allowed,
     )
 
 
@@ -376,15 +385,15 @@ def Autogenerate(
 ):
     """Lower a specification; only_LUT adds LUT eligibility validation."""
     # Step 1: Obtain spec AST
-    current_spec = get_spec(name, spec)
+    original_spec = get_spec(name, spec)
 
     # print(current_spec)
 
     # Step 2: establish the abstract input domain and validate its shape.
     # Error on undeclared variables, warn about unused variables.
-    reject_undeclared_variables(current_spec)
+    reject_undeclared_variables(original_spec)
     # Add exact input ranges implied by their types.
-    current_spec = add_input_ranges(current_spec)
+    current_spec = add_input_ranges(original_spec)
     # Catch type errors such as RealExpr versus BoolExpr.
     _validate_spec_shape(current_spec)
     if only_LUT:
@@ -425,6 +434,8 @@ def Autogenerate(
     # Step 8: lower and attach assumptions, user checks, and output guards.
     attach_lowered_conditions(lowered_composite, current_spec)
 
-    # Step 9: lower composite to C++
-    cpp = lowered_composite.to_cpp()
+    if only_LUT:
+        from .spec_verification import zfv, replay_zfv
+        lowered_composite.verification_certificate = zfv(original_spec, lowered_composite)
+        # replay_zfv(lowered_composite.verification_certificate, lowered_composite)
     return lowered_composite

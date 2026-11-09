@@ -3,7 +3,8 @@ on: [push]
 jobs:
   unit-tests:
     name: "Unit Tests"
-    runs-on: ubuntu-latest
+    # Keep this aligned with the Ubuntu versions supported by install-prereqs.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: "Set up Python 3.11"

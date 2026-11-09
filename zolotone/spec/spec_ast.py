@@ -16,6 +16,22 @@ import dreal
 
 
 class SpecNode:
+    def to_dict(self) -> dict[str, Any]:
+        """Encode this scalar AST as data suitable for JSON serialization."""
+        from .serialization import encode_spec_value
+
+        return encode_spec_value(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SpecNode:
+        """Decode an allowlisted AST, rejecting non-nodes or a different subclass."""
+        from .serialization import decode_spec_value
+
+        node = decode_spec_value(data)
+        if not isinstance(node, cls):
+            raise ValueError(f"Expected a serialized {cls.__name__}")
+        return node
+
     def __reduce__(self):
         return type(self), tuple(getattr(self, field.name) for field in fields(self))
 

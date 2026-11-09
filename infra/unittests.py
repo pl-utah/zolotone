@@ -99,7 +99,7 @@ from examples.dot_product.wgmma_fp32_e5m2_e4m3 import (
     wgmma_fp32_e5m2_e4m3,
 )
 
-from infra.compile_cpp import jit_compile, nonjit_compile
+from zolotone.codegen.compile_cpp import jit_compile, nonjit_compile
 from infra import docker_run_designs
 from infra import make_designs_html
 from infra import run_designs as design_runner
@@ -1507,7 +1507,7 @@ class TestRoundingChoiceCpp(unittest.TestCase):
         return node
 
     def assert_cpp_runs(self, node, statements, jittable, *, preamble=""):
-        from infra.compile_cpp import _AC_TYPES_INCLUDE_DIR, _find_cpp_compiler
+        from zolotone.codegen.compile_cpp import _AC_TYPES_INCLUDE_DIR, _find_cpp_compiler
 
         source = node.to_cpp(jittable=jittable)
         source += "\n" + preamble + "\nint main() {\n" + "\n".join(statements) + "\n}\n"
@@ -1565,7 +1565,7 @@ class TestRoundingChoiceCpp(unittest.TestCase):
                 self.assertIn(" choice_output(", private)
 
     def test_generated_helpers_cannot_be_called_externally(self):
-        from infra.compile_cpp import _AC_TYPES_INCLUDE_DIR, _find_cpp_compiler
+        from zolotone.codegen.compile_cpp import _AC_TYPES_INCLUDE_DIR, _find_cpp_compiler
 
         node = self.make_choice_component()
         for jittable in (True, False):
