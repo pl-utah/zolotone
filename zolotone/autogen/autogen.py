@@ -18,6 +18,7 @@ from ..spec.spec_ast import (
 from ..spec.spec_context import SpecContext
 from ..errors import MissingError
 from ..types import Bool, Q, UQ
+from ..rival.analysis import TypedDomainBox
 from ..ast.nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
     attach_lowered_conditions,
@@ -58,6 +59,7 @@ class Spec:
     rounding_choices: dict[Round, BoolVar] = field(default_factory=dict)
     has_user_assumptions: bool = False
     output_bounds: tuple[Fraction, Fraction] | None = None
+    valid_boxes: tuple[TypedDomainBox, ...] | None = None
     # Each uncorrected FR choice maps to its mode and assumption predicate.
     rounding_allowed: dict[bool, tuple[RoundingMode, BoolExpr]] = field(default_factory=dict)
 

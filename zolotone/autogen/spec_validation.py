@@ -20,6 +20,7 @@ from ..spec.spec_ast import (
     Not,
     RealExpr,
     Round,
+    RoundingMode,
     SpecNode,
     children,
     identical_nodes,
@@ -46,12 +47,75 @@ def _spec_input_dtypes(spec: "Spec") -> dict[SpecNode, DataType]:
 
 
 def spec_domain_analysis(spec: Spec) -> Spec:
-    """Validate assumptions, checks and output; cache bounds on a spec copy."""
-    bounds = analyze_typed_domain(
+    """Validate assumptions, checks and output; cache bounds and accepted boxes."""
+    analysis = analyze_typed_domain(
         spec.spec_ast, spec.spec_ctx, _spec_input_dtypes(spec),
         spec.return_annotation, obligations=spec.spec_ctx.checks,
     )
-    return replace(spec, output_bounds=bounds)
+    return replace(spec, output_bounds=analysis.bounds, valid_boxes=analysis.valid_boxes)
+
+
+def truncation_assumption(
+    root: Round, bounds: tuple[Fraction, Fraction], ctx: SpecContext,
+) -> BoolExpr | None:
+    """Propose endpoint exclusions only when their predicted bounds save bits."""
+    lower, upper = map(Fraction, bounds)
+    candidate_lower, candidate_upper = lower, upper
+    ulp = Fraction(1, 1 << root.frac_bits)
+
+    def is_power_of_two(value: Fraction) -> bool:
+        n, d = value.numerator, value.denominator
+        return n > 0 and (n & (n - 1)) == 0 and (d & (d - 1)) == 0
+
+    lower_shrink = False
+    upper_shrink = False
+    condition = ctx.true()
+    if is_power_of_two(upper):
+        condition &= root < ctx.real_val(upper)
+        candidate_upper -= ulp
+        upper_shrink = True
+    if is_power_of_two(-(lower + ulp)):
+        condition &= root > ctx.real_val(lower)
+        candidate_lower += ulp
+        lower_shrink = True
+    if candidate_lower > candidate_upper or (candidate_lower, candidate_upper) == (lower, upper):
+        return None
+    return condition
+
+
+def shrink_faithful_output(spec: Spec) -> Spec:
+    """Try removing one integer bit by restricting an unexpanded FR output.
+
+    Only inferred Q/UQ outputs are narrowed. Both versions are expanded and
+    analyzed independently; different leaf partitions conservatively reject the
+    optimization, even when their unions might agree. The returned spec retains
+    its FR root, with bounds and named boxes cached from its expanded version.
+    """
+    from .autogen import _expand_faithful_roundings
+
+    root = spec.spec_ast
+    if (not isinstance(root, Round) or root.mode is not RoundingMode.FR
+            or spec.return_annotation not in (Q, UQ)):
+        return spec
+    expanded = _expand_faithful_roundings(spec)
+    if len(expanded.rounding_choices) != 1:
+        return spec
+    original = spec_domain_analysis(expanded)
+    spec = replace(spec, output_bounds=original.output_bounds, valid_boxes=original.valid_boxes)
+    ctx = spec.spec_ctx.copy()
+    condition = truncation_assumption(root, original.output_bounds, ctx)
+    if condition is None:
+        return spec
+    ctx.assume(condition)
+    candidate = replace(spec, spec_ctx=ctx, output_bounds=None, valid_boxes=None)
+    try:
+        analyzed = spec_domain_analysis(_expand_faithful_roundings(candidate))
+    except ZolotoneError:
+        # An unproved or infeasible candidate must not invalidate the original spec.
+        return spec
+    if analyzed.valid_boxes != original.valid_boxes:
+        return spec
+    return replace(candidate, output_bounds=analyzed.output_bounds, valid_boxes=analyzed.valid_boxes)
 
 
 def reject_untyped_inputs(contract: _SpecContract):
@@ -326,10 +390,15 @@ def _output_format_suggestion_with_range_analysis(
     if output_range is None:
         if input_dtypes is None:
             raise ZolotoneError("Input dtypes are required for output range analysis")
-        output_range = analyze_typed_domain(spec_ast, ctx, input_dtypes, return_annotation)
-    lower, upper = output_range
+        output_range = analyze_typed_domain(spec_ast, ctx, input_dtypes, return_annotation).bounds
+    return _fixed_point_format_from_bounds(output_range, return_annotation.frac_bits)
 
-    frac_bits = return_annotation.frac_bits
+
+def _fixed_point_format_from_bounds(
+    bounds: tuple[Fraction, Fraction], frac_bits: int,
+) -> Q | UQ:
+    """Infer the smallest fixed-point format enclosing bounds at this precision."""
+    lower, upper = bounds
     scale = 1 << frac_bits
     if lower >= 0:
         required_raw = max(0, math.ceil(upper * scale))

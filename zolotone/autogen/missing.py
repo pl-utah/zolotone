@@ -62,7 +62,7 @@ def _expression_bounds(
     expression: RealExpr, dtype: Q | UQ, ctx: SpecContext,
     input_dtypes: dict[SpecNode, DataType],
 ) -> tuple[int, int]:
-    value_range = analyze_typed_domain(expression, ctx, input_dtypes, dtype)
+    value_range = analyze_typed_domain(expression, ctx, input_dtypes, dtype).bounds
     scale = 1 << dtype.frac_bits
     lower = math.ceil(Fraction(value_range[0]) * scale)
     upper = math.floor(Fraction(value_range[1]) * scale)
