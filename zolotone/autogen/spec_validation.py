@@ -56,30 +56,61 @@ def spec_domain_analysis(spec: Spec) -> Spec:
 
 
 def truncation_assumption(
-    root: Round, bounds: tuple[Fraction, Fraction], ctx: SpecContext,
+    root: Round, return_annotation, bounds: tuple[Fraction, Fraction], ctx: SpecContext,
 ) -> BoolExpr | None:
     """Propose endpoint exclusions only when their predicted bounds save bits."""
     lower, upper = map(Fraction, bounds)
     candidate_lower, candidate_upper = lower, upper
     ulp = Fraction(1, 1 << root.frac_bits)
 
-    def is_power_of_two(value: Fraction) -> bool:
-        n, d = value.numerator, value.denominator
-        return n > 0 and (n & (n - 1)) == 0 and (d & (d - 1)) == 0
+    # Below this boundary, removing an endpoint cannot save an integer bit.
+    # Signed formats use [-B, B - ulp]; unsigned formats use [0, B - ulp].
+    minimum_endpoint = Fraction(2) ** (max(1, root.frac_bits) - root.frac_bits)
+    if return_annotation is Q:
+        minimum_endpoint /= 2
 
-    lower_shrink = False
-    upper_shrink = False
-    condition = ctx.true()
-    if is_power_of_two(upper):
-        condition &= root < ctx.real_val(upper)
+    # Shrink only integer bits of a near-boundary endpoint
+    def endpoint_can_be_shrunk(value: Fraction) -> bool:
+        if value < minimum_endpoint:
+            return False
+        n, d = value.numerator, value.denominator
+        return (n & (n - 1)) == 0 and (d & (d - 1)) == 0
+
+    upper_shrink = endpoint_can_be_shrunk(upper)
+    lower_shrink = endpoint_can_be_shrunk(-(lower + ulp))
+    if upper_shrink:
         candidate_upper -= ulp
-        upper_shrink = True
-    if is_power_of_two(-(lower + ulp)):
-        condition &= root > ctx.real_val(lower)
+    if lower_shrink:
         candidate_lower += ulp
-        lower_shrink = True
+
     if candidate_lower > candidate_upper or (candidate_lower, candidate_upper) == (lower, upper):
         return None
+
+    if lower_shrink and upper_shrink:
+        # Keep only the exclusions needed to fit [-B, B - ulp].
+        negative_extent = -candidate_lower
+        positive_extent = candidate_upper + ulp
+        if negative_extent > positive_extent:
+            upper_shrink = False
+            candidate_upper = upper
+        elif positive_extent > negative_extent:
+            lower_shrink = False
+            candidate_lower = lower
+
+    if upper_shrink and not lower_shrink:
+        if candidate_lower < 0 and -candidate_lower > candidate_upper + ulp:
+            return None
+    elif lower_shrink and not upper_shrink:
+        if candidate_upper + ulp > -candidate_lower:
+            return None
+    elif not lower_shrink and not upper_shrink:
+        return None
+
+    condition = ctx.true()
+    if upper_shrink:
+        condition &= root < ctx.real_val(upper)
+    if lower_shrink:
+        condition &= root > ctx.real_val(lower)
     return condition
 
 
@@ -103,7 +134,7 @@ def shrink_faithful_output(spec: Spec) -> Spec:
     original = spec_domain_analysis(expanded)
     spec = replace(spec, output_bounds=original.output_bounds, valid_boxes=original.valid_boxes)
     ctx = spec.spec_ctx.copy()
-    condition = truncation_assumption(root, original.output_bounds, ctx)
+    condition = truncation_assumption(root, spec.return_annotation, original.output_bounds, ctx)
     if condition is None:
         return spec
     ctx.assume(condition)
