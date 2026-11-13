@@ -216,7 +216,7 @@ def _candidate_output_range_fits(
     if output_bounds is None:
         output_bounds = analyze_typed_domain(
             candidate.spec, range_ctx, input_dtypes or {}, candidate.node.dtype,
-        )
+        ).bounds
     lower, upper = output_bounds
     dtype_lower, dtype_upper = _fixed_point_real_bounds(candidate.node.dtype)
     if lower >= dtype_lower and upper <= dtype_upper:

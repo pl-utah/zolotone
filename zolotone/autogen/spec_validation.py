@@ -20,6 +20,7 @@ from ..spec.spec_ast import (
     Not,
     RealExpr,
     Round,
+    RoundingMode,
     SpecNode,
     children,
     identical_nodes,
@@ -46,12 +47,124 @@ def _spec_input_dtypes(spec: "Spec") -> dict[SpecNode, DataType]:
 
 
 def spec_domain_analysis(spec: Spec) -> Spec:
-    """Validate assumptions, checks and output; cache bounds on a spec copy."""
-    bounds = analyze_typed_domain(
+    """Validate assumptions, checks and output; cache bounds and accepted boxes."""
+    analysis = analyze_typed_domain(
         spec.spec_ast, spec.spec_ctx, _spec_input_dtypes(spec),
         spec.return_annotation, obligations=spec.spec_ctx.checks,
     )
-    return replace(spec, output_bounds=bounds)
+    return replace(spec, output_bounds=analysis.bounds, valid_boxes=analysis.valid_boxes)
+
+
+def truncation_assumption(
+    root: Round, return_annotation: type[Q] | type[UQ] | Q | UQ,
+    bounds: tuple[Fraction, Fraction], ctx: SpecContext,
+) -> BoolExpr | None:
+    """Propose endpoint exclusions only when their predicted bounds save bits."""
+    lower, upper = map(Fraction, bounds)
+    candidate_lower, candidate_upper = lower, upper
+    ulp = Fraction(1, 1 << root.frac_bits)
+
+    # Below this boundary, removing an endpoint cannot save an integer bit.
+    # Signed formats use [-B, B - ulp]; unsigned formats use [0, B - ulp].
+    # An explicit output may carry more fractional bits than the root rounding.
+    # Use its precision for the minimum format width, but the root's ULP for
+    # endpoint exclusions.
+    output_frac_bits = (
+        return_annotation.frac_bits
+        if isinstance(return_annotation, (Q, UQ)) else root.frac_bits
+    )
+    minimum_endpoint = Fraction(2) ** (max(1, output_frac_bits) - output_frac_bits)
+    if return_annotation is Q or isinstance(return_annotation, Q):
+        minimum_endpoint /= 2
+
+    # Shrink only integer bits of a near-boundary endpoint
+    def endpoint_can_be_shrunk(value: Fraction) -> bool:
+        if value < minimum_endpoint:
+            return False
+        n, d = value.numerator, value.denominator
+        return (n & (n - 1)) == 0 and (d & (d - 1)) == 0
+
+    upper_shrink = endpoint_can_be_shrunk(upper)
+    lower_shrink = endpoint_can_be_shrunk(-(lower + ulp))
+    if upper_shrink:
+        candidate_upper -= ulp
+    if lower_shrink:
+        candidate_lower += ulp
+
+    if candidate_lower > candidate_upper or (candidate_lower, candidate_upper) == (lower, upper):
+        return None
+
+    if lower_shrink and upper_shrink:
+        # Keep only the exclusions needed to fit [-B, B - ulp].
+        negative_extent = -candidate_lower
+        positive_extent = candidate_upper + ulp
+        if negative_extent > positive_extent:
+            upper_shrink = False
+            candidate_upper = upper
+        elif positive_extent > negative_extent:
+            lower_shrink = False
+            candidate_lower = lower
+
+    if upper_shrink and not lower_shrink:
+        if candidate_lower < 0 and -candidate_lower > candidate_upper + ulp:
+            return None
+    elif lower_shrink and not upper_shrink:
+        if candidate_upper + ulp > -candidate_lower:
+            return None
+    elif not lower_shrink and not upper_shrink:
+        return None
+
+    condition = ctx.true()
+    if upper_shrink:
+        condition &= root < ctx.real_val(upper)
+    if lower_shrink:
+        condition &= root > ctx.real_val(lower)
+    return condition
+
+
+def shrink_faithful_output(spec: Spec) -> Spec:
+    """Try removing one integer bit by restricting an unexpanded FR output.
+
+    Generic and explicit Q/UQ outputs are supported; explicit output types
+    remain unchanged while their result bounds are narrowed. Both versions are
+    expanded and analyzed independently; different leaf partitions conservatively
+    reject the optimization, even when their unions might agree. The returned
+    spec retains its FR root, with bounds and named boxes cached from its
+    expanded version.
+    """
+    from .autogen import _expand_faithful_roundings
+
+    root = spec.spec_ast
+    if (not isinstance(root, Round) or root.mode is not RoundingMode.FR
+            or (spec.return_annotation not in (Q, UQ)
+                and not isinstance(spec.return_annotation, (Q, UQ)))):
+        return spec
+    expanded = _expand_faithful_roundings(spec)
+    if len(expanded.rounding_choices) != 1:
+        return spec
+    original = spec_domain_analysis(expanded)
+    spec = replace(spec, output_bounds=original.output_bounds, valid_boxes=original.valid_boxes)
+    ctx = spec.spec_ctx.copy()
+    condition = truncation_assumption(root, spec.return_annotation, original.output_bounds, ctx)
+    if condition is None:
+        return spec
+    ctx.assume(condition)
+    candidate = replace(spec, spec_ctx=ctx, output_bounds=None, valid_boxes=None)
+    try:
+        analyzed = spec_domain_analysis(_expand_faithful_roundings(candidate))
+    except ZolotoneError:
+        # An unproved or infeasible candidate must not invalidate the original spec.
+        return spec
+    if analyzed.valid_boxes != original.valid_boxes:
+        return spec
+    warnings.warn(
+        f"Specification {spec.spec_ctx.name!r} bitwidth has been shrunk with the following assumption: "
+        f"{condition}",
+        UserWarning,
+        stacklevel=3,
+    )
+
+    return replace(candidate, output_bounds=analyzed.output_bounds, valid_boxes=analyzed.valid_boxes)
 
 
 def reject_untyped_inputs(contract: _SpecContract):
@@ -326,7 +439,7 @@ def _output_format_suggestion_with_range_analysis(
     if output_range is None:
         if input_dtypes is None:
             raise ZolotoneError("Input dtypes are required for output range analysis")
-        output_range = analyze_typed_domain(spec_ast, ctx, input_dtypes, return_annotation)
+        output_range = analyze_typed_domain(spec_ast, ctx, input_dtypes, return_annotation).bounds
     lower, upper = output_range
 
     frac_bits = return_annotation.frac_bits

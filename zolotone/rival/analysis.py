@@ -22,11 +22,20 @@ __all__ = [
     "DEFAULT_MAX_RECTS", "MAX_RECTS_ENV", "RivalDomainError",
     "RivalRectLimitExceeded", "get_rival_rects", "rival_domain_errors",
     "analyze_typed_domain", "rival_feasibility_check", "rival_trim_context",
-    "rival_prove_result_fits",
+    "rival_prove_result_fits", "DomainAnalysis", "TypedDomainBox",
 ]
 
 MAX_RECTS_ENV = "ZOLOTONE_RIVAL_MAX_RECTS"
 DEFAULT_MAX_RECTS = 50_000
+
+# Integer-code bounds, with axis names so independently analyzed boxes can be compared.
+TypedDomainBox = tuple[tuple[str, int, int], ...]
+
+
+@dataclass(frozen=True)
+class DomainAnalysis:
+    bounds: tuple[Fraction, Fraction]
+    valid_boxes: tuple[TypedDomainBox, ...]
 
 
 def _collect_bool_var_names(exprs: Iterable[SpecNode]) -> set[str]:
@@ -160,12 +169,13 @@ def analyze_typed_domain(
     output_dtype: object = Q,
     *,
     obligations: Sequence[BoolExpr] = (),
-) -> tuple[Fraction, Fraction]:
+) -> DomainAnalysis:
     """Validate a finite typed domain and enclose its output.
 
     Inputs are decoded from integer codes. Generic Q/UQ outputs use outward
     floating-point enclosures, without imposing a fixed-point output grid.
     Unresolved points and domain errors raise rather than supplying unproven bounds.
+    Return output bounds and validated leaf boxes only after the analysis succeeds.
     """
     if output_dtype is Bool:
         output_dtype = Bool()
@@ -288,6 +298,7 @@ def analyze_typed_domain(
 
     reachable = False
     output_bounds = None
+    valid_boxes: list[TypedDomainBox] = []
     pending = [initial_box]
     while pending:
         box = pending.pop()
@@ -337,10 +348,13 @@ def analyze_typed_domain(
             (lower, upper) if output_bounds is None else
             (min(output_bounds[0], lower), max(output_bounds[1], upper))
         )
+        valid_boxes.append(tuple(
+            (name, lo, hi) for name, (lo, hi) in zip(free_vars, box, strict=True)
+        ))
 
     if not reachable:
         raise InfeasibleError(f"Specification {ctx.name!r} is unreachable: no input satisfies its assumptions")
-    return output_bounds
+    return DomainAnalysis(output_bounds, tuple(sorted(valid_boxes)))
 
 
 def rival_prove_result_fits(

@@ -18,6 +18,7 @@ from ..spec.spec_ast import (
 from ..spec.spec_context import SpecContext
 from ..errors import MissingError
 from ..types import Bool, Q, UQ
+from ..rival.analysis import TypedDomainBox
 from ..ast.nodes import _build_spec_contract, _SpecContract
 from .spec_lowering import (
     attach_lowered_conditions,
@@ -37,6 +38,7 @@ from .spec_validation import (
     add_output_guards,
     reject_untyped_inputs,
     reject_undeclared_variables,
+    shrink_faithful_output,
 )
 
 
@@ -58,6 +60,7 @@ class Spec:
     rounding_choices: dict[Round, BoolVar] = field(default_factory=dict)
     has_user_assumptions: bool = False
     output_bounds: tuple[Fraction, Fraction] | None = None
+    valid_boxes: tuple[TypedDomainBox, ...] | None = None
     # Each uncorrected FR choice maps to its mode and assumption predicate.
     rounding_allowed: dict[bool, tuple[RoundingMode, BoolExpr]] = field(default_factory=dict)
 
@@ -398,7 +401,11 @@ def Autogenerate(
     _validate_spec_shape(current_spec)
     if only_LUT:
         _validate_only_lut_spec(current_spec)
-    current_spec = _expand_faithful_roundings(current_spec)
+
+    # THIS SPEC MUST GO INTO VERIFICATION    
+    verification_spec = shrink_faithful_output(current_spec)
+
+    current_spec = _expand_faithful_roundings(verification_spec)
     # print(current_spec)
 
     # Step 3: simplify before making conditions type-precise.
@@ -436,6 +443,6 @@ def Autogenerate(
 
     if only_LUT:
         from .spec_verification import zfv, replay_zfv
-        lowered_composite.verification_certificate = zfv(original_spec, lowered_composite)
+        lowered_composite.verification_certificate = zfv(verification_spec, lowered_composite)
         # replay_zfv(lowered_composite.verification_certificate, lowered_composite)
     return lowered_composite
