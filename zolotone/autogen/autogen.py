@@ -38,6 +38,7 @@ from .spec_validation import (
     add_output_guards,
     reject_untyped_inputs,
     reject_undeclared_variables,
+    shrink_faithful_output,
 )
 
 
@@ -400,7 +401,11 @@ def Autogenerate(
     _validate_spec_shape(current_spec)
     if only_LUT:
         _validate_only_lut_spec(current_spec)
-    current_spec = _expand_faithful_roundings(current_spec)
+
+    # THIS SPEC MUST GO INTO VERIFICATION    
+    verification_spec = shrink_faithful_output(current_spec)
+
+    current_spec = _expand_faithful_roundings(verification_spec)
     # print(current_spec)
 
     # Step 3: simplify before making conditions type-precise.
@@ -438,6 +443,6 @@ def Autogenerate(
 
     if only_LUT:
         from .spec_verification import zfv, replay_zfv
-        lowered_composite.verification_certificate = zfv(original_spec, lowered_composite)
+        lowered_composite.verification_certificate = zfv(verification_spec, lowered_composite)
         # replay_zfv(lowered_composite.verification_certificate, lowered_composite)
     return lowered_composite

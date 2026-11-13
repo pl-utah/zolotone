@@ -56,7 +56,8 @@ def spec_domain_analysis(spec: Spec) -> Spec:
 
 
 def truncation_assumption(
-    root: Round, return_annotation, bounds: tuple[Fraction, Fraction], ctx: SpecContext,
+    root: Round, return_annotation: type[Q] | type[UQ] | Q | UQ,
+    bounds: tuple[Fraction, Fraction], ctx: SpecContext,
 ) -> BoolExpr | None:
     """Propose endpoint exclusions only when their predicted bounds save bits."""
     lower, upper = map(Fraction, bounds)
@@ -65,8 +66,15 @@ def truncation_assumption(
 
     # Below this boundary, removing an endpoint cannot save an integer bit.
     # Signed formats use [-B, B - ulp]; unsigned formats use [0, B - ulp].
-    minimum_endpoint = Fraction(2) ** (max(1, root.frac_bits) - root.frac_bits)
-    if return_annotation is Q:
+    # An explicit output may carry more fractional bits than the root rounding.
+    # Use its precision for the minimum format width, but the root's ULP for
+    # endpoint exclusions.
+    output_frac_bits = (
+        return_annotation.frac_bits
+        if isinstance(return_annotation, (Q, UQ)) else root.frac_bits
+    )
+    minimum_endpoint = Fraction(2) ** (max(1, output_frac_bits) - output_frac_bits)
+    if return_annotation is Q or isinstance(return_annotation, Q):
         minimum_endpoint /= 2
 
     # Shrink only integer bits of a near-boundary endpoint
@@ -117,16 +125,19 @@ def truncation_assumption(
 def shrink_faithful_output(spec: Spec) -> Spec:
     """Try removing one integer bit by restricting an unexpanded FR output.
 
-    Only inferred Q/UQ outputs are narrowed. Both versions are expanded and
-    analyzed independently; different leaf partitions conservatively reject the
-    optimization, even when their unions might agree. The returned spec retains
-    its FR root, with bounds and named boxes cached from its expanded version.
+    Generic and explicit Q/UQ outputs are supported; explicit output types
+    remain unchanged while their result bounds are narrowed. Both versions are
+    expanded and analyzed independently; different leaf partitions conservatively
+    reject the optimization, even when their unions might agree. The returned
+    spec retains its FR root, with bounds and named boxes cached from its
+    expanded version.
     """
     from .autogen import _expand_faithful_roundings
 
     root = spec.spec_ast
     if (not isinstance(root, Round) or root.mode is not RoundingMode.FR
-            or spec.return_annotation not in (Q, UQ)):
+            or (spec.return_annotation not in (Q, UQ)
+                and not isinstance(spec.return_annotation, (Q, UQ)))):
         return spec
     expanded = _expand_faithful_roundings(spec)
     if len(expanded.rounding_choices) != 1:
@@ -146,6 +157,13 @@ def shrink_faithful_output(spec: Spec) -> Spec:
         return spec
     if analyzed.valid_boxes != original.valid_boxes:
         return spec
+    warnings.warn(
+        f"Specification {spec.spec_ctx.name!r} bitwidth has been shrunk with the following assumption: "
+        f"{condition}",
+        UserWarning,
+        stacklevel=3,
+    )
+
     return replace(candidate, output_bounds=analyzed.output_bounds, valid_boxes=analyzed.valid_boxes)
 
 
