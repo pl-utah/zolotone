@@ -440,14 +440,9 @@ def _output_format_suggestion_with_range_analysis(
         if input_dtypes is None:
             raise ZolotoneError("Input dtypes are required for output range analysis")
         output_range = analyze_typed_domain(spec_ast, ctx, input_dtypes, return_annotation).bounds
-    return _fixed_point_format_from_bounds(output_range, return_annotation.frac_bits)
+    lower, upper = output_range
 
-
-def _fixed_point_format_from_bounds(
-    bounds: tuple[Fraction, Fraction], frac_bits: int,
-) -> Q | UQ:
-    """Infer the smallest fixed-point format enclosing bounds at this precision."""
-    lower, upper = bounds
+    frac_bits = return_annotation.frac_bits
     scale = 1 << frac_bits
     if lower >= 0:
         required_raw = max(0, math.ceil(upper * scale))
