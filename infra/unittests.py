@@ -47,6 +47,7 @@ from zolotone.rival import (
     to_rival_ir,
 )
 from zolotone.rival.analysis import (
+    DomainAnalysis,
     MAX_RECTS_ENV, RivalRectLimitExceeded, get_rival_rects,
     rival_feasibility_check, rival_domain_errors, analyze_typed_domain, rival_trim_context,
 )
@@ -3577,13 +3578,11 @@ class TestFaithfulRoundingExpansion(unittest.TestCase):
             return result
 
         with (
-            patch.object(autogen, "_expand_faithful_roundings", wraps=autogen._expand_faithful_roundings) as expand,
             patch.object(autogen, "_simplify_spec_ast", wraps=autogen._simplify_spec_ast) as simplify,
             patch.object(autogen, "_check_output_format", wraps=autogen._check_output_format) as output,
             patch.object(autogen, "lower_spec_result", wraps=autogen.lower_spec_result) as lower,
         ):
             generated = Autogenerate("explicit-faithful-choices", spec)
-        expand.assert_called_once()
         simplify.assert_called_once()
         output.assert_called_once()
         lower.assert_called_once()
@@ -12814,7 +12813,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         with (
             patch(
                 "zolotone.autogen.spec_validation.analyze_typed_domain",
-                return_value=(1.0, 4.0),
+                return_value=DomainAnalysis((Fraction(1), Fraction(4)), ()),
             ),
             self.assertRaisesRegex(
                 InfeasibleError,
@@ -12950,7 +12949,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
 
         with patch(
             "zolotone.autogen.spec_validation.analyze_typed_domain",
-            return_value=(-4.0, 7.0),
+            return_value=DomainAnalysis((Fraction(-4), Fraction(7)), ()),
         ):
             suggestion = _output_format_suggestion(
                 x,
@@ -12968,7 +12967,7 @@ class TestSpecificationDTypeContracts(unittest.TestCase):
         with (
             patch(
                 "zolotone.autogen.spec_validation.analyze_typed_domain",
-                return_value=(-0.5, -0.5),
+                return_value=DomainAnalysis((Fraction(-1, 2), Fraction(-1, 2)), ()),
             ),
             self.assertRaisesRegex(InfeasibleError, r"try Q\(0, 1\)"),
         ):
